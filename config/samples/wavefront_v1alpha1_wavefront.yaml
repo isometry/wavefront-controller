@@ -1,0 +1,9 @@
+apiVersion: wavefront.as-code.io/v1alpha1
+kind: Wavefront
+metadata:
+  labels:
+    app.kubernetes.io/name: wavefront-controller
+    app.kubernetes.io/managed-by: kustomize
+  name: wavefront-sample
+spec:
+  # TODO(user): Add fields here
