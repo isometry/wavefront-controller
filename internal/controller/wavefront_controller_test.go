@@ -25,23 +25,20 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-
 	wavefrontv1alpha1 "github.com/isometry/wavefront-controller/api/v1alpha1"
 )
 
 var _ = Describe("Wavefront Controller", func() {
 	Context("When reconciling a resource", func() {
 		const (
-			resourceName      = "test-resource"
-			resourceNamespace = "default"
+			resourceName = "test-resource"
 		)
 
 		ctx := context.Background()
 
+		// Wavefront is cluster-scoped: no namespace on the lookup key.
 		typeNamespacedName := types.NamespacedName{
-			Name:      resourceName,
-			Namespace: resourceNamespace,
+			Name: resourceName,
 		}
 		wavefront := &wavefrontv1alpha1.Wavefront{}
 
@@ -49,13 +46,7 @@ var _ = Describe("Wavefront Controller", func() {
 			By("creating the custom resource for the Kind Wavefront")
 			err := k8sClient.Get(ctx, typeNamespacedName, wavefront)
 			if err != nil && errors.IsNotFound(err) {
-				resource := &wavefrontv1alpha1.Wavefront{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      resourceName,
-						Namespace: resourceNamespace,
-					},
-					// TODO(user): Specify other spec details if needed.
-				}
+				resource := validWavefront(resourceName)
 				Expect(k8sClient.Create(ctx, resource)).To(Succeed())
 			}
 		})

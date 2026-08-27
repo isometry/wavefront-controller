@@ -14,7 +14,20 @@ spec:
     singular: wavefront
   scope: Cluster
   versions:
-  - name: v1alpha1
+  - additionalPrinterColumns:
+    - jsonPath: .spec.mode
+      name: Mode
+      type: string
+    - jsonPath: .status.phase
+      name: Phase
+      type: string
+    - jsonPath: .status.nodes.pending
+      name: Pending
+      type: integer
+    - jsonPath: .status.conditions[?(@.type=="Ready")].status
+      name: Ready
+      type: string
+    name: v1alpha1
     schema:
       openAPIV3Schema:
         description: Wavefront is the Schema for the wavefronts API
@@ -39,25 +52,157 @@ spec:
           spec:
             description: spec defines the desired state of Wavefront
             properties:
-              foo:
-                description: foo is an example field of Wavefront. Edit wavefront_types.go
-                  to remove/update
+              mode:
+                default: Shadow
+                description: Mode controls whether admissions are executed or only
+                  reported.
+                enum:
+                - Shadow
+                - Enforce
                 type: string
+              nodes:
+                properties:
+                  kinds:
+                    description: Kinds of node resources to graph. v1alpha1 supports
+                      only Kustomization.
+                    items:
+                      type: string
+                    maxItems: 1
+                    minItems: 1
+                    type: array
+                    x-kubernetes-validations:
+                    - message: only Kustomization nodes are supported
+                      rule: self.all(k, k == 'Kustomization')
+                  selector:
+                    description: Selector matches graph-member node resources across
+                      all namespaces.
+                    properties:
+                      matchExpressions:
+                        description: matchExpressions is a list of label selector
+                          requirements. The requirements are ANDed.
+                        items:
+                          description: |-
+                            A label selector requirement is a selector that contains values, a key, and an operator that
+                            relates the key and values.
+                          properties:
+                            key:
+                              description: key is the label key that the selector
+                                applies to.
+                              type: string
+                            operator:
+                              description: |-
+                                operator represents a key's relationship to a set of values.
+                                Valid operators are In, NotIn, Exists and DoesNotExist.
+                              type: string
+                            values:
+                              description: |-
+                                values is an array of string values. If the operator is In or NotIn,
+                                the values array must be non-empty. If the operator is Exists or DoesNotExist,
+                                the values array must be empty. This array is replaced during a strategic
+                                merge patch.
+                              items:
+                                type: string
+                              type: array
+                              x-kubernetes-list-type: atomic
+                          required:
+                          - key
+                          - operator
+                          type: object
+                        type: array
+                        x-kubernetes-list-type: atomic
+                      matchLabels:
+                        additionalProperties:
+                          type: string
+                        description: |-
+                          matchLabels is a map of {key,value} pairs. A single {key,value} in the matchLabels
+                          map is equivalent to an element of matchExpressions, whose key field is "key", the
+                          operator is "In", and the values array contains only "value". The requirements are ANDed.
+                        type: object
+                    type: object
+                    x-kubernetes-map-type: atomic
+                required:
+                - kinds
+                - selector
+                type: object
+              poll:
+                default: {}
+                properties:
+                  interval:
+                    default: 90s
+                    description: Interval between ref-advertisement polling sweeps.
+                    type: string
+                  perHostConcurrency:
+                    default: 4
+                    description: PerHostConcurrency bounds concurrent ref listings
+                      per git host.
+                    minimum: 1
+                    type: integer
+                type: object
+              suspend:
+                description: Suspend freezes all pin writes; detection and status
+                  continue.
+                type: boolean
+            required:
+            - nodes
             type: object
           status:
             description: status defines the observed state of Wavefront
             properties:
-              conditions:
+              blocked:
                 description: |-
-                  conditions represent the current state of the Wavefront resource.
-                  Each condition has a unique type and reflects the status of a specific aspect of the resource.
-
-                  Standard condition types include:
-                  - "Available": the resource is fully functional
-                  - "Progressing": the resource is being created or updated
-                  - "Degraded": the resource failed to reach or maintain its desired state
-
-                  The status of each condition is one of True, False, or Unknown.
+                  Blocked and Held are capped exceptional-state lists (see StatusListCap);
+                  the counts in Nodes are authoritative.
+                items:
+                  properties:
+                    ancestor:
+                      description: |-
+                        NodeReference identifies a graph node. Typed {kind, namespace, name} from
+                        day one so HelmRelease nodes are a non-breaking addition (DESIGN D12).
+                      properties:
+                        kind:
+                          enum:
+                          - Kustomization
+                          type: string
+                        name:
+                          type: string
+                        namespace:
+                          type: string
+                      required:
+                      - kind
+                      - name
+                      - namespace
+                      type: object
+                    node:
+                      description: |-
+                        NodeReference identifies a graph node. Typed {kind, namespace, name} from
+                        day one so HelmRelease nodes are a non-breaking addition (DESIGN D12).
+                      properties:
+                        kind:
+                          enum:
+                          - Kustomization
+                          type: string
+                        name:
+                          type: string
+                        namespace:
+                          type: string
+                      required:
+                      - kind
+                      - name
+                      - namespace
+                      type: object
+                    reason:
+                      type: string
+                    since:
+                      format: date-time
+                      type: string
+                  required:
+                  - node
+                  - reason
+                  - since
+                  type: object
+                type: array
+                x-kubernetes-list-type: atomic
+              conditions:
                 items:
                   description: Condition contains details for one aspect of the current
                     state of this API Resource.
@@ -116,6 +261,73 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              held:
+                items:
+                  properties:
+                    manager:
+                      type: string
+                    node:
+                      description: |-
+                        NodeReference identifies a graph node. Typed {kind, namespace, name} from
+                        day one so HelmRelease nodes are a non-breaking addition (DESIGN D12).
+                      properties:
+                        kind:
+                          enum:
+                          - Kustomization
+                          type: string
+                        name:
+                          type: string
+                        namespace:
+                          type: string
+                      required:
+                      - kind
+                      - name
+                      - namespace
+                      type: object
+                    source:
+                      type: string
+                  required:
+                  - manager
+                  - node
+                  - source
+                  type: object
+                type: array
+                x-kubernetes-list-type: atomic
+              nodes:
+                properties:
+                  blocked:
+                    type: integer
+                  converging:
+                    type: integer
+                  gates:
+                    type: integer
+                  held:
+                    type: integer
+                  observed:
+                    type: integer
+                  pending:
+                    type: integer
+                  pinned:
+                    type: integer
+                required:
+                - blocked
+                - converging
+                - gates
+                - held
+                - observed
+                - pending
+                - pinned
+                type: object
+              observedGeneration:
+                format: int64
+                type: integer
+              phase:
+                description: Phase summarises fleet admission state.
+                enum:
+                - Quiescent
+                - Advancing
+                - Blocked
+                type: string
             type: object
         required:
         - spec

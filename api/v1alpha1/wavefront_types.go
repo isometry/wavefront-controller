@@ -21,47 +21,119 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 )
 
-// EDIT THIS FILE!  THIS IS SCAFFOLDING FOR YOU TO OWN!
-// NOTE: json tags are required.  Any new fields you add must have json tags for the fields to be serialized.
+// Mode controls whether admissions are executed or only reported.
+// +kubebuilder:validation:Enum=Shadow;Enforce
+type Mode string
+
+const (
+	ModeShadow  Mode = "Shadow"
+	ModeEnforce Mode = "Enforce"
+)
+
+// Phase summarises fleet admission state.
+// +kubebuilder:validation:Enum=Quiescent;Advancing;Blocked
+type Phase string
+
+const (
+	PhaseQuiescent Phase = "Quiescent"
+	PhaseAdvancing Phase = "Advancing"
+	PhaseBlocked   Phase = "Blocked"
+)
+
+const (
+	ConditionReady      = "Ready"
+	ConditionGraphValid = "GraphValid"
+)
+
+// NodeReference identifies a graph node. Typed {kind, namespace, name} from
+// day one so HelmRelease nodes are a non-breaking addition (DESIGN D12).
+type NodeReference struct {
+	// +kubebuilder:validation:Enum=Kustomization
+	Kind      string `json:"kind"`
+	Namespace string `json:"namespace"`
+	Name      string `json:"name"`
+}
+
+type NodesSpec struct {
+	// Kinds of node resources to graph. v1alpha1 supports only Kustomization.
+	// +kubebuilder:validation:MinItems=1
+	// +kubebuilder:validation:MaxItems=1
+	// +kubebuilder:validation:XValidation:rule="self.all(k, k == 'Kustomization')",message="only Kustomization nodes are supported"
+	Kinds []string `json:"kinds"`
+	// Selector matches graph-member node resources across all namespaces.
+	Selector metav1.LabelSelector `json:"selector"`
+}
+
+type PollSpec struct {
+	// Interval between ref-advertisement polling sweeps.
+	// +kubebuilder:default="90s"
+	Interval metav1.Duration `json:"interval,omitempty"`
+	// PerHostConcurrency bounds concurrent ref listings per git host.
+	// +kubebuilder:default=4
+	// +kubebuilder:validation:Minimum=1
+	PerHostConcurrency int `json:"perHostConcurrency,omitempty"`
+}
 
 // WavefrontSpec defines the desired state of Wavefront
 type WavefrontSpec struct {
-	// INSERT ADDITIONAL SPEC FIELDS - desired state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
-	// The following markers will use OpenAPI v3 schema to validate the value
-	// More info: https://book.kubebuilder.io/reference/markers/crd-validation.html
+	Nodes NodesSpec `json:"nodes"`
+	// +kubebuilder:default=Shadow
+	Mode Mode `json:"mode,omitempty"`
+	// Suspend freezes all pin writes; detection and status continue.
+	Suspend bool `json:"suspend,omitempty"`
+	// +kubebuilder:default={}
+	Poll PollSpec `json:"poll,omitempty"`
+}
 
-	// foo is an example field of Wavefront. Edit wavefront_types.go to remove/update
-	// +optional
-	Foo *string `json:"foo,omitempty"`
+type NodeCounts struct {
+	Observed   int `json:"observed"`
+	Pinned     int `json:"pinned"`
+	Gates      int `json:"gates"`
+	Pending    int `json:"pending"`
+	Converging int `json:"converging"`
+	Blocked    int `json:"blocked"`
+	Held       int `json:"held"`
+}
+
+type BlockedNode struct {
+	Node     NodeReference  `json:"node"`
+	Since    metav1.Time    `json:"since"`
+	Reason   string         `json:"reason"`
+	Ancestor *NodeReference `json:"ancestor,omitempty"`
+}
+
+type HeldNode struct {
+	Node    NodeReference `json:"node"`
+	Source  string        `json:"source"` // "<namespace>/<name>" of the GitRepository
+	Manager string        `json:"manager"`
 }
 
 // WavefrontStatus defines the observed state of Wavefront.
 type WavefrontStatus struct {
-	// INSERT ADDITIONAL STATUS FIELD - define observed state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
-
-	// For Kubernetes API conventions, see:
-	// https://github.com/kubernetes/community/blob/master/contributors/devel/sig-architecture/api-conventions.md#typical-status-properties
-
-	// conditions represent the current state of the Wavefront resource.
-	// Each condition has a unique type and reflects the status of a specific aspect of the resource.
-	//
-	// Standard condition types include:
-	// - "Available": the resource is fully functional
-	// - "Progressing": the resource is being created or updated
-	// - "Degraded": the resource failed to reach or maintain its desired state
-	//
-	// The status of each condition is one of True, False, or Unknown.
+	Phase Phase      `json:"phase,omitempty"`
+	Nodes NodeCounts `json:"nodes,omitempty"`
+	// Blocked and Held are capped exceptional-state lists (see StatusListCap);
+	// the counts in Nodes are authoritative.
+	// +listType=atomic
+	Blocked []BlockedNode `json:"blocked,omitempty"`
+	// +listType=atomic
+	Held []HeldNode `json:"held,omitempty"`
 	// +listType=map
 	// +listMapKey=type
-	// +optional
-	Conditions []metav1.Condition `json:"conditions,omitempty"`
+	Conditions         []metav1.Condition `json:"conditions,omitempty"`
+	ObservedGeneration int64              `json:"observedGeneration,omitempty"`
 }
 
+// StatusListCap bounds the Blocked and Held status lists (DESIGN §4.1).
+const StatusListCap = 20
+
 // +kubebuilder:object:root=true
-// +kubebuilder:subresource:status
 // +kubebuilder:resource:scope=Cluster
+// +kubebuilder:subresource:status
+// +kubebuilder:printcolumn:name="Mode",type=string,JSONPath=`.spec.mode`
+// +kubebuilder:printcolumn:name="Phase",type=string,JSONPath=`.status.phase`
+// +kubebuilder:printcolumn:name="Pending",type=integer,JSONPath=`.status.nodes.pending`
+// +kubebuilder:printcolumn:name="Ready",type=string,JSONPath=`.status.conditions[?(@.type=="Ready")].status`
 
 // Wavefront is the Schema for the wavefronts API
 type Wavefront struct {
@@ -78,6 +150,16 @@ type Wavefront struct {
 	// status defines the observed state of Wavefront
 	// +optional
 	Status WavefrontStatus `json:"status,omitzero"`
+}
+
+// GetConditions returns the status conditions, satisfying fluxcd/pkg/runtime/conditions.Getter.
+func (in *Wavefront) GetConditions() []metav1.Condition {
+	return in.Status.Conditions
+}
+
+// SetConditions sets the status conditions, satisfying fluxcd/pkg/runtime/conditions.Setter.
+func (in *Wavefront) SetConditions(conditions []metav1.Condition) {
+	in.Status.Conditions = conditions
 }
 
 // +kubebuilder:object:root=true
