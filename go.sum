@@ -46,6 +46,8 @@ github.com/evanphx/json-patch/v5 v5.9.11 h1:/8HVnzMq13/3x9TPvjG08wUGqBTmZBsCWzjT
 github.com/evanphx/json-patch/v5 v5.9.11/go.mod h1:3j+LviiESTElxA4p3EMKAB9HXj3/XEtnUf6OZxqIQTM=
 github.com/felixge/httpsnoop v1.0.4 h1:NFTV2Zj1bL4mc9sqWACXbQFVBBg2W3GPvqp8/ESS2Wg=
 github.com/felixge/httpsnoop v1.0.4/go.mod h1:m8KPJKqk1gH5J9DgRY2ASl2lWCfGKXixSwevea8zH2U=
+github.com/fluxcd/gitkit v0.6.0 h1:iNg5LTx6ePo+Pl0ZwqHTAkhbUHxGVSY3YCxCdw7VIFg=
+github.com/fluxcd/gitkit v0.6.0/go.mod h1:svOHuKi0fO9HoawdK4HfHAJJseZDHHjk7I3ihnCIqNo=
 github.com/fluxcd/kustomize-controller/api v1.9.4 h1:3Hf5322qL5G9Sb6m3oTcv4xQo9xDIi8vLOFQQvW8Jug=
 github.com/fluxcd/kustomize-controller/api v1.9.4/go.mod h1:utxc483AZDArFeBW5XeD/wiD0+E1oQbPi3b/TZc+v10=
 github.com/fluxcd/pkg/apis/acl v0.10.0 h1:KPfAmELNvtvaz8wixnm/MYXqa+MJf7ntVVMUU93Aenk=
@@ -56,8 +58,14 @@ github.com/fluxcd/pkg/apis/meta v1.31.0 h1:5niQvTirK0wTE0TfRjnUSdmu6GTSbAFzrdnov
 github.com/fluxcd/pkg/apis/meta v1.31.0/go.mod h1:Gx+YRq26a+mTbCjotSXC7/6kSSyo0zXQ8JnsEXf2vVk=
 github.com/fluxcd/pkg/git v0.52.0 h1:dgsliHdaLADUcDO4pI0pc11N4dZ21NfDdhNcgRNuAkM=
 github.com/fluxcd/pkg/git v0.52.0/go.mod h1:mOvFDxoiuz+Mm4Ux1wKeTTckvBgZFvbTK8lNxmVHzKs=
+github.com/fluxcd/pkg/gittestserver v0.29.0 h1:2j03zKVL6iVn6oiUuecG/O/3Q1pULWM9JrF/HSjkpnc=
+github.com/fluxcd/pkg/gittestserver v0.29.0/go.mod h1:O8151jV0ppBZTb9IUXMjxh6hZpkiuLq8JQHDBPOkZFw=
 github.com/fluxcd/pkg/runtime v0.111.0 h1:nbmFuYstyN2a1SDW0SZU5dG9+9x+yDP4A39kKQKjj2A=
 github.com/fluxcd/pkg/runtime v0.111.0/go.mod h1:YUljTAXVaeWG+GLnXNZopFFMZstUoTxJs7+vl91OV58=
+github.com/fluxcd/pkg/ssh v0.25.0 h1:4Y9WmuNqyKvH759UznU5DGHRcOuoJ/dQM6sbsaDZYYM=
+github.com/fluxcd/pkg/ssh v0.25.0/go.mod h1:Fli2Ogu4uaIVGbCy+r0vvZlMO0RfuInyNY1q2FVIx0o=
+github.com/fluxcd/pkg/version v0.16.0 h1:VR9+143LAwbyUSAaMhiJHbfsiU+fTjA9L/3dr1ucfrI=
+github.com/fluxcd/pkg/version v0.16.0/go.mod h1:2M/l90CmbDaD21JTh77hjwaUbd/YM96+Fo8x4fMdxLI=
 github.com/fluxcd/source-controller/api v1.9.4 h1:ZGV510DIWVh2QO1ppdME13J0bm/SMoshfJ+Fx/zScOY=
 github.com/fluxcd/source-controller/api v1.9.4/go.mod h1:qO98L20gw0MvLpSPapJKypyxHP7PejmJN5KxWXxDjCA=
 github.com/fsnotify/fsnotify v1.9.0 h1:2Ml+OJNzbYCTzsxtv8vKSFD9PbJjmhYF14k/jKC7S9k=
@@ -78,8 +86,8 @@ github.com/go-git/go-billy/v5 v5.9.0 h1:jItGXszUDRtR/AlferWPTMN4j38BQ88XnXKbilmm
 github.com/go-git/go-billy/v5 v5.9.0/go.mod h1:jCnQMLj9eUgGU7+ludSTYoZL/GGmii14RxKFj7ROgHw=
 github.com/go-git/go-git-fixtures/v4 v4.3.2-0.20231010084843-55a94097c399 h1:eMje31YglSBqCdIqdhKBW8lokaMrL3uTkpGYlE2OOT4=
 github.com/go-git/go-git-fixtures/v4 v4.3.2-0.20231010084843-55a94097c399/go.mod h1:1OCfN199q1Jm3HZlxleg+Dw/mwps2Wbk9frAWm+4FII=
-github.com/go-git/go-git/v5 v5.19.1 h1:nX27AnaU43/K5bKktKwgBmR9lawoYVe1Ckg0rgzzN00=
-github.com/go-git/go-git/v5 v5.19.1/go.mod h1:Pb1v0c7/g8aGQJwx9Us09W85yGoyvSwuhEGMH7zjDKQ=
+github.com/go-git/go-git/v5 v5.19.2 h1:wkfn7vOlUBu8ivAWKBWisTiwJK4jYHzTF8Ndv1LyGqY=
+github.com/go-git/go-git/v5 v5.19.2/go.mod h1:QqCBE1EFN5ddFmrliLQ3/ntRCUjZU3EJuwuB/jWEHjk=
 github.com/go-logr/logr v1.2.2/go.mod h1:jdQByPbusPIv2/zmleS9BjJVeZ6kBagPoEUsqbVz/1A=
 github.com/go-logr/logr v1.4.3 h1:CjnDlHq8ikf6E492q6eKboGOC0T8CDaOvkHCIg8idEI=
 github.com/go-logr/logr v1.4.3/go.mod h1:9T104GzyrTigFIr8wt5mBrctHMim0Nb2HLGrmQ40KvY=
@@ -125,6 +133,8 @@ github.com/go-task/slim-sprig/v3 v3.0.0 h1:sUs3vkvUymDpBKi3qH1YSqBQk9+9D/8M2mN1v
 github.com/go-task/slim-sprig/v3 v3.0.0/go.mod h1:W848ghGpv3Qj3dhTPRyJypKRiqCdHZiAzKg9hl15HA8=
 github.com/goccy/go-yaml v1.18.0 h1:8W7wMFS12Pcas7KU+VVkaiCng+kG8QiFeFwzFb+rwuw=
 github.com/goccy/go-yaml v1.18.0/go.mod h1:XBurs7gK8ATbW4ZPGKgcbrY1Br56PdM69F7LkFRi1kA=
+github.com/gofrs/uuid v4.2.0+incompatible h1:yyYWMnhkhrKwwr8gAOcOCYxOOscHgDS9yZgBrnJfGa0=
+github.com/gofrs/uuid v4.2.0+incompatible/go.mod h1:b2aQJv3Z4Fp6yNu3cdSllBxTCLRxnplIgP/c0N/04lM=
 github.com/golang/groupcache v0.0.0-20241129210726-2c02b8208cf8 h1:f+oWsMOmNPc8JmEHVZIycC7hBoQxHH9pNKQORJNozsQ=
 github.com/golang/groupcache v0.0.0-20241129210726-2c02b8208cf8/go.mod h1:wcDNUvekVysuuOpQKo3191zZyTpiI6se1N1ULghS0sw=
 github.com/golang/protobuf v1.5.4 h1:i7eJL8qZTpSEXOPTxNKhASYpMn+8e5Q6AdndVa1dWek=
