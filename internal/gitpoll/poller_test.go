@@ -845,6 +845,178 @@ func TestPollerConfigureClampsNonPositiveValues(t *testing.T) {
 	})
 }
 
+// TestPollerObservationsNeverMixSweeps is the coherence contract that makes
+// strict ordering for co-arriving changes structural rather than probabilistic
+// (DESIGN §3.3). Two repositories receive new commits at the same moment, but
+// their listings complete far apart. Every snapshot taken in between must be
+// entirely the old sweep or entirely the new one: a mixture would present the
+// slow repository at its previous SHA — equal to its pin, and therefore
+// apparently settled — while the fast one already shows a pending revision,
+// which is exactly how a descendant gets admitted ahead of its ancestor.
+func TestPollerObservationsNeverMixSweeps(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		alpha, beta := source("alpha"), source("beta")
+
+		lister := newFakeLister()
+		lister.setAdvertised(alphaURL, map[string]string{trackedRef: shaA})
+		lister.setAdvertised(betaURL, map[string]string{trackedRef: shaA})
+
+		p := gitpoll.NewPoller(newFakeSecrets(), lister, func() {}, nil)
+		p.Configure(10*time.Second, 4)
+		p.SetTargets([]gitpoll.Target{target("alpha", alphaURL), target("beta", betaURL)})
+
+		stop := runPoller(t, p)
+		defer stop()
+
+		time.Sleep(10 * time.Second)
+		synctest.Wait()
+
+		snapshot := p.Observations()
+		if snapshot[alpha].SHA != shaA || snapshot[beta].SHA != shaA {
+			t.Fatalf("after the first sweep = alpha %q / beta %q, want both %q",
+				snapshot[alpha].SHA, snapshot[beta].SHA, shaA)
+		}
+
+		// Co-arriving commits, with beta's listing held open so that alpha's
+		// result is complete long before beta's.
+		lister.setAdvertised(alphaURL, map[string]string{trackedRef: shaB})
+		lister.setAdvertised(betaURL, map[string]string{trackedRef: shaB})
+		gate := lister.gate(betaURL)
+
+		time.Sleep(10 * time.Second)
+		synctest.Wait()
+
+		if got := lister.callCount(alphaURL); got != 2 {
+			t.Fatalf("alpha listings = %d, want the second sweep to have listed it", got)
+		}
+
+		snapshot = p.Observations()
+		if snapshot[alpha].SHA != shaA || snapshot[beta].SHA != shaA {
+			t.Errorf("mid-sweep snapshot = alpha %q / beta %q, want both still %q: "+
+				"a snapshot must never mix one sweep's results with another's",
+				snapshot[alpha].SHA, snapshot[beta].SHA, shaA)
+		}
+
+		close(gate)
+		synctest.Wait()
+
+		snapshot = p.Observations()
+		if snapshot[alpha].SHA != shaB || snapshot[beta].SHA != shaB {
+			t.Errorf("after the sweep completed = alpha %q / beta %q, want both %q",
+				snapshot[alpha].SHA, snapshot[beta].SHA, shaB)
+		}
+	})
+}
+
+// TestPollerObservationsSnapshotIsIndependent covers the other half of the
+// contract: the returned map is the caller's own, and taking one concurrently
+// with live sweeps is safe (exercised under -race).
+func TestPollerObservationsSnapshotIsIndependent(t *testing.T) {
+	lister := newFakeLister()
+	lister.setAdvertised(alphaURL, map[string]string{trackedRef: shaA})
+	lister.setAdvertised(betaURL, map[string]string{trackedRef: shaB})
+
+	p := gitpoll.NewPoller(newFakeSecrets(), lister, func() {}, nil)
+	p.Configure(time.Millisecond, 4)
+	p.SetTargets([]gitpoll.Target{target("alpha", alphaURL), target("beta", betaURL)})
+
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan error, 1)
+	go func() { done <- p.Start(ctx) }()
+
+	var readers sync.WaitGroup
+	deadline := time.Now().Add(250 * time.Millisecond)
+	for range 4 {
+		readers.Go(func() {
+			for time.Now().Before(deadline) {
+				// Mutating the snapshot must not corrupt the poller's store.
+				snapshot := p.Observations()
+				snapshot[source("alpha")] = gitpoll.Observation{SHA: "mutated"}
+				delete(snapshot, source("beta"))
+			}
+		})
+	}
+	readers.Wait()
+
+	cancel()
+	if err := <-done; err != nil {
+		t.Errorf("Start returned %v, want nil", err)
+	}
+
+	final := p.Observations()
+	if got := final[source("alpha")].SHA; got != shaA {
+		t.Errorf("alpha SHA = %q, want %q: the snapshot must be an independent copy", got, shaA)
+	}
+	if _, ok := final[source("beta")]; !ok {
+		t.Error("beta missing from the store: deleting from a snapshot must not delete from the poller")
+	}
+}
+
+// TestPollerConfigureAppliesWithoutWaitingOutTheOldInterval: the reconciler
+// re-Configures whenever the fleet's merged cadence changes, and a shortened
+// interval has to take effect now. Waiting for the outgoing interval to elapse
+// first would let a single 90s Wavefront stall a 30s one's observations for a
+// full 90s — the exact stall the merged cadence exists to prevent.
+func TestPollerConfigureAppliesWithoutWaitingOutTheOldInterval(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		lister := newFakeLister()
+		lister.setAdvertised(alphaURL, map[string]string{trackedRef: shaA})
+
+		p := gitpoll.NewPoller(newFakeSecrets(), lister, func() {}, nil)
+		p.Configure(90*time.Second, 4)
+		p.SetTargets([]gitpoll.Target{target("alpha", alphaURL)})
+
+		stop := runPoller(t, p)
+		defer stop()
+
+		time.Sleep(time.Second)
+		synctest.Wait()
+		if got := lister.callCount(alphaURL); got != 0 {
+			t.Fatalf("listings one second in = %d, want 0 on a 90s cadence", got)
+		}
+
+		// A faster Wavefront joins the fleet.
+		p.Configure(10*time.Second, 4)
+
+		time.Sleep(11 * time.Second)
+		synctest.Wait()
+		if got := lister.callCount(alphaURL); got != 1 {
+			t.Errorf("listings %v after shortening the interval to 10s = %d, want 1: "+
+				"a cadence change must not wait out the old interval", 12*time.Second, got)
+		}
+	})
+}
+
+// TestPollerRepeatedConfigureDoesNotStarveSweeps: the reconciler calls
+// Configure on every pass. Re-arming the wait each time would postpone sweeps
+// for ever, so an unchanged cadence must be a no-op and a changed one must
+// still measure from the last sweep.
+func TestPollerRepeatedConfigureDoesNotStarveSweeps(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		lister := newFakeLister()
+		lister.setAdvertised(alphaURL, map[string]string{trackedRef: shaA})
+
+		p := gitpoll.NewPoller(newFakeSecrets(), lister, func() {}, nil)
+		p.Configure(10*time.Second, 4)
+		p.SetTargets([]gitpoll.Target{target("alpha", alphaURL)})
+
+		stop := runPoller(t, p)
+		defer stop()
+
+		// Reconciles land far more often than sweeps do.
+		for range 20 {
+			time.Sleep(time.Second)
+			p.Configure(10*time.Second, 4)
+		}
+		synctest.Wait()
+
+		if got := lister.callCount(alphaURL); got != 2 {
+			t.Errorf("listings over 20s of repeated Configure = %d, want 2: "+
+				"an unchanged cadence must not re-arm the wait", got)
+		}
+	})
+}
+
 func TestPollerStartBlocksUntilContextDone(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		p := gitpoll.NewPoller(newFakeSecrets(), newFakeLister(), func() {}, nil)

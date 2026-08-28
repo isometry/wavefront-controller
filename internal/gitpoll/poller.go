@@ -73,6 +73,12 @@ type Poller struct {
 	// failures is nil when no Registerer was supplied.
 	failures *prometheus.CounterVec
 
+	// reconfigured wakes a waiting Start when the sweep cadence changes, so a
+	// shortened interval applies now rather than after the old one elapses.
+	// Buffered and signalled without blocking: a pending wake is as good as
+	// two, and Configure must never wait on the sweep loop.
+	reconfigured chan struct{}
+
 	mu                 sync.RWMutex
 	interval           time.Duration
 	perHostConcurrency int
@@ -106,6 +112,14 @@ type record struct {
 	obs Observation
 }
 
+// result is one completed listing, held until the whole sweep publishes.
+type result struct {
+	target Target
+	sha    string
+	at     time.Time
+	err    error
+}
+
 var _ manager.Runnable = (*Poller)(nil)
 
 // NewPoller returns a Poller with the CRD's default cadence, ready for
@@ -120,6 +134,7 @@ func NewPoller(secrets client.Reader, lister Lister, notify func(), reg promethe
 		failures:           registerFailureCounter(reg),
 		interval:           DefaultInterval,
 		perHostConcurrency: DefaultPerHostConcurrency,
+		reconfigured:       make(chan struct{}, 1),
 		live:               map[types.NamespacedName]targetRef{},
 		observations:       map[types.NamespacedName]record{},
 	}
@@ -163,8 +178,20 @@ func (p *Poller) Configure(interval time.Duration, perHostConcurrency int) {
 	}
 
 	p.mu.Lock()
-	defer p.mu.Unlock()
+	changed := p.interval != interval
 	p.interval, p.perHostConcurrency = interval, perHostConcurrency
+	p.mu.Unlock()
+
+	// Only an actual change wakes the sweep loop. Configure is called on every
+	// reconcile, so signalling unconditionally would re-arm the timer faster
+	// than it could ever expire and no sweep would run at all.
+	if !changed {
+		return
+	}
+	select {
+	case p.reconfigured <- struct{}{}:
+	default:
+	}
 }
 
 // SetTargets replaces the poll set (the reconciler calls this). An observation
@@ -197,24 +224,54 @@ func (p *Poller) Observation(src types.NamespacedName) (Observation, bool) {
 	return rec.obs, ok
 }
 
+// Observations returns a coherent point-in-time snapshot of every current
+// observation: an independent copy of the whole store, taken under a single
+// read lock.
+//
+// Coherence across sources is the contract, not an implementation detail. A
+// sweep publishes all of its results at once (see publish), so a snapshot
+// always reflects exactly one sweep — never a mixture of two. Callers that
+// compare sources against one another depend on this: under the rolling
+// admission rule a descendant is admitted when its ancestors are *settled*,
+// and an ancestor whose observation lagged a sweep behind would look settled
+// when it is not, mis-sequencing co-arriving changes (DESIGN §3.3). Reading
+// source by source with Observation cannot provide that guarantee.
+func (p *Poller) Observations() map[types.NamespacedName]Observation {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+
+	observations := make(map[types.NamespacedName]Observation, len(p.observations))
+	for src, rec := range p.observations {
+		observations[src] = rec.obs
+	}
+	return observations
+}
+
 // Start blocks until ctx is done, sweeping every configured interval. It
 // implements manager.Runnable.
+//
+// Each wait is computed as a deadline from the last sweep rather than from a
+// fixed ticker, so a Configure that shortens the interval takes effect
+// immediately instead of after the old — possibly far longer — interval
+// elapses. Anchoring on the last sweep is also what keeps repeated
+// reconfiguration from starving sweeps entirely: the deadline moves only with
+// the interval, never with the number of times it is set.
 func (p *Poller) Start(ctx context.Context) error {
-	interval := p.sweepInterval()
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
+	last := time.Now()
 
 	for {
+		timer := time.NewTimer(max(0, time.Until(last.Add(p.sweepInterval()))))
+
 		select {
 		case <-ctx.Done():
+			timer.Stop()
 			return nil
-		case <-ticker.C:
+		case <-p.reconfigured:
+			// Re-arm against the new cadence.
+			timer.Stop()
+		case <-timer.C:
 			p.sweep(ctx)
-			// The reconciler may have re-Configured us mid-sweep.
-			if current := p.sweepInterval(); current != interval {
-				interval = current
-				ticker.Reset(interval)
-			}
+			last = time.Now()
 		}
 	}
 }
@@ -227,7 +284,13 @@ func (p *Poller) sweepInterval() time.Duration {
 }
 
 // sweep lists every target once, batched per git host with bounded per-host
-// concurrency, then notifies exactly once (the reconciler coalesces).
+// concurrency, publishes all results at once, then notifies exactly once (the
+// reconciler coalesces).
+//
+// Results are collected rather than stored as they land: listings finish at
+// wildly different times, and storing them one by one would leave the store in
+// a mixture of this sweep and the last for the whole duration of the sweep —
+// exactly the incoherence Observations promises callers is impossible.
 func (p *Poller) sweep(ctx context.Context) {
 	p.mu.RLock()
 	targets := slices.Clone(p.targets)
@@ -240,13 +303,18 @@ func (p *Poller) sweep(ctx context.Context) {
 		byHost[host] = append(byHost[host], t)
 	}
 
+	results := make(chan result, len(targets))
+
 	var hosts sync.WaitGroup
 	for host, hostTargets := range byHost {
 		hosts.Go(func() {
-			p.sweepHost(ctx, host, hostTargets, perHost)
+			p.sweepHost(ctx, host, hostTargets, perHost, results)
 		})
 	}
 	hosts.Wait()
+	close(results)
+
+	p.publish(results)
 
 	if p.notify != nil {
 		p.notify()
@@ -254,7 +322,7 @@ func (p *Poller) sweep(ctx context.Context) {
 }
 
 // sweepHost polls one host's targets, at most perHost at a time.
-func (p *Poller) sweepHost(ctx context.Context, host string, targets []Target, perHost int) {
+func (p *Poller) sweepHost(ctx context.Context, host string, targets []Target, perHost int, results chan<- result) {
 	semaphore := make(chan struct{}, perHost)
 
 	var wg sync.WaitGroup
@@ -267,23 +335,52 @@ func (p *Poller) sweepHost(ctx context.Context, host string, targets []Target, p
 				return
 			}
 
-			p.poll(ctx, host, t)
+			p.poll(ctx, host, t, results)
 		})
 	}
 	wg.Wait()
 }
 
-// poll performs one target's listing and folds the result into the store.
-func (p *Poller) poll(ctx context.Context, host string, t Target) {
+// poll performs one target's listing and queues the outcome for publication.
+func (p *Poller) poll(ctx context.Context, host string, t Target, results chan<- result) {
 	sha, err := p.observe(ctx, t)
-	now := time.Now()
-
 	if err != nil {
-		p.recordFailure(t, now, err)
 		p.countFailure(host)
-		return
 	}
-	p.recordSuccess(t, sha, now)
+	results <- result{target: t, sha: sha, at: time.Now(), err: err}
+}
+
+// publish folds a whole sweep's results into the store in one locked
+// mutation, so the store only ever steps from one sweep to the next.
+//
+// Staleness is judged here rather than at listing time: a SetTargets that
+// repointed a source while its listing was in flight must still discard the
+// result, and by publication time the live plumbing is as current as it gets.
+func (p *Poller) publish(results <-chan result) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	for res := range results {
+		if !p.current(res.target) {
+			continue
+		}
+
+		rec := p.observations[res.target.Source]
+		rec.ref = targetRefOf(res.target)
+
+		if res.err != nil {
+			// Never clear the last good SHA: a frozen-at-known-good
+			// observation is the fail-closed behaviour (DESIGN D4).
+			rec.obs.ObservedAt, rec.obs.Err = res.at, res.err
+		} else {
+			if rec.obs.SHA != res.sha {
+				rec.obs.FirstObserved = res.at
+			}
+			rec.obs.SHA, rec.obs.ObservedAt, rec.obs.Err = res.sha, res.at, nil
+		}
+
+		p.observations[res.target.Source] = rec
+	}
 }
 
 // current reports whether t is still exactly what its source is polled with.
@@ -335,39 +432,6 @@ func (p *Poller) secretData(ctx context.Context, t Target) (map[string][]byte, e
 		return nil, fmt.Errorf("getting secret %s: %w", t.SecretRef, err)
 	}
 	return secret.Data, nil
-}
-
-func (p *Poller) recordSuccess(t Target, sha string, now time.Time) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
-	if !p.current(t) {
-		return
-	}
-
-	rec := p.observations[t.Source]
-	if rec.obs.SHA != sha {
-		rec.obs.FirstObserved = now
-	}
-	rec.ref = targetRefOf(t)
-	rec.obs.SHA, rec.obs.ObservedAt, rec.obs.Err = sha, now, nil
-	p.observations[t.Source] = rec
-}
-
-// recordFailure surfaces the error without ever clearing the last good SHA:
-// a frozen-at-known-good observation is the fail-closed behaviour (DESIGN D4).
-func (p *Poller) recordFailure(t Target, now time.Time, err error) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
-	if !p.current(t) {
-		return
-	}
-
-	rec := p.observations[t.Source]
-	rec.ref = targetRefOf(t)
-	rec.obs.ObservedAt, rec.obs.Err = now, err
-	p.observations[t.Source] = rec
 }
 
 func (p *Poller) countFailure(host string) {
