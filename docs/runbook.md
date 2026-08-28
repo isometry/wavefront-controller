@@ -208,8 +208,9 @@ Wire these before ramping past a pilot (DESIGN §9, Phase 2):
   on the `controller-manager` Deployment. If the controller is down, pins
   freeze silently — everything else below assumes the controller is at
   least trying to run.
-- **Pin staleness — `wavefront_node_pin_lag_seconds` (gauge).** Age of an
-  unadmitted observed revision per node. Alert on this growing past a
+- **Pin staleness — `wavefront_node_pin_lag_seconds{wavefront,kind,namespace,name}` (gauge).**
+  Age of an unadmitted observed revision per node, labelled with its owning
+  Wavefront. Alert on this growing past a
   threshold, and treat it as more urgent if it's growing *while liveness is
   also failing* (frozen pins + dead controller is the worst case in §10).
   Remember the [poll tuning](#poll-tuning) note above when picking a
@@ -222,8 +223,8 @@ Wire these before ramping past a pilot (DESIGN §9, Phase 2):
   cases](#known-limitations-unsupported-git-auth) (TLS-only, or a
   provider-auth scheme such as github/azure/aws apps) before assuming an
   outage.
-- **Pinned-commit fetch failures — `wavefront_pinned_fetch_failures` (gauge).**
-  source-controller reporting `FetchFailed` on a pinned commit (typically a
+- **Pinned-commit fetch failures — `wavefront_pinned_fetch_failures{wavefront}` (gauge;
+  `sum()` it for a cross-fleet total).** source-controller reporting `FetchFailed` on a pinned commit (typically a
   force-push rewriting the pinned SHA out of history, §10). Deployed state
   stays intact (source-controller keeps the last-good artifact); this is
   self-healing on the next poll once ancestors permit re-pinning, but should
@@ -233,7 +234,7 @@ Wire these before ramping past a pilot (DESIGN §9, Phase 2):
 - Also useful, not launch-blocking safety alarms per se but worth a
   dashboard: `wavefront_admissions_total{result}`,
   `wavefront_admission_wait_seconds` (the starvation signal, D13), and
-  `wavefront_blocked_nodes{reason}`.
+  `wavefront_blocked_nodes{wavefront,reason}`.
 
 ## Known limitations: unsupported git auth
 

@@ -40,18 +40,23 @@ func TestNewExpositionText(t *testing.T) {
 	instr.AdmissionsTotal.WithLabelValues("shadow").Inc()
 	instr.AdmissionsTotal.WithLabelValues("conflict").Inc()
 
-	instr.PinLagSeconds.WithLabelValues("Kustomization", "flux-system", "team-a").Set(42)
-	instr.PinLagSeconds.WithLabelValues("Kustomization", "flux-system", "team-b").Set(7)
+	instr.PinLagSeconds.WithLabelValues("fleet", "Kustomization", "flux-system", "team-a").Set(42)
+	instr.PinLagSeconds.WithLabelValues("fleet", "Kustomization", "flux-system", "team-b").Set(7)
+	// A second, co-resident Wavefront: every fleet-wide gauge is keyed by the
+	// owning Wavefront so one Wavefront's pass cannot retire another's series.
+	instr.PinLagSeconds.WithLabelValues("infra", "Kustomization", "flux-system", "team-c").Set(11)
 
 	instr.AdmissionWaitSeconds.Observe(45)
 	instr.AdmissionWaitSeconds.Observe(600)
 
-	instr.BlockedNodes.WithLabelValues("AncestorPending").Set(3)
-	instr.BlockedNodes.WithLabelValues("SelfHeld").Set(1)
+	instr.BlockedNodes.WithLabelValues("fleet", "AncestorPending").Set(3)
+	instr.BlockedNodes.WithLabelValues("fleet", "SelfHeld").Set(1)
+	instr.BlockedNodes.WithLabelValues("infra", "AncestorPending").Set(2)
 
 	instr.RefListFailures.WithLabelValues("git.example.com").Add(5)
 
-	instr.PinnedFetchFailures.Set(2)
+	instr.PinnedFetchFailures.WithLabelValues("fleet").Set(2)
+	instr.PinnedFetchFailures.WithLabelValues("infra").Set(0)
 
 	const want = `
 # HELP wavefront_admissions_total Total pin admissions, by result (admitted, initial, shadow, conflict).
@@ -60,17 +65,20 @@ wavefront_admissions_total{result="admitted"} 2
 wavefront_admissions_total{result="conflict"} 1
 wavefront_admissions_total{result="initial"} 1
 wavefront_admissions_total{result="shadow"} 1
-# HELP wavefront_blocked_nodes Number of nodes currently blocked, by reason.
+# HELP wavefront_blocked_nodes Number of nodes currently blocked, by owning Wavefront and reason; sum() over the wavefront label for a fleet total.
 # TYPE wavefront_blocked_nodes gauge
-wavefront_blocked_nodes{reason="AncestorPending"} 3
-wavefront_blocked_nodes{reason="SelfHeld"} 1
-# HELP wavefront_node_pin_lag_seconds Age in seconds of a node's currently unadmitted observed revision.
+wavefront_blocked_nodes{reason="AncestorPending",wavefront="fleet"} 3
+wavefront_blocked_nodes{reason="AncestorPending",wavefront="infra"} 2
+wavefront_blocked_nodes{reason="SelfHeld",wavefront="fleet"} 1
+# HELP wavefront_node_pin_lag_seconds Age in seconds of a node's currently unadmitted observed revision, by owning Wavefront.
 # TYPE wavefront_node_pin_lag_seconds gauge
-wavefront_node_pin_lag_seconds{kind="Kustomization",name="team-a",namespace="flux-system"} 42
-wavefront_node_pin_lag_seconds{kind="Kustomization",name="team-b",namespace="flux-system"} 7
-# HELP wavefront_pinned_fetch_failures Number of pinned sources currently reporting a fetch failure.
+wavefront_node_pin_lag_seconds{kind="Kustomization",name="team-a",namespace="flux-system",wavefront="fleet"} 42
+wavefront_node_pin_lag_seconds{kind="Kustomization",name="team-b",namespace="flux-system",wavefront="fleet"} 7
+wavefront_node_pin_lag_seconds{kind="Kustomization",name="team-c",namespace="flux-system",wavefront="infra"} 11
+# HELP wavefront_pinned_fetch_failures Number of pinned sources currently reporting a fetch failure, by owning Wavefront; sum() over the wavefront label for a fleet total.
 # TYPE wavefront_pinned_fetch_failures gauge
-wavefront_pinned_fetch_failures 2
+wavefront_pinned_fetch_failures{wavefront="fleet"} 2
+wavefront_pinned_fetch_failures{wavefront="infra"} 0
 # HELP wavefront_ref_list_failures_total Total ref-advertisement listing failures, by git host.
 # TYPE wavefront_ref_list_failures_total counter
 wavefront_ref_list_failures_total{host="git.example.com"} 5

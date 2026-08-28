@@ -23,6 +23,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -30,6 +31,7 @@ import (
 
 	wavefrontv1alpha1 "github.com/isometry/wavefront-controller/api/v1alpha1"
 	"github.com/isometry/wavefront-controller/internal/adapter"
+	"github.com/isometry/wavefront-controller/internal/engine"
 	"github.com/isometry/wavefront-controller/internal/gitpoll"
 	"github.com/isometry/wavefront-controller/internal/metrics"
 )
@@ -230,6 +232,81 @@ func TestHoldLedgerSurvivesAnAbortedPass(t *testing.T) {
 	r.holdEvents(fourth)
 	if recorded := drain(recorder.Events); len(recorded) != 1 {
 		t.Errorf("events after a wiped ledger = %v, want the re-fire this guard prevents", recorded)
+	}
+}
+
+// --- co-resident Wavefronts and the fleet gauges -----------------------------
+
+// gaugePass builds the minimum pass summariseNodes needs to publish the three
+// wholesale-recomputed gauges for one Wavefront: a pinned node with a failing
+// source, pending since pendingSince, blocked on an unhealthy ancestor.
+func gaugePass(wavefront, node string, pendingSince time.Time) *pass {
+	ref := adapter.NodeRef{Kind: kindKustomization, Namespace: fluxNamespace, Name: node}
+	return &pass{
+		wf:           &wavefrontv1alpha1.Wavefront{ObjectMeta: metav1.ObjectMeta{Name: wavefront}},
+		resolved:     true,
+		graphChecked: true,
+		graphValid:   true,
+		inputs: map[adapter.NodeRef]engine.NodeInput{
+			ref: {Ref: ref, Role: engine.RolePinned, Source: &engine.SourceState{FetchFailing: true}},
+		},
+		eval: engine.Evaluation{Nodes: map[adapter.NodeRef]engine.NodeResult{
+			ref: {
+				State:        engine.StatePending,
+				PendingSince: pendingSince,
+				Blocked:      &engine.Blocked{Reason: engine.ReasonAncestorUnhealthy},
+			},
+		}},
+	}
+}
+
+// TestFleetGaugesAreRetiredPerWavefront: the gauges are fleet-global
+// collectors recomputed wholesale on every pass, so a per-Wavefront Reset()
+// would erase a *co-resident* Wavefront's series until its own next pass —
+// and pin staleness is a D4 safety alarm that must never blink out. Every
+// series therefore carries the owning Wavefront, and a pass retires only its
+// own with DeletePartialMatch.
+func TestFleetGaugesAreRetiredPerWavefront(t *testing.T) {
+	now := time.Unix(2000, 0)
+	instr := metrics.Nop()
+	r := &WavefrontReconciler{
+		Recorder: events.NewFakeRecorder(16),
+		Clock:    func() time.Time { return now },
+		Metrics:  instr,
+	}
+
+	r.summariseNodes(gaugePass(fleetName, teamAName, now.Add(-60*time.Second)))
+	r.summariseNodes(gaugePass("infra", "team-c", now.Add(-30*time.Second)))
+
+	// "infra"'s pass must have left every one of "fleet"'s series standing.
+	lag := testutil.ToFloat64(instr.PinLagSeconds.WithLabelValues(
+		fleetName, kindKustomization, fluxNamespace, teamAName))
+	if lag != 60 {
+		t.Errorf("pin lag for %s/%s = %v, want 60: a co-resident pass erased it", fleetName, teamAName, lag)
+	}
+	blocked := testutil.ToFloat64(instr.BlockedNodes.WithLabelValues(
+		fleetName, string(engine.ReasonAncestorUnhealthy)))
+	if blocked != 1 {
+		t.Errorf("blocked nodes for %s = %v, want 1", fleetName, blocked)
+	}
+	if fetch := testutil.ToFloat64(instr.PinnedFetchFailures.WithLabelValues(fleetName)); fetch != 1 {
+		t.Errorf("pinned fetch failures for %s = %v, want 1", fleetName, fetch)
+	}
+
+	// Each Wavefront reports its own, so a fleet total is a PromQL sum().
+	if got := testutil.CollectAndCount(instr.PinLagSeconds); got != 2 {
+		t.Errorf("pin-lag series = %d, want 2 (one per co-resident Wavefront)", got)
+	}
+	if lag := testutil.ToFloat64(instr.PinLagSeconds.WithLabelValues(
+		"infra", kindKustomization, fluxNamespace, "team-c")); lag != 30 {
+		t.Errorf("pin lag for infra/team-c = %v, want 30", lag)
+	}
+
+	// Its own series it does retire: team-a drops out of the fleet, and the
+	// stale lag must not linger.
+	r.summariseNodes(gaugePass(fleetName, "team-b", now.Add(-10*time.Second)))
+	if got := testutil.CollectAndCount(instr.PinLagSeconds); got != 2 {
+		t.Errorf("pin-lag series after team-a dropped out = %d, want 2 (team-a retired, infra untouched)", got)
 	}
 }
 

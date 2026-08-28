@@ -188,11 +188,15 @@ API), attached to the `Wavefront` object:
 | Metric | Type | Labels | Meaning |
 |---|---|---|---|
 | `wavefront_admissions_total` | Counter | `result` | Admission attempts by outcome |
-| `wavefront_node_pin_lag_seconds` | Gauge | — | Age of an unadmitted observed revision per node |
+| `wavefront_node_pin_lag_seconds` | Gauge | `wavefront`, `kind`, `namespace`, `name` | Age of an unadmitted observed revision per node |
 | `wavefront_admission_wait_seconds` | Histogram | — | Observed→admitted latency; the starvation signal for the settled-ancestors rule |
-| `wavefront_blocked_nodes` | Gauge | `reason` | Currently blocked nodes |
+| `wavefront_blocked_nodes` | Gauge | `wavefront`, `reason` | Currently blocked nodes |
 | `wavefront_ref_list_failures_total` | Counter | `host` | Ref-listing failures per git host |
-| `wavefront_pinned_fetch_failures` | Gauge | — | `source-controller` reporting `FetchFailed` on a pinned commit |
+| `wavefront_pinned_fetch_failures` | Gauge | `wavefront` | `source-controller` reporting `FetchFailed` on a pinned commit |
+
+Every fleet gauge carries the owning Wavefront's name so that co-resident
+Wavefronts cannot retire each other's series: a cross-fleet total is a PromQL
+`sum()` (e.g. `sum(wavefront_pinned_fetch_failures)`).
 
 ## Shadow → Enforce rollout
 

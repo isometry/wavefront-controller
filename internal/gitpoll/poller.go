@@ -18,6 +18,7 @@ package gitpoll
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"maps"
 	"net/url"
@@ -70,8 +71,8 @@ type Poller struct {
 	strategy selection.Strategy
 
 	// failures counts ref-listing failures per host
-	// (wavefront_ref_list_failures_total, DESIGN §6); nil when no Registerer
-	// was supplied.
+	// (wavefront_ref_list_failures_total, DESIGN §6); nil when the caller
+	// supplied no counter, in which case nothing is recorded.
 	failures *prometheus.CounterVec
 
 	// reconfigured wakes a waiting Start when the sweep cadence changes, so a
@@ -321,8 +322,18 @@ func (p *Poller) sweepHost(ctx context.Context, host string, targets []Target, p
 }
 
 // poll performs one target's listing and queues the outcome for publication.
+//
+// A cancelled context is the manager shutting the poller down, not a detection
+// failure: it must neither blip wavefront_ref_list_failures_total (a §6 safety
+// alarm operators rate-alert on) nor stamp a shutdown artefact onto the
+// observation. Such a listing is discarded outright, exactly as a superseded
+// target's is in publish — it answers no question anyone is still asking, and
+// the last good observation stands untouched.
 func (p *Poller) poll(ctx context.Context, host string, t Target, results chan<- result) {
 	sha, err := p.observe(ctx, t)
+	if errors.Is(err, context.Canceled) {
+		return
+	}
 	if err != nil {
 		p.countFailure(host)
 	}

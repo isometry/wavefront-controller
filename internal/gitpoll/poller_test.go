@@ -19,6 +19,7 @@ package gitpoll_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"maps"
 	"net/url"
 	"sync"
@@ -523,6 +524,53 @@ func TestPollerFailureRetainsLastGoodSHA(t *testing.T) {
 		}
 		if recovered.SHA != shaB {
 			t.Errorf("SHA = %q, want %q after recovery", recovered.SHA, shaB)
+		}
+	})
+}
+
+// TestPollerCancelledListingIsNotAFailure: at manager shutdown every in-flight
+// listing ends in context.Canceled. That is the poller being stopped, not
+// detection breaking, so it must not blip wavefront_ref_list_failures_total —
+// operators rate-alert on that gauge (DESIGN §6) and a rolling restart would
+// otherwise page — nor stamp a shutdown artefact over a good observation.
+func TestPollerCancelledListingIsNotAFailure(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		lister := newFakeLister()
+		lister.setAdvertised(alphaURL, map[string]string{trackedRef: shaA})
+		reg := prometheus.NewRegistry()
+
+		p := gitpoll.NewPoller(newFakeSecrets(), lister, func() {}, metrics.New(reg).RefListFailures)
+		p.Configure(10*time.Second, 2)
+		p.SetTargets([]gitpoll.Target{target("alpha", alphaURL)})
+
+		stop := runPoller(t, p)
+		defer stop()
+
+		time.Sleep(10 * time.Second)
+		synctest.Wait()
+		good, ok := p.Observation(source("alpha"))
+		if !ok || good.SHA != shaA {
+			t.Fatalf("Observation = %+v, want %q observed before the shutdown", good, shaA)
+		}
+
+		// The next sweep runs into cancellation, wrapped as a real transport
+		// error would wrap it.
+		lister.setErr(alphaURL, fmt.Errorf("listing %s: %w", alphaURL, context.Canceled))
+		time.Sleep(10 * time.Second)
+		synctest.Wait()
+
+		after, ok := p.Observation(source("alpha"))
+		if !ok {
+			t.Fatal("Observation dropped by a cancelled listing")
+		}
+		if after.Err != nil {
+			t.Errorf("Err = %v, want nil: cancellation is a shutdown, not a listing failure", after.Err)
+		}
+		if after.SHA != good.SHA || !after.ObservedAt.Equal(good.ObservedAt) {
+			t.Errorf("Observation = %+v, want %+v left untouched by the discarded listing", after, good)
+		}
+		if got := failureCount(t, reg, exampleHost); got != 0 {
+			t.Errorf("%s{host=%q} = %v, want 0", failuresMetric, exampleHost, got)
 		}
 	})
 }

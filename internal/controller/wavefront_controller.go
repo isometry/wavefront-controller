@@ -35,6 +35,7 @@ import (
 	"github.com/fluxcd/pkg/git"
 	"github.com/fluxcd/pkg/runtime/conditions"
 	sourcev1 "github.com/fluxcd/source-controller/api/v1"
+	"github.com/prometheus/client_golang/prometheus"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
@@ -759,13 +760,20 @@ func (r *WavefrontReconciler) summarise(p *pass, passErr error) {
 
 // summariseNodes derives the fleet counts, exceptional-state lists and phase
 // from a completed evaluation, and recomputes the pin-lag, blocked-nodes and
-// pinned-fetch-failures gauges wholesale (DESIGN §6): Reset() then set, so a
-// node that dropped out of the fleet since the last pass does not linger.
+// pinned-fetch-failures gauges wholesale (DESIGN §6): retire this Wavefront's
+// series, then set, so a node that dropped out of the fleet since the last
+// pass does not linger.
+//
+// The retirement is DeletePartialMatch on this Wavefront's own label, never
+// Reset(): Wavefronts are cluster-scoped and several may be co-resident, and
+// a Reset would erase a *sibling's* pin-lag series until its next pass — and
+// pin staleness is a D4 safety alarm that must not blink out.
 func (r *WavefrontReconciler) summariseNodes(p *pass) {
 	status := &p.wf.Status
+	mine := prometheus.Labels{metrics.LabelWavefront: p.wf.Name}
 
-	r.Metrics.PinLagSeconds.Reset()
-	r.Metrics.BlockedNodes.Reset()
+	r.Metrics.PinLagSeconds.DeletePartialMatch(mine)
+	r.Metrics.BlockedNodes.DeletePartialMatch(mine)
 
 	counts := wavefrontv1alpha1.NodeCounts{}
 	fetchFailures := 0
@@ -780,7 +788,7 @@ func (r *WavefrontReconciler) summariseNodes(p *pass) {
 			fetchFailures++
 		}
 	}
-	r.Metrics.PinnedFetchFailures.Set(float64(fetchFailures))
+	r.Metrics.PinnedFetchFailures.With(mine).Set(float64(fetchFailures))
 
 	blockedByReason := map[engine.BlockedReason]int{}
 	blocked := make([]wavefrontv1alpha1.BlockedNode, 0, len(p.eval.Nodes))
@@ -793,7 +801,7 @@ func (r *WavefrontReconciler) summariseNodes(p *pass) {
 			counts.Converging++
 		}
 		if !result.PendingSince.IsZero() {
-			r.Metrics.PinLagSeconds.WithLabelValues(ref.Kind, ref.Namespace, ref.Name).
+			r.Metrics.PinLagSeconds.WithLabelValues(p.wf.Name, ref.Kind, ref.Namespace, ref.Name).
 				Set(r.Clock().Sub(result.PendingSince).Seconds())
 		}
 		if result.Blocked == nil {
@@ -805,7 +813,7 @@ func (r *WavefrontReconciler) summariseNodes(p *pass) {
 		blocked = append(blocked, blockedNode(ref, result, r.Clock))
 	}
 	for reason, count := range blockedByReason {
-		r.Metrics.BlockedNodes.WithLabelValues(string(reason)).Set(float64(count))
+		r.Metrics.BlockedNodes.WithLabelValues(p.wf.Name, string(reason)).Set(float64(count))
 	}
 	counts.Held = len(p.holds)
 

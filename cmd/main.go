@@ -211,8 +211,15 @@ func main() {
 	// The poller drives the loop between spec changes: each sweep notifies
 	// every Wavefront through a channel source (DESIGN §3.1).
 	events := make(chan event.GenericEvent, notifyBuffer)
+	// The poller reads credentials with the manager's *non-caching* API reader
+	// rather than its client: a caching Get on a Secret starts a cluster-wide
+	// Secret informer, and on a target cluster those are dominated by Helm
+	// release-storage secrets (thousands, frequently megabytes each) — the
+	// cache alone would blow the container's memory limit and add cluster-wide
+	// Secret list/watch load. It also makes "resolve credentials afresh on
+	// every sweep" literally true rather than "as fresh as the watch".
 	poller := gitpoll.NewPoller(
-		mgr.GetClient(),
+		mgr.GetAPIReader(),
 		gitpoll.NewGoGitLister(refListTimeout),
 		notifyWavefronts(mgr, events),
 		instruments.RefListFailures,

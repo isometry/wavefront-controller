@@ -175,7 +175,9 @@ var _ = BeforeSuite(func() {
 	instruments = metrics.New(prometheus.NewRegistry())
 
 	lister = newFakeLister()
-	poller = gitpoll.NewPoller(mgr.GetClient(), lister, notify, instruments.RefListFailures)
+	// Non-caching reader, exactly as main wires it: the poller must never
+	// start a cluster-wide Secret informer.
+	poller = gitpoll.NewPoller(mgr.GetAPIReader(), lister, notify, instruments.RefListFailures)
 	poller.Configure(100*time.Millisecond, 4)
 	Expect(mgr.Add(poller)).To(Succeed())
 
