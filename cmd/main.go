@@ -17,9 +17,11 @@ limitations under the License.
 package main
 
 import (
+	"context"
 	"crypto/tls"
 	"flag"
 	"os"
+	"time"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
@@ -31,15 +33,32 @@ import (
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+	"sigs.k8s.io/controller-runtime/pkg/manager"
+	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 	"sigs.k8s.io/controller-runtime/pkg/metrics/filters"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
 	wavefrontv1alpha1 "github.com/isometry/wavefront-controller/api/v1alpha1"
+	"github.com/isometry/wavefront-controller/internal/adapter"
 	"github.com/isometry/wavefront-controller/internal/controller"
+	"github.com/isometry/wavefront-controller/internal/gitpoll"
+	"github.com/isometry/wavefront-controller/internal/pin"
+	"github.com/isometry/wavefront-controller/internal/selection"
 	// +kubebuilder:scaffold:imports
+)
+
+const (
+	// refListTimeout bounds a single git ref advertisement.
+	refListTimeout = 30 * time.Second
+	// notifyTimeout bounds the Wavefront listing behind one poll notification.
+	notifyTimeout = 30 * time.Second
+	// notifyBuffer absorbs a sweep's notifications while a reconcile is in
+	// flight; the reconciler coalesces, so a full channel is safe to drop from.
+	notifyBuffer = 128
 )
 
 var (
@@ -182,10 +201,30 @@ func main() {
 		os.Exit(1)
 	}
 
+	// The poller drives the loop between spec changes: each sweep notifies
+	// every Wavefront through a channel source (DESIGN §3.1).
+	events := make(chan event.GenericEvent, notifyBuffer)
+	poller := gitpoll.NewPoller(
+		mgr.GetClient(),
+		gitpoll.NewGoGitLister(refListTimeout),
+		notifyWavefronts(mgr, events),
+		ctrlmetrics.Registry,
+	)
+	if err := mgr.Add(poller); err != nil {
+		setupLog.Error(err, "Failed to add the ref-advertisement poller")
+		os.Exit(1)
+	}
+
 	if err := (&controller.WavefrontReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
-	}).SetupWithManager(mgr); err != nil {
+		Client:    mgr.GetClient(),
+		Scheme:    mgr.GetScheme(),
+		Recorder:  mgr.GetEventRecorderFor("wavefront-controller"),
+		Adapter:   adapter.NewKustomizationAdapter(),
+		Strategy:  selection.TrackRef(),
+		Poller:    poller,
+		PinWriter: &pin.Writer{Client: mgr.GetClient()},
+		Clock:     time.Now,
+	}).SetupWithManager(mgr, events); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "wavefront")
 		os.Exit(1)
 	}
@@ -204,5 +243,31 @@ func main() {
 	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
 		setupLog.Error(err, "Failed to run manager")
 		os.Exit(1)
+	}
+}
+
+// notifyWavefronts returns the poller's sweep callback: one generic event per
+// existing Wavefront, so that N Wavefronts are all woken by a single sweep.
+// Sends are non-blocking — the reconciler coalesces, and a sweep must never
+// stall behind a busy control loop.
+func notifyWavefronts(mgr manager.Manager, events chan<- event.GenericEvent) func() {
+	return func() {
+		ctx, cancel := context.WithTimeout(context.Background(), notifyTimeout)
+		defer cancel()
+
+		var list wavefrontv1alpha1.WavefrontList
+		if err := mgr.GetClient().List(ctx, &list); err != nil {
+			setupLog.Error(err, "Failed to list Wavefronts after a polling sweep")
+			return
+		}
+
+		for i := range list.Items {
+			select {
+			case events <- event.GenericEvent{Object: &list.Items[i]}:
+			default:
+				setupLog.Info("Dropping poll notification, channel full",
+					"wavefront", list.Items[i].Name)
+			}
+		}
 	}
 }
