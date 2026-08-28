@@ -63,6 +63,13 @@ vet: ## Run go vet against code.
 test: manifests generate fmt vet setup-envtest ## Run tests.
 	KUBEBUILDER_ASSETS="$(shell "$(ENVTEST)" use $(ENVTEST_K8S_VERSION) --bin-dir "$(LOCALBIN)" -p path)" go test $$(go list ./... | grep -v /e2e) -coverprofile cover.out
 
+FLUX_VERSION ?= v2.9.4
+FLUX_INSTALL ?= test/e2e/flux-install.yaml
+.PHONY: update-flux-install
+update-flux-install: ## Refresh the vendored Flux install manifest used by the e2e suite.
+	curl -fsSL -o $(FLUX_INSTALL) \
+	  https://github.com/fluxcd/flux2/releases/download/$(FLUX_VERSION)/install.yaml
+
 FLUX_SC_VERSION ?= v1.9.4
 FLUX_KC_VERSION ?= v1.9.4
 .PHONY: update-flux-crds
@@ -77,9 +84,18 @@ update-flux-crds: ## Refresh vendored Flux CRDs used by envtest.
 # The default setup assumes Kind is pre-installed and builds/loads the Manager Docker image locally.
 # kubectl kuberc is disabled by default for test isolation; enable with:
 # - KUBECTL_KUBERC=true
-# CertManager is installed by default; skip with:
-# - CERT_MANAGER_INSTALL_SKIP=true
+# CertManager has nothing to do in this project (no webhooks), so the e2e run
+# skips it; drop CERT_MANAGER_INSTALL_SKIP below to reinstate the scaffold's
+# default.
 KIND_CLUSTER ?= wavefront-controller-test-e2e
+E2E_IMG ?= example.com/wavefront-controller:v0.0.1
+GITSERVER_IMG ?= example.com/wavefront-gitserver:v0.0.1
+E2E_TIMEOUT ?= 90m
+
+# The git server binary is cross-compiled on the host so its image needs no Go
+# toolchain and no module download; it must therefore target the daemon's
+# architecture, not the host's.
+GITSERVER_ARCH ?= $(shell $(CONTAINER_TOOL) version --format '{{.Server.Arch}}' 2>/dev/null || go env GOARCH)
 
 .PHONY: setup-test-e2e
 setup-test-e2e: ## Set up a Kind cluster for e2e tests if it does not exist
@@ -95,9 +111,40 @@ setup-test-e2e: ## Set up a Kind cluster for e2e tests if it does not exist
 			$(KIND) create cluster --name $(KIND_CLUSTER) ;; \
 	esac
 
+.PHONY: gitserver-build
+gitserver-build: ## Build the e2e git server image (fluxcd/pkg/gittestserver on alpine).
+	CGO_ENABLED=0 GOOS=linux GOARCH=$(GITSERVER_ARCH) \
+	  go build -o test/e2e/gitserver/bin/gitserver ./test/e2e/gitserver
+	$(CONTAINER_TOOL) build -t $(GITSERVER_IMG) test/e2e/gitserver
+
+.PHONY: e2e-images
+e2e-images: gitserver-build ## Build the manager and git server images and load them into Kind.
+	$(MAKE) docker-build IMG=$(E2E_IMG)
+	$(KIND) load docker-image $(E2E_IMG) --name $(KIND_CLUSTER)
+	$(KIND) load docker-image $(GITSERVER_IMG) --name $(KIND_CLUSTER)
+
+.PHONY: e2e-flux
+e2e-flux: ## Install the vendored Flux release into the e2e cluster.
+	$(KUBECTL) apply --server-side --force-conflicts -f $(FLUX_INSTALL)
+	$(KUBECTL) -n flux-system wait --for=condition=Available --timeout=5m \
+	  deployment/source-controller deployment/kustomize-controller
+
+.PHONY: e2e-gitserver
+e2e-gitserver: ## Deploy the e2e git server on an empty repository store.
+	# On a reused cluster, fixtures pinned to commits the restarted (and hence
+	# empty) git server no longer serves would poison the run.
+	-$(KUBECTL) delete -f test/e2e/fixtures.yaml --ignore-not-found --timeout=3m
+	$(KUBECTL) apply -f test/e2e/gitserver/manifests.yaml
+	$(KUBECTL) -n wavefront-e2e rollout restart deployment/gitserver
+	$(KUBECTL) -n wavefront-e2e rollout status deployment/gitserver --timeout=3m
+
 .PHONY: test-e2e
-test-e2e: setup-test-e2e manifests generate fmt vet ## Run the e2e tests. Expected an isolated environment using Kind.
-	KIND=$(KIND) KIND_CLUSTER=$(KIND_CLUSTER) go test -tags=e2e ./test/e2e/ -v -ginkgo.v
+test-e2e: setup-test-e2e manifests generate fmt vet kustomize e2e-images e2e-flux e2e-gitserver ## Run the e2e tests. Expected an isolated environment using Kind.
+	@status=0; \
+	CERT_MANAGER_INSTALL_SKIP=true KIND=$(KIND) KIND_CLUSTER=$(KIND_CLUSTER) E2E_IMG=$(E2E_IMG) \
+	  go test -tags=e2e ./test/e2e/ -v -ginkgo.v -timeout $(E2E_TIMEOUT) || status=$$?; \
+	( cd config/manager && "$(KUSTOMIZE)" edit set image controller=controller:latest ); \
+	exit $$status
 	$(MAKE) cleanup-test-e2e
 
 .PHONY: cleanup-test-e2e

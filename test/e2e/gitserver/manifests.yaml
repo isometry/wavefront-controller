@@ -1,0 +1,73 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: wavefront-e2e
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gitserver
+  namespace: wavefront-e2e
+  labels:
+    app: gitserver
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: gitserver
+  strategy:
+    # The repositories live in the pod's emptyDir: never run two at once, and
+    # never let a rollout serve from a second, empty copy.
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: gitserver
+    spec:
+      containers:
+        - name: gitserver
+          image: example.com/wavefront-gitserver:v0.0.1
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: GIT_ROOT
+              value: /srv/git
+            - name: LISTEN_ADDR
+              value: ":8080"
+          readinessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 1
+            periodSeconds: 2
+          livenessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+          volumeMounts:
+            - name: repos
+              mountPath: /srv/git
+      volumes:
+        - name: repos
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: gitserver
+  namespace: wavefront-e2e
+  labels:
+    app: gitserver
+spec:
+  selector:
+    app: gitserver
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http

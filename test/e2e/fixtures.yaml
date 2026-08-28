@@ -1,0 +1,123 @@
+# The e2e fixture fleet (task-12 brief, DESIGN §9 Phase 1).
+#
+#   infra (flotilla) <- wave-gate (gate) <- team-a (flotilla)
+#
+# Both flotilla GitRepositories carry the participation label and are therefore
+# pinned; the gate's source deliberately does not, which is what makes
+# wave-gate a health-only participant (DESIGN §3.2, §8.2).
+---
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: GitRepository
+metadata:
+  name: infra
+  namespace: wavefront-e2e
+  labels:
+    wavefront.as-code.io/managed: "true"
+spec:
+  interval: 30s
+  url: http://gitserver.wavefront-e2e.svc:8080/infra.git
+  ref:
+    name: refs/heads/main
+---
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: GitRepository
+metadata:
+  name: team-a
+  namespace: wavefront-e2e
+  labels:
+    wavefront.as-code.io/managed: "true"
+spec:
+  interval: 30s
+  url: http://gitserver.wavefront-e2e.svc:8080/team-a.git
+  ref:
+    name: refs/heads/main
+---
+# Unmanaged on purpose: the gate's source stands in for the catalog repository,
+# which is never pinned (DESIGN §8.2).
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: GitRepository
+metadata:
+  name: gate
+  namespace: wavefront-e2e
+spec:
+  interval: 30s
+  url: http://gitserver.wavefront-e2e.svc:8080/gate.git
+  ref:
+    name: refs/heads/main
+---
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: infra
+  namespace: wavefront-e2e
+  labels:
+    wavefront.as-code.io/managed: "true"
+spec:
+  interval: 1m
+  retryInterval: 15s
+  timeout: 1m
+  path: ./kustomize
+  prune: true
+  wait: true
+  targetNamespace: wavefront-e2e
+  sourceRef:
+    kind: GitRepository
+    name: infra
+---
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: wave-gate
+  namespace: wavefront-e2e
+  labels:
+    wavefront.as-code.io/managed: "true"
+spec:
+  interval: 1m
+  retryInterval: 15s
+  timeout: 1m
+  path: ./kustomize
+  prune: true
+  wait: true
+  targetNamespace: wavefront-e2e
+  sourceRef:
+    kind: GitRepository
+    name: gate
+  dependsOn:
+    - name: infra
+---
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: team-a
+  namespace: wavefront-e2e
+  labels:
+    wavefront.as-code.io/managed: "true"
+spec:
+  interval: 1m
+  retryInterval: 15s
+  timeout: 1m
+  path: ./kustomize
+  prune: true
+  wait: true
+  targetNamespace: wavefront-e2e
+  sourceRef:
+    kind: GitRepository
+    name: team-a
+  dependsOn:
+    - name: wave-gate
+---
+apiVersion: wavefront.as-code.io/v1alpha1
+kind: Wavefront
+metadata:
+  name: fleet
+spec:
+  nodes:
+    kinds: [Kustomization]
+    selector:
+      matchLabels:
+        wavefront.as-code.io/managed: "true"
+  mode: Enforce
+  suspend: false
+  poll:
+    interval: 15s
+    perHostConcurrency: 4
