@@ -18,27 +18,45 @@ package controller
 
 import (
 	"context"
+	"maps"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
+	kustomizev1 "github.com/fluxcd/kustomize-controller/api/v1"
+	sourcev1 "github.com/fluxcd/source-controller/api/v1"
+	"github.com/go-git/go-git/v5/plumbing/transport"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	wavefrontv1alpha1 "github.com/isometry/wavefront-controller/api/v1alpha1"
+	"github.com/isometry/wavefront-controller/internal/adapter"
+	"github.com/isometry/wavefront-controller/internal/gitpoll"
+	"github.com/isometry/wavefront-controller/internal/pin"
+	"github.com/isometry/wavefront-controller/internal/selection"
 	// +kubebuilder:scaffold:imports
 )
 
 // These tests use Ginkgo (BDD-style Go testing framework). Refer to
 // http://onsi.github.io/ginkgo/ to learn more about Ginkgo.
+//
+// The controller suite runs the *real* manager against envtest: the
+// reconciler, a real gitpoll.Poller (behind a scripted fake Lister) and the
+// real pin.Writer. No Flux controllers run and there is no garbage
+// collection, so specs hand-set Kustomization/GitRepository status themselves
+// and never rely on pruning.
 
 var (
 	ctx       context.Context
@@ -46,7 +64,40 @@ var (
 	testEnv   *envtest.Environment
 	cfg       *rest.Config
 	k8sClient client.Client
+	lister    *fakeLister
+	poller    *gitpoll.Poller
 )
+
+// fakeLister is the scripted stand-in for git ref advertisements: specs call
+// advertise() to make a URL's tracking ref resolve to a SHA, and the real
+// Poller then drives the reconciler exactly as production does.
+type fakeLister struct {
+	mu   sync.RWMutex
+	refs map[string]map[string]string // url -> (ref name -> SHA)
+}
+
+func newFakeLister() *fakeLister {
+	return &fakeLister{refs: map[string]map[string]string{}}
+}
+
+func (f *fakeLister) advertise(repoURL, refName, sha string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.refs[repoURL] == nil {
+		f.refs[repoURL] = map[string]string{}
+	}
+	f.refs[repoURL][refName] = sha
+}
+
+// List implements gitpoll.Lister.
+func (f *fakeLister) List(_ context.Context, repoURL string, _ transport.AuthMethod) (map[string]string, error) {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+
+	out := make(map[string]string, len(f.refs[repoURL]))
+	maps.Copy(out, f.refs[repoURL])
+	return out, nil
+}
 
 func TestControllers(t *testing.T) {
 	RegisterFailHandler(Fail)
@@ -57,11 +108,16 @@ func TestControllers(t *testing.T) {
 var _ = BeforeSuite(func() {
 	logf.SetLogger(zap.New(zap.WriteTo(GinkgoWriter), zap.UseDevMode(true)))
 
+	SetDefaultEventuallyTimeout(30 * time.Second)
+	SetDefaultEventuallyPollingInterval(100 * time.Millisecond)
+	SetDefaultConsistentlyDuration(2 * time.Second)
+	SetDefaultConsistentlyPollingInterval(100 * time.Millisecond)
+
 	ctx, cancel = context.WithCancel(context.TODO())
 
-	var err error
-	err = wavefrontv1alpha1.AddToScheme(scheme.Scheme)
-	Expect(err).NotTo(HaveOccurred())
+	Expect(wavefrontv1alpha1.AddToScheme(scheme.Scheme)).To(Succeed())
+	Expect(sourcev1.AddToScheme(scheme.Scheme)).To(Succeed())
+	Expect(kustomizev1.AddToScheme(scheme.Scheme)).To(Succeed())
 
 	// +kubebuilder:scaffold:scheme
 
@@ -80,6 +136,7 @@ var _ = BeforeSuite(func() {
 	}
 
 	// cfg is defined in this file globally.
+	var err error
 	cfg, err = testEnv.Start()
 	Expect(err).NotTo(HaveOccurred())
 	Expect(cfg).NotTo(BeNil())
@@ -87,6 +144,51 @@ var _ = BeforeSuite(func() {
 	k8sClient, err = client.New(cfg, client.Options{Scheme: scheme.Scheme})
 	Expect(err).NotTo(HaveOccurred())
 	Expect(k8sClient).NotTo(BeNil())
+
+	By("starting the manager with the Wavefront reconciler and a real poller")
+	mgr, err := ctrl.NewManager(cfg, ctrl.Options{
+		Scheme:  scheme.Scheme,
+		Metrics: metricsserver.Options{BindAddress: "0"},
+	})
+	Expect(err).NotTo(HaveOccurred())
+
+	events := make(chan event.GenericEvent, 128)
+	notify := func() {
+		var list wavefrontv1alpha1.WavefrontList
+		if err := mgr.GetClient().List(ctx, &list); err != nil {
+			return
+		}
+		for i := range list.Items {
+			select {
+			case events <- event.GenericEvent{Object: &list.Items[i]}:
+			default:
+			}
+		}
+	}
+
+	lister = newFakeLister()
+	poller = gitpoll.NewPoller(mgr.GetClient(), lister, notify, nil)
+	poller.Configure(100*time.Millisecond, 4)
+	Expect(mgr.Add(poller)).To(Succeed())
+
+	reconciler := &WavefrontReconciler{
+		Client:    mgr.GetClient(),
+		Scheme:    mgr.GetScheme(),
+		Recorder:  mgr.GetEventRecorderFor("wavefront-controller"),
+		Adapter:   adapter.NewKustomizationAdapter(),
+		Strategy:  selection.TrackRef(),
+		Poller:    poller,
+		PinWriter: &pin.Writer{Client: mgr.GetClient()},
+		Clock:     time.Now,
+	}
+	Expect(reconciler.SetupWithManager(mgr, events)).To(Succeed())
+
+	go func() {
+		defer GinkgoRecover()
+		Expect(mgr.Start(ctx)).To(Succeed())
+	}()
+
+	Expect(mgr.GetCache().WaitForCacheSync(ctx)).To(BeTrue())
 })
 
 var _ = AfterSuite(func() {

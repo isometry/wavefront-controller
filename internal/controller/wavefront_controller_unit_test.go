@@ -1,0 +1,368 @@
+/*
+Copyright 2026.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package controller
+
+import (
+	"errors"
+	"slices"
+	"strings"
+	"testing"
+	"time"
+
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/record"
+
+	wavefrontv1alpha1 "github.com/isometry/wavefront-controller/api/v1alpha1"
+	"github.com/isometry/wavefront-controller/internal/adapter"
+	"github.com/isometry/wavefront-controller/internal/gitpoll"
+)
+
+// Unit coverage for the two shared-state hazards the reconciler has to get
+// right: what an *aborted* pass may publish, and how N Wavefronts merge onto
+// one Poller. Both are about state that outlives a single pass, which the
+// envtest scenarios exercise only incidentally.
+
+const (
+	fluxNamespace = "flux-system"
+	fleetName     = "fleet"
+	teamAName     = "team-a"
+	alphaSource   = "alpha"
+	betaSource    = "beta"
+
+	teamASource  = fluxNamespace + "/" + teamAName
+	passFailure  = "listing Kustomizations: connection refused"
+	staleOverlap = "node selector overlaps Wavefront \"other\"; admissions suppressed"
+)
+
+func teamARef() adapter.NodeRef {
+	return adapter.NodeRef{Kind: kindKustomization, Namespace: fluxNamespace, Name: teamAName}
+}
+
+func teamAKey() types.NamespacedName {
+	return types.NamespacedName{Namespace: fluxNamespace, Name: teamAName}
+}
+
+// settledFleet is a Wavefront carrying the status a healthy pass left behind:
+// real counts, a blocked entry and a hold ledger.
+func settledFleet() *wavefrontv1alpha1.Wavefront {
+	return &wavefrontv1alpha1.Wavefront{
+		ObjectMeta: metav1.ObjectMeta{Name: fleetName, Generation: 7},
+		Status: wavefrontv1alpha1.WavefrontStatus{
+			Phase: wavefrontv1alpha1.PhaseBlocked,
+			Nodes: wavefrontv1alpha1.NodeCounts{
+				Observed: 12, Pinned: 10, Gates: 2, Pending: 3, Blocked: 1, Held: 1,
+			},
+			Blocked: []wavefrontv1alpha1.BlockedNode{{
+				Node:   wavefrontv1alpha1.NodeReference{Kind: kindKustomization, Namespace: fluxNamespace, Name: "team-b"},
+				Since:  metav1.NewTime(time.Unix(1000, 0)),
+				Reason: "AncestorUnhealthy",
+			}},
+			Held: []wavefrontv1alpha1.HeldNode{{
+				Node:    wavefrontv1alpha1.NodeReference{Kind: kindKustomization, Namespace: fluxNamespace, Name: teamAName},
+				Source:  teamASource,
+				Manager: humanManager,
+			}},
+			ObservedGeneration: 6,
+		},
+	}
+}
+
+func drain(events chan string) []string {
+	var out []string
+	for {
+		select {
+		case e := <-events:
+			out = append(out, e)
+		default:
+			return out
+		}
+	}
+}
+
+// TestSummariseAbortedPassPreservesTheFleetPicture: a pass that fails before
+// resolution has derived nothing, so it must publish nothing but conditions.
+// Writing its zero values through would report nodes:{0,…} and — via
+// phaseOf(0,0,false) — a Quiescent fleet alongside Ready:False.
+func TestSummariseAbortedPassPreservesTheFleetPicture(t *testing.T) {
+	wf := settledFleet()
+	before := wf.Status.DeepCopy()
+
+	r := &WavefrontReconciler{Recorder: record.NewFakeRecorder(16), Clock: time.Now}
+	// resolved and graphChecked both false: the pass aborted in discovery.
+	r.summarise(&pass{wf: wf, graphValid: true}, errors.New(passFailure))
+
+	if got := wf.Status.Nodes; got != before.Nodes {
+		t.Errorf("counts = %+v, want the previous %+v left untouched", got, before.Nodes)
+	}
+	if got := wf.Status.Phase; got != wavefrontv1alpha1.PhaseBlocked {
+		t.Errorf("phase = %q, want the previous %q (never a derived Quiescent)",
+			got, wavefrontv1alpha1.PhaseBlocked)
+	}
+	if len(wf.Status.Blocked) != 1 {
+		t.Errorf("blocked = %+v, want the previous single entry retained", wf.Status.Blocked)
+	}
+	if len(wf.Status.Held) != 1 || wf.Status.Held[0].Source != teamASource {
+		t.Fatalf("held = %+v, want the ledger retained: clearing it re-fires HoldDetected", wf.Status.Held)
+	}
+
+	ready := apimeta.FindStatusCondition(wf.Status.Conditions, wavefrontv1alpha1.ConditionReady)
+	if ready == nil {
+		t.Fatal("Ready condition missing, want the failure surfaced")
+	}
+	if ready.Status != metav1.ConditionFalse || ready.Reason != reasonFailed {
+		t.Errorf("Ready = %s/%s, want False/%s", ready.Status, ready.Reason, reasonFailed)
+	}
+	if !strings.Contains(ready.Message, "connection refused") {
+		t.Errorf("Ready message = %q, want it to carry the pass error", ready.Message)
+	}
+	if ready.ObservedGeneration != wf.Generation || wf.Status.ObservedGeneration != wf.Generation {
+		t.Errorf("observedGeneration = %d/%d, want %d on both the condition and the status",
+			ready.ObservedGeneration, wf.Status.ObservedGeneration, wf.Generation)
+	}
+}
+
+// TestSummariseAbortedPassLeavesGraphValidStanding: an abort before graph
+// derivation has disproved nothing, so a known-bad verdict must survive rather
+// than be replaced with an unproven True.
+func TestSummariseAbortedPassLeavesGraphValidStanding(t *testing.T) {
+	wf := settledFleet()
+	apimeta.SetStatusCondition(&wf.Status.Conditions, metav1.Condition{
+		Type:               wavefrontv1alpha1.ConditionGraphValid,
+		Status:             metav1.ConditionFalse,
+		Reason:             reasonSelectorOverlap,
+		Message:            staleOverlap,
+		ObservedGeneration: 6,
+	})
+
+	r := &WavefrontReconciler{Recorder: record.NewFakeRecorder(16), Clock: time.Now}
+	r.summarise(&pass{wf: wf, graphValid: true}, errors.New(passFailure))
+
+	graphValid := apimeta.FindStatusCondition(wf.Status.Conditions, wavefrontv1alpha1.ConditionGraphValid)
+	if graphValid == nil {
+		t.Fatal("GraphValid condition disappeared")
+	}
+	if graphValid.Status != metav1.ConditionFalse || graphValid.Reason != reasonSelectorOverlap {
+		t.Errorf("GraphValid = %s/%s, want the previous False/%s to stand",
+			graphValid.Status, graphValid.Reason, reasonSelectorOverlap)
+	}
+
+	// A pass that *did* reach a verdict republishes it.
+	r.summarise(&pass{wf: wf, resolved: true, graphChecked: true, graphValid: true}, nil)
+	graphValid = apimeta.FindStatusCondition(wf.Status.Conditions, wavefrontv1alpha1.ConditionGraphValid)
+	if graphValid.Status != metav1.ConditionTrue {
+		t.Errorf("GraphValid = %s, want True once a pass proved it", graphValid.Status)
+	}
+}
+
+// TestHoldLedgerSurvivesAnAbortedPass is the consequence that makes the guard
+// matter: status.held is the ledger holdEvents edge-triggers against, so an
+// aborted pass in the middle of a hold must not cause a second HoldDetected.
+func TestHoldLedgerSurvivesAnAbortedPass(t *testing.T) {
+	recorder := record.NewFakeRecorder(32)
+	r := &WavefrontReconciler{Recorder: recorder, Clock: time.Now}
+
+	wf := &wavefrontv1alpha1.Wavefront{ObjectMeta: metav1.ObjectMeta{Name: fleetName, Generation: 1}}
+	holding := func() *pass {
+		return &pass{
+			wf:           wf,
+			resolved:     true,
+			graphChecked: true,
+			graphValid:   true,
+			holds:        map[types.NamespacedName]string{teamAKey(): humanManager},
+			nodeBySource: map[types.NamespacedName]adapter.NodeRef{teamAKey(): teamARef()},
+		}
+	}
+
+	// Pass 1: the hold appears.
+	first := holding()
+	r.holdEvents(first)
+	r.summarise(first, nil)
+
+	events := drain(recorder.Events)
+	if len(events) != 1 || !strings.Contains(events[0], reasonHoldDetected) {
+		t.Fatalf("events after the hold appeared = %v, want exactly one %s", events, reasonHoldDetected)
+	}
+	if len(wf.Status.Held) != 1 {
+		t.Fatalf("status.held = %+v, want the ledger written", wf.Status.Held)
+	}
+
+	// Pass 2: an abort mid-hold. No events, and the ledger must survive it.
+	aborted := &pass{wf: wf, graphValid: true}
+	r.holdEvents(aborted)
+	r.summarise(aborted, errors.New(passFailure))
+
+	if events := drain(recorder.Events); len(events) != 0 {
+		t.Errorf("events from an aborted pass = %v, want none: it proved nothing about holds", events)
+	}
+	if len(wf.Status.Held) != 1 || wf.Status.Held[0].Manager != humanManager {
+		t.Fatalf("status.held = %+v, want the ledger preserved across the abort", wf.Status.Held)
+	}
+
+	// Pass 3: recovery, same hold still in place. The transition already fired.
+	third := holding()
+	r.holdEvents(third)
+	r.summarise(third, nil)
+
+	if events := drain(recorder.Events); len(events) != 0 {
+		t.Errorf("events on recovery = %v, want none: the hold never transitioned", events)
+	}
+
+	// Teeth: had the abort wiped the ledger, the very next pass re-fires.
+	wf.Status.Held = nil
+	fourth := holding()
+	r.holdEvents(fourth)
+	if events := drain(recorder.Events); len(events) != 1 {
+		t.Errorf("events after a wiped ledger = %v, want the re-fire this guard prevents", events)
+	}
+}
+
+// --- shared-Poller bookkeeping ----------------------------------------------
+
+func pollTarget(name string) gitpoll.Target {
+	return gitpoll.Target{
+		Source:      types.NamespacedName{Namespace: fluxNamespace, Name: name},
+		URL:         "https://git.example.com/org/" + name + ".git",
+		TrackingRef: mainRef,
+	}
+}
+
+func pollPass(name string, interval time.Duration, perHost int, targets ...gitpoll.Target) *pass {
+	return &pass{
+		wf: &wavefrontv1alpha1.Wavefront{
+			ObjectMeta: metav1.ObjectMeta{Name: name},
+			Spec: wavefrontv1alpha1.WavefrontSpec{
+				Poll: wavefrontv1alpha1.PollSpec{
+					Interval:           metav1.Duration{Duration: interval},
+					PerHostConcurrency: perHost,
+				},
+			},
+		},
+		targets: targets,
+	}
+}
+
+func wavefrontList(names ...string) *wavefrontv1alpha1.WavefrontList {
+	list := &wavefrontv1alpha1.WavefrontList{}
+	for _, name := range names {
+		list.Items = append(list.Items, wavefrontv1alpha1.Wavefront{
+			ObjectMeta: metav1.ObjectMeta{Name: name},
+		})
+	}
+	return list
+}
+
+func targetNames(targets []gitpoll.Target) []string {
+	names := make([]string, 0, len(targets))
+	for _, target := range targets {
+		names = append(names, target.Source.Name)
+	}
+	return names
+}
+
+// TestPollSetsMergeCadenceAndTargets covers the whole N-Wavefronts-through-one-
+// Poller hazard: Configure is last-writer-wins and SetTargets replaces the whole
+// set, so whichever Wavefront reconciled last would otherwise dictate both. A
+// 90s Wavefront must not stall a co-resident 30s one, and neither may erase the
+// other's targets.
+func TestPollSetsMergeCadenceAndTargets(t *testing.T) {
+	r := &WavefrontReconciler{Poller: gitpoll.NewPoller(nil, nil, nil, nil)}
+
+	r.updatePollSet(pollPass("slow", 90*time.Second, 2, pollTarget(alphaSource)), wavefrontList("slow"))
+
+	interval, perHost := cadenceOf(r.pollSets)
+	if interval != 90*time.Second || perHost != 2 {
+		t.Errorf("cadence with one Wavefront = %v/%d, want 90s/2", interval, perHost)
+	}
+
+	r.updatePollSet(pollPass("fast", 30*time.Second, 4, pollTarget(betaSource)), wavefrontList("slow", "fast"))
+
+	interval, perHost = cadenceOf(r.pollSets)
+	if interval != 30*time.Second {
+		t.Errorf("merged interval = %v, want the tightest 30s: a slow Wavefront must not stall a fast one", interval)
+	}
+	if perHost != 4 {
+		t.Errorf("merged perHostConcurrency = %d, want the most generous 4", perHost)
+	}
+	if got := targetNames(unionOf(r.pollSets)); !slices.Equal(got, []string{alphaSource, betaSource}) {
+		t.Errorf("targets = %v, want the union [alpha beta]", got)
+	}
+
+	// The fast Wavefront reconciles again: still merged, not overwritten.
+	r.updatePollSet(pollPass("fast", 30*time.Second, 4, pollTarget(betaSource)), wavefrontList("slow", "fast"))
+	if got := targetNames(unionOf(r.pollSets)); !slices.Equal(got, []string{alphaSource, betaSource}) {
+		t.Errorf("targets after a repeat pass = %v, want [alpha beta]", got)
+	}
+}
+
+// TestPollSetsPruneRestoresTheSurvivingCadence: when the fast Wavefront goes
+// away, both its targets and its claim on the cadence must go with it.
+func TestPollSetsPruneRestoresTheSurvivingCadence(t *testing.T) {
+	cases := []struct {
+		name   string
+		remove func(r *WavefrontReconciler)
+	}{
+		{
+			name: "deleted Wavefront observed on the next pass",
+			remove: func(r *WavefrontReconciler) {
+				r.updatePollSet(pollPass("slow", 90*time.Second, 2, pollTarget(alphaSource)), wavefrontList("slow"))
+			},
+		},
+		{
+			name:   "deletion seen as a NotFound reconcile",
+			remove: func(r *WavefrontReconciler) { r.forgetPollSet("fast") },
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := &WavefrontReconciler{Poller: gitpoll.NewPoller(nil, nil, nil, nil)}
+			r.updatePollSet(pollPass("slow", 90*time.Second, 2, pollTarget(alphaSource)), wavefrontList("slow"))
+			r.updatePollSet(pollPass("fast", 30*time.Second, 4, pollTarget(betaSource)), wavefrontList("slow", "fast"))
+
+			tc.remove(r)
+
+			interval, perHost := cadenceOf(r.pollSets)
+			if interval != 90*time.Second || perHost != 2 {
+				t.Errorf("cadence after the fast Wavefront went = %v/%d, want the survivor's 90s/2",
+					interval, perHost)
+			}
+			if got := targetNames(unionOf(r.pollSets)); !slices.Equal(got, []string{alphaSource}) {
+				t.Errorf("targets = %v, want only the survivor's [alpha]", got)
+			}
+		})
+	}
+}
+
+// TestPollSetsCadenceDefaults: an empty set yields the zero cadence Configure
+// clamps, and a Wavefront that sent explicit zeros past CRD defaulting must not
+// drag the merged interval to zero and tight-loop the poller.
+func TestPollSetsCadenceDefaults(t *testing.T) {
+	if interval, perHost := cadenceOf(nil); interval != 0 || perHost != 0 {
+		t.Errorf("cadence of an empty set = %v/%d, want 0/0 for Configure to clamp", interval, perHost)
+	}
+
+	r := &WavefrontReconciler{Poller: gitpoll.NewPoller(nil, nil, nil, nil)}
+	r.updatePollSet(pollPass("zeroes", 0, 0, pollTarget(alphaSource)), wavefrontList("zeroes"))
+
+	interval, perHost := cadenceOf(r.pollSets)
+	if interval != gitpoll.DefaultInterval || perHost != gitpoll.DefaultPerHostConcurrency {
+		t.Errorf("cadence from explicit zeros = %v/%d, want the CRD defaults %v/%d",
+			interval, perHost, gitpoll.DefaultInterval, gitpoll.DefaultPerHostConcurrency)
+	}
+}

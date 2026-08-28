@@ -5,23 +5,45 @@ metadata:
   name: manager-role
 rules:
 - apiGroups:
-  - wavefront.as-code.io
+  - ""
   resources:
-  - wavefronts
+  - events
   verbs:
   - create
-  - delete
+  - patch
+- apiGroups:
+  - ""
+  resources:
+  - secrets
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - kustomize.toolkit.fluxcd.io
+  resources:
+  - kustomizations
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - source.toolkit.fluxcd.io
+  resources:
+  - gitrepositories
+  verbs:
   - get
   - list
   - patch
-  - update
   - watch
 - apiGroups:
   - wavefront.as-code.io
   resources:
-  - wavefronts/finalizers
+  - wavefronts
   verbs:
-  - update
+  - get
+  - list
+  - watch
 - apiGroups:
   - wavefront.as-code.io
   resources:
