@@ -27,7 +27,9 @@ import (
 	kustomizev1 "github.com/fluxcd/kustomize-controller/api/v1"
 	fluxmeta "github.com/fluxcd/pkg/apis/meta"
 	sourcev1 "github.com/fluxcd/source-controller/api/v1"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	corev1 "k8s.io/api/core/v1"
+	eventsv1 "k8s.io/api/events/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -228,20 +230,24 @@ func conditionOf(wf *wavefrontv1alpha1.Wavefront, conditionType string) *metav1.
 	return apimeta.FindStatusCondition(wf.Status.Conditions, conditionType)
 }
 
-// recordedEvents returns every Event with the given reason for the named
-// involved object, together with the summed occurrence count (the recorder
-// aggregates repeats onto a single Event with count > 1).
-func recordedEvents(reason, involvedName string) (messages []string, occurrences int32) {
+// recordedEvents returns every events.k8s.io/v1 Event with the given reason
+// for the named regarding object, together with the summed occurrence count
+// (the recorder aggregates repeats onto a single Event with a Series).
+func recordedEvents(reason, regardingName string) (messages []string, occurrences int32) {
 	GinkgoHelper()
-	var list corev1.EventList
+	var list eventsv1.EventList
 	Expect(k8sClient.List(ctx, &list)).To(Succeed())
 	for i := range list.Items {
 		e := &list.Items[i]
-		if e.Reason != reason || e.InvolvedObject.Name != involvedName {
+		if e.Reason != reason || e.Regarding.Name != regardingName {
 			continue
 		}
-		messages = append(messages, e.Message)
-		occurrences += max(e.Count, 1)
+		messages = append(messages, e.Note)
+		count := int32(1)
+		if e.Series != nil {
+			count = e.Series.Count
+		}
+		occurrences += count
 	}
 	return messages, occurrences
 }
@@ -275,6 +281,11 @@ var _ = Describe("Wavefront reconciler", func() {
 			Eventually(func() int32 {
 				_, occurrences := recordedEvents("InitialPin", flotilla)
 				return occurrences
+			}).Should(BeNumerically(">=", 1))
+
+			By("incrementing wavefront_admissions_total{result=\"initial\"}")
+			Eventually(func() float64 {
+				return testutil.ToFloat64(instruments.AdmissionsTotal.WithLabelValues("initial"))
 			}).Should(BeNumerically(">=", 1))
 
 			By("reporting Ready")

@@ -46,6 +46,7 @@ import (
 	"github.com/isometry/wavefront-controller/internal/adapter"
 	"github.com/isometry/wavefront-controller/internal/controller"
 	"github.com/isometry/wavefront-controller/internal/gitpoll"
+	"github.com/isometry/wavefront-controller/internal/metrics"
 	"github.com/isometry/wavefront-controller/internal/pin"
 	"github.com/isometry/wavefront-controller/internal/selection"
 	// +kubebuilder:scaffold:imports
@@ -201,6 +202,12 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Instruments is constructed exactly once, against the manager's shared
+	// metrics registry, and threaded into every collaborator that records
+	// against it (DESIGN §6): the poller's ref-listing failures and the
+	// reconciler's admission, pin-lag and blocked-node metrics.
+	instruments := metrics.New(ctrlmetrics.Registry)
+
 	// The poller drives the loop between spec changes: each sweep notifies
 	// every Wavefront through a channel source (DESIGN §3.1).
 	events := make(chan event.GenericEvent, notifyBuffer)
@@ -208,7 +215,7 @@ func main() {
 		mgr.GetClient(),
 		gitpoll.NewGoGitLister(refListTimeout),
 		notifyWavefronts(mgr, events),
-		ctrlmetrics.Registry,
+		instruments.RefListFailures,
 	)
 	if err := mgr.Add(poller); err != nil {
 		setupLog.Error(err, "Failed to add the ref-advertisement poller")
@@ -218,12 +225,13 @@ func main() {
 	if err := (&controller.WavefrontReconciler{
 		Client:    mgr.GetClient(),
 		Scheme:    mgr.GetScheme(),
-		Recorder:  mgr.GetEventRecorderFor("wavefront-controller"),
+		Recorder:  mgr.GetEventRecorder("wavefront-controller"),
 		Adapter:   adapter.NewKustomizationAdapter(),
 		Strategy:  selection.TrackRef(),
 		Poller:    poller,
 		PinWriter: &pin.Writer{Client: mgr.GetClient()},
 		Clock:     time.Now,
+		Metrics:   instruments,
 	}).SetupWithManager(mgr, events); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "wavefront")
 		os.Exit(1)

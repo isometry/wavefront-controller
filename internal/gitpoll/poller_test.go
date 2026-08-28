@@ -37,6 +37,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 
 	"github.com/isometry/wavefront-controller/internal/gitpoll"
+	"github.com/isometry/wavefront-controller/internal/metrics"
 )
 
 const (
@@ -476,7 +477,7 @@ func TestPollerFailureRetainsLastGoodSHA(t *testing.T) {
 		lister.setAdvertised(alphaURL, map[string]string{trackedRef: shaA})
 		reg := prometheus.NewRegistry()
 
-		p := gitpoll.NewPoller(newFakeSecrets(), lister, func() {}, reg)
+		p := gitpoll.NewPoller(newFakeSecrets(), lister, func() {}, metrics.New(reg).RefListFailures)
 		p.Configure(10*time.Second, 2)
 		p.SetTargets([]gitpoll.Target{target("alpha", alphaURL)})
 
@@ -721,7 +722,7 @@ func TestPollerMissingSecretIsAFailure(t *testing.T) {
 		lister := newFakeLister()
 		lister.setAdvertised(alphaURL, map[string]string{trackedRef: shaA})
 
-		p := gitpoll.NewPoller(newFakeSecrets(), lister, func() {}, reg)
+		p := gitpoll.NewPoller(newFakeSecrets(), lister, func() {}, metrics.New(reg).RefListFailures)
 		p.Configure(10*time.Second, 2)
 
 		tgt := target("alpha", alphaURL)

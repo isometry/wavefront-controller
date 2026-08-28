@@ -26,11 +26,12 @@ import (
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/tools/events"
 
 	wavefrontv1alpha1 "github.com/isometry/wavefront-controller/api/v1alpha1"
 	"github.com/isometry/wavefront-controller/internal/adapter"
 	"github.com/isometry/wavefront-controller/internal/gitpoll"
+	"github.com/isometry/wavefront-controller/internal/metrics"
 )
 
 // Unit coverage for the two shared-state hazards the reconciler has to get
@@ -83,11 +84,11 @@ func settledFleet() *wavefrontv1alpha1.Wavefront {
 	}
 }
 
-func drain(events chan string) []string {
+func drain(ch chan string) []string {
 	var out []string
 	for {
 		select {
-		case e := <-events:
+		case e := <-ch:
 			out = append(out, e)
 		default:
 			return out
@@ -103,7 +104,7 @@ func TestSummariseAbortedPassPreservesTheFleetPicture(t *testing.T) {
 	wf := settledFleet()
 	before := wf.Status.DeepCopy()
 
-	r := &WavefrontReconciler{Recorder: record.NewFakeRecorder(16), Clock: time.Now}
+	r := &WavefrontReconciler{Recorder: events.NewFakeRecorder(16), Clock: time.Now, Metrics: metrics.Nop()}
 	// resolved and graphChecked both false: the pass aborted in discovery.
 	r.summarise(&pass{wf: wf, graphValid: true}, errors.New(passFailure))
 
@@ -150,7 +151,7 @@ func TestSummariseAbortedPassLeavesGraphValidStanding(t *testing.T) {
 		ObservedGeneration: 6,
 	})
 
-	r := &WavefrontReconciler{Recorder: record.NewFakeRecorder(16), Clock: time.Now}
+	r := &WavefrontReconciler{Recorder: events.NewFakeRecorder(16), Clock: time.Now, Metrics: metrics.Nop()}
 	r.summarise(&pass{wf: wf, graphValid: true}, errors.New(passFailure))
 
 	graphValid := apimeta.FindStatusCondition(wf.Status.Conditions, wavefrontv1alpha1.ConditionGraphValid)
@@ -174,8 +175,8 @@ func TestSummariseAbortedPassLeavesGraphValidStanding(t *testing.T) {
 // matter: status.held is the ledger holdEvents edge-triggers against, so an
 // aborted pass in the middle of a hold must not cause a second HoldDetected.
 func TestHoldLedgerSurvivesAnAbortedPass(t *testing.T) {
-	recorder := record.NewFakeRecorder(32)
-	r := &WavefrontReconciler{Recorder: recorder, Clock: time.Now}
+	recorder := events.NewFakeRecorder(32)
+	r := &WavefrontReconciler{Recorder: recorder, Clock: time.Now, Metrics: metrics.Nop()}
 
 	wf := &wavefrontv1alpha1.Wavefront{ObjectMeta: metav1.ObjectMeta{Name: fleetName, Generation: 1}}
 	holding := func() *pass {
@@ -194,9 +195,9 @@ func TestHoldLedgerSurvivesAnAbortedPass(t *testing.T) {
 	r.holdEvents(first)
 	r.summarise(first, nil)
 
-	events := drain(recorder.Events)
-	if len(events) != 1 || !strings.Contains(events[0], reasonHoldDetected) {
-		t.Fatalf("events after the hold appeared = %v, want exactly one %s", events, reasonHoldDetected)
+	recorded := drain(recorder.Events)
+	if len(recorded) != 1 || !strings.Contains(recorded[0], reasonHoldDetected) {
+		t.Fatalf("events after the hold appeared = %v, want exactly one %s", recorded, reasonHoldDetected)
 	}
 	if len(wf.Status.Held) != 1 {
 		t.Fatalf("status.held = %+v, want the ledger written", wf.Status.Held)
@@ -207,8 +208,8 @@ func TestHoldLedgerSurvivesAnAbortedPass(t *testing.T) {
 	r.holdEvents(aborted)
 	r.summarise(aborted, errors.New(passFailure))
 
-	if events := drain(recorder.Events); len(events) != 0 {
-		t.Errorf("events from an aborted pass = %v, want none: it proved nothing about holds", events)
+	if recorded := drain(recorder.Events); len(recorded) != 0 {
+		t.Errorf("events from an aborted pass = %v, want none: it proved nothing about holds", recorded)
 	}
 	if len(wf.Status.Held) != 1 || wf.Status.Held[0].Manager != humanManager {
 		t.Fatalf("status.held = %+v, want the ledger preserved across the abort", wf.Status.Held)
@@ -219,16 +220,16 @@ func TestHoldLedgerSurvivesAnAbortedPass(t *testing.T) {
 	r.holdEvents(third)
 	r.summarise(third, nil)
 
-	if events := drain(recorder.Events); len(events) != 0 {
-		t.Errorf("events on recovery = %v, want none: the hold never transitioned", events)
+	if recorded := drain(recorder.Events); len(recorded) != 0 {
+		t.Errorf("events on recovery = %v, want none: the hold never transitioned", recorded)
 	}
 
 	// Teeth: had the abort wiped the ledger, the very next pass re-fires.
 	wf.Status.Held = nil
 	fourth := holding()
 	r.holdEvents(fourth)
-	if events := drain(recorder.Events); len(events) != 1 {
-		t.Errorf("events after a wiped ledger = %v, want the re-fire this guard prevents", events)
+	if recorded := drain(recorder.Events); len(recorded) != 1 {
+		t.Errorf("events after a wiped ledger = %v, want the re-fire this guard prevents", recorded)
 	}
 }
 
@@ -281,7 +282,7 @@ func targetNames(targets []gitpoll.Target) []string {
 // 90s Wavefront must not stall a co-resident 30s one, and neither may erase the
 // other's targets.
 func TestPollSetsMergeCadenceAndTargets(t *testing.T) {
-	r := &WavefrontReconciler{Poller: gitpoll.NewPoller(nil, nil, nil, nil)}
+	r := &WavefrontReconciler{Poller: gitpoll.NewPoller(nil, nil, nil, nil), Metrics: metrics.Nop()}
 
 	r.updatePollSet(pollPass("slow", 90*time.Second, 2, pollTarget(alphaSource)), wavefrontList("slow"))
 
@@ -331,7 +332,7 @@ func TestPollSetsPruneRestoresTheSurvivingCadence(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			r := &WavefrontReconciler{Poller: gitpoll.NewPoller(nil, nil, nil, nil)}
+			r := &WavefrontReconciler{Poller: gitpoll.NewPoller(nil, nil, nil, nil), Metrics: metrics.Nop()}
 			r.updatePollSet(pollPass("slow", 90*time.Second, 2, pollTarget(alphaSource)), wavefrontList("slow"))
 			r.updatePollSet(pollPass("fast", 30*time.Second, 4, pollTarget(betaSource)), wavefrontList("slow", "fast"))
 
@@ -357,7 +358,7 @@ func TestPollSetsCadenceDefaults(t *testing.T) {
 		t.Errorf("cadence of an empty set = %v/%d, want 0/0 for Configure to clamp", interval, perHost)
 	}
 
-	r := &WavefrontReconciler{Poller: gitpoll.NewPoller(nil, nil, nil, nil)}
+	r := &WavefrontReconciler{Poller: gitpoll.NewPoller(nil, nil, nil, nil), Metrics: metrics.Nop()}
 	r.updatePollSet(pollPass("zeroes", 0, 0, pollTarget(alphaSource)), wavefrontList("zeroes"))
 
 	interval, perHost := cadenceOf(r.pollSets)

@@ -42,7 +42,7 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/event"
@@ -56,6 +56,7 @@ import (
 	"github.com/isometry/wavefront-controller/internal/engine"
 	"github.com/isometry/wavefront-controller/internal/gitpoll"
 	"github.com/isometry/wavefront-controller/internal/graph"
+	"github.com/isometry/wavefront-controller/internal/metrics"
 	"github.com/isometry/wavefront-controller/internal/pin"
 	"github.com/isometry/wavefront-controller/internal/selection"
 )
@@ -80,6 +81,14 @@ const (
 	reasonCyclesDetected  = "CyclesDetected"
 )
 
+// wavefront_admissions_total result labels (DESIGN §6).
+const (
+	resultAdmitted = "admitted"
+	resultInitial  = "initial"
+	resultShadow   = "shadow"
+	resultConflict = "conflict"
+)
+
 // unknownManager labels a hold the controller can see the effect of (an SSA
 // conflict) but not the owner of.
 const unknownManager = "unknown"
@@ -98,12 +107,13 @@ const managedOptIn = "true"
 type WavefrontReconciler struct {
 	client.Client
 	Scheme    *runtime.Scheme
-	Recorder  record.EventRecorder
+	Recorder  events.EventRecorder
 	Adapter   adapter.Adapter
 	Strategy  selection.Strategy
 	Poller    *gitpoll.Poller
 	PinWriter *pin.Writer
 	Clock     func() time.Time
+	Metrics   *metrics.Instruments
 
 	// pollSets records each Wavefront's contribution to the shared Poller.
 	// That Poller is a single fleet-wide runnable whose SetTargets replaces the
@@ -170,7 +180,19 @@ type pass struct {
 // +kubebuilder:rbac:groups=source.toolkit.fluxcd.io,resources=gitrepositories,verbs=get;list;watch;patch
 // +kubebuilder:rbac:groups=kustomize.toolkit.fluxcd.io,resources=kustomizations,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
-// +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
+// +kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=create;patch;update
+
+// event records one Kubernetes event against obj.
+//
+// events.EventRecorder.Eventf takes a "related" secondary object (none of
+// this controller's events have one) and distinguishes a machine-readable
+// "action" from the human-readable "reason". This controller has never
+// modelled the two separately — every reason (DESIGN §4.2) is already a
+// short, unique, UpperCamelCase identifier — so action mirrors reason here
+// rather than inventing a second taxonomy with nothing to distinguish.
+func (r *WavefrontReconciler) event(obj runtime.Object, eventtype, reason, messageFmt string, args ...any) {
+	r.Recorder.Eventf(obj, nil, eventtype, reason, reason, messageFmt, args...)
+}
 
 // Reconcile runs one full evaluation of the fleet and executes the admissions
 // it derives.
@@ -408,7 +430,7 @@ func (r *WavefrontReconciler) resolveSource(
 	trackingRef, err := r.Strategy.TrackingRef(repo.Spec.Reference)
 	if err != nil {
 		if errors.Is(err, selection.ErrUnsupportedRef) {
-			r.Recorder.Eventf(p.wf, corev1.EventTypeWarning, reasonUnsupportedRefStyle,
+			r.event(p.wf, corev1.EventTypeWarning, reasonUnsupportedRefStyle,
 				"%s tracks a ref style this version cannot sequence; %s demoted to a gate",
 				node.SourceRef, node.Ref)
 			return nil, nil, nil
@@ -570,9 +592,10 @@ func (r *WavefrontReconciler) execute(ctx context.Context, p *pass) error {
 	case p.wf.Spec.Mode != wavefrontv1alpha1.ModeEnforce:
 		// Shadow suppresses every write, initial pins included (DESIGN §3.5.4).
 		for _, admission := range admissions {
-			r.Recorder.Eventf(p.wf, corev1.EventTypeNormal, reasonShadowAdmission,
+			r.event(p.wf, corev1.EventTypeNormal, reasonShadowAdmission,
 				"would pin %s to %s (from %s, ref %s)",
 				admission.Source, admission.To, previousPin(admission), admission.ObservedRef)
+			r.Metrics.AdmissionsTotal.WithLabelValues(resultShadow).Inc()
 		}
 		return nil
 	}
@@ -603,9 +626,10 @@ func (r *WavefrontReconciler) advance(ctx context.Context, p *pass, admission en
 		return nil
 	case errors.Is(err, pin.ErrHeld):
 		p.holds[admission.Source] = r.holderOf(ctx, admission.Source)
+		r.Metrics.AdmissionsTotal.WithLabelValues(resultConflict).Inc()
 		return nil
 	default:
-		r.Recorder.Eventf(p.wf, corev1.EventTypeWarning, reasonPinFailed,
+		r.event(p.wf, corev1.EventTypeWarning, reasonPinFailed,
 			"failed to pin %s to %s: %s", admission.Source, admission.To, err)
 		return err
 	}
@@ -624,19 +648,27 @@ func (r *WavefrontReconciler) holderOf(ctx context.Context, src types.Namespaced
 }
 
 // pinEvent records a successful advance on the GitRepository (where the
-// provenance lives) and mirrors it on the Wavefront (DESIGN §4.2).
+// provenance lives) and mirrors it on the Wavefront (DESIGN §4.2), and
+// updates the admissions counter and the observed→admitted wait histogram
+// (DESIGN §6, D13).
 func (r *WavefrontReconciler) pinEvent(p *pass, admission engine.Admission) {
-	reason, message := reasonPinAdvanced, fmt.Sprintf("advanced pin of %s to %s (from %s, ref %s)",
-		admission.Source, admission.To, previousPin(admission), admission.ObservedRef)
+	result, reason, message := resultAdmitted, reasonPinAdvanced,
+		fmt.Sprintf("advanced pin of %s to %s (from %s, ref %s)",
+			admission.Source, admission.To, previousPin(admission), admission.ObservedRef)
 	if admission.Initial {
-		reason, message = reasonInitialPin, fmt.Sprintf("initial pin of %s to %s (ref %s)",
+		result, reason, message = resultInitial, reasonInitialPin, fmt.Sprintf("initial pin of %s to %s (ref %s)",
 			admission.Source, admission.To, admission.ObservedRef)
 	}
 
 	if repo, ok := p.repos[admission.Source]; ok {
-		r.Recorder.Event(repo, corev1.EventTypeNormal, reason, message)
+		r.event(repo, corev1.EventTypeNormal, reason, "%s", message)
 	}
-	r.Recorder.Event(p.wf, corev1.EventTypeNormal, reason, message)
+	r.event(p.wf, corev1.EventTypeNormal, reason, "%s", message)
+
+	r.Metrics.AdmissionsTotal.WithLabelValues(result).Inc()
+	if since := admission.PendingSince; !since.IsZero() {
+		r.Metrics.AdmissionWaitSeconds.Observe(r.Clock().Sub(since).Seconds())
+	}
 }
 
 // holdEvents implements step 8: status.held from the previous pass is the
@@ -663,14 +695,14 @@ func (r *WavefrontReconciler) holdEvents(p *pass) {
 		if _, was := previous[src]; was {
 			continue
 		}
-		r.Recorder.Eventf(p.wf, corev1.EventTypeWarning, reasonHoldDetected,
+		r.event(p.wf, corev1.EventTypeWarning, reasonHoldDetected,
 			"pin of %s is held by field manager %q; not advancing", src, current[src])
 	}
 	for _, src := range slices.Sorted(maps.Keys(previous)) {
 		if _, still := current[src]; still {
 			continue
 		}
-		r.Recorder.Eventf(p.wf, corev1.EventTypeNormal, reasonHoldReleased,
+		r.event(p.wf, corev1.EventTypeNormal, reasonHoldReleased,
 			"hold on %s released by %q", src, previous[src])
 	}
 }
@@ -726,20 +758,31 @@ func (r *WavefrontReconciler) summarise(p *pass, passErr error) {
 }
 
 // summariseNodes derives the fleet counts, exceptional-state lists and phase
-// from a completed evaluation.
+// from a completed evaluation, and recomputes the pin-lag, blocked-nodes and
+// pinned-fetch-failures gauges wholesale (DESIGN §6): Reset() then set, so a
+// node that dropped out of the fleet since the last pass does not linger.
 func (r *WavefrontReconciler) summariseNodes(p *pass) {
 	status := &p.wf.Status
 
+	r.Metrics.PinLagSeconds.Reset()
+	r.Metrics.BlockedNodes.Reset()
+
 	counts := wavefrontv1alpha1.NodeCounts{}
+	fetchFailures := 0
 	for _, input := range p.inputs {
 		counts.Observed++
-		if input.Role == engine.RolePinned {
-			counts.Pinned++
+		if input.Role != engine.RolePinned {
+			counts.Gates++
 			continue
 		}
-		counts.Gates++
+		counts.Pinned++
+		if input.Source != nil && input.Source.FetchFailing {
+			fetchFailures++
+		}
 	}
+	r.Metrics.PinnedFetchFailures.Set(float64(fetchFailures))
 
+	blockedByReason := map[engine.BlockedReason]int{}
 	blocked := make([]wavefrontv1alpha1.BlockedNode, 0, len(p.eval.Nodes))
 	stalled := false
 	for ref, result := range p.eval.Nodes {
@@ -749,12 +792,20 @@ func (r *WavefrontReconciler) summariseNodes(p *pass) {
 		case engine.StateConverging:
 			counts.Converging++
 		}
+		if !result.PendingSince.IsZero() {
+			r.Metrics.PinLagSeconds.WithLabelValues(ref.Kind, ref.Namespace, ref.Name).
+				Set(r.Clock().Sub(result.PendingSince).Seconds())
+		}
 		if result.Blocked == nil {
 			continue
 		}
 		counts.Blocked++
+		blockedByReason[result.Blocked.Reason]++
 		stalled = stalled || blocking(result.Blocked.Reason)
 		blocked = append(blocked, blockedNode(ref, result, r.Clock))
+	}
+	for reason, count := range blockedByReason {
+		r.Metrics.BlockedNodes.WithLabelValues(string(reason)).Set(float64(count))
 	}
 	counts.Held = len(p.holds)
 
@@ -783,13 +834,13 @@ func (r *WavefrontReconciler) summariseNodes(p *pass) {
 // SetupWithManager wires the controller into the manager. The Flux watches
 // carry no GenerationChangedPredicate: gates are reachable through unlabelled
 // objects and it is precisely their *status* changes that unblock a wavefront.
-func (r *WavefrontReconciler) SetupWithManager(mgr ctrl.Manager, events <-chan event.GenericEvent) error {
+func (r *WavefrontReconciler) SetupWithManager(mgr ctrl.Manager, pollEvents <-chan event.GenericEvent) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&wavefrontv1alpha1.Wavefront{}).
 		Named("wavefront").
 		Watches(&kustomizev1.Kustomization{}, handler.EnqueueRequestsFromMapFunc(r.mapToWavefronts)).
 		Watches(&sourcev1.GitRepository{}, handler.EnqueueRequestsFromMapFunc(r.mapToWavefronts)).
-		WatchesRawSource(source.Channel(events, &handler.EnqueueRequestForObject{})).
+		WatchesRawSource(source.Channel(pollEvents, &handler.EnqueueRequestForObject{})).
 		Complete(r)
 }
 

@@ -31,6 +31,7 @@ import (
 	kustomizev1 "github.com/fluxcd/kustomize-controller/api/v1"
 	sourcev1 "github.com/fluxcd/source-controller/api/v1"
 	"github.com/go-git/go-git/v5/plumbing/transport"
+	"github.com/prometheus/client_golang/prometheus"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -44,6 +45,7 @@ import (
 	wavefrontv1alpha1 "github.com/isometry/wavefront-controller/api/v1alpha1"
 	"github.com/isometry/wavefront-controller/internal/adapter"
 	"github.com/isometry/wavefront-controller/internal/gitpoll"
+	"github.com/isometry/wavefront-controller/internal/metrics"
 	"github.com/isometry/wavefront-controller/internal/pin"
 	"github.com/isometry/wavefront-controller/internal/selection"
 	// +kubebuilder:scaffold:imports
@@ -66,6 +68,10 @@ var (
 	k8sClient client.Client
 	lister    *fakeLister
 	poller    *gitpoll.Poller
+	// instruments is the suite's own isolated metric registry: envtest
+	// scenarios that care about a metric (e.g. wavefront_admissions_total)
+	// read it directly rather than scraping an HTTP endpoint.
+	instruments *metrics.Instruments
 )
 
 // fakeLister is the scripted stand-in for git ref advertisements: specs call
@@ -166,20 +172,23 @@ var _ = BeforeSuite(func() {
 		}
 	}
 
+	instruments = metrics.New(prometheus.NewRegistry())
+
 	lister = newFakeLister()
-	poller = gitpoll.NewPoller(mgr.GetClient(), lister, notify, nil)
+	poller = gitpoll.NewPoller(mgr.GetClient(), lister, notify, instruments.RefListFailures)
 	poller.Configure(100*time.Millisecond, 4)
 	Expect(mgr.Add(poller)).To(Succeed())
 
 	reconciler := &WavefrontReconciler{
 		Client:    mgr.GetClient(),
 		Scheme:    mgr.GetScheme(),
-		Recorder:  mgr.GetEventRecorderFor("wavefront-controller"),
+		Recorder:  mgr.GetEventRecorder("wavefront-controller"),
 		Adapter:   adapter.NewKustomizationAdapter(),
 		Strategy:  selection.TrackRef(),
 		Poller:    poller,
 		PinWriter: &pin.Writer{Client: mgr.GetClient()},
 		Clock:     time.Now,
+		Metrics:   instruments,
 	}
 	Expect(reconciler.SetupWithManager(mgr, events)).To(Succeed())
 

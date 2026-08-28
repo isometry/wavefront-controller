@@ -18,7 +18,6 @@ package gitpoll
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"maps"
 	"net/url"
@@ -123,47 +122,25 @@ type result struct {
 var _ manager.Runnable = (*Poller)(nil)
 
 // NewPoller returns a Poller with the CRD's default cadence, ready for
-// Configure and SetTargets. reg may be nil, in which case no metric is
-// registered.
-func NewPoller(secrets client.Reader, lister Lister, notify func(), reg prometheus.Registerer) *Poller {
+// Configure and SetTargets.
+//
+// failures is wavefront_ref_list_failures_total (DESIGN §6), already created
+// and registered by the caller — internal/metrics owns every collector's
+// registration, so the poller only ever records against a handle it is
+// given. failures may be nil, in which case no metric is recorded.
+func NewPoller(secrets client.Reader, lister Lister, notify func(), failures *prometheus.CounterVec) *Poller {
 	return &Poller{
 		secrets:            secrets,
 		lister:             lister,
 		notify:             notify,
 		strategy:           selection.TrackRef(),
-		failures:           registerFailureCounter(reg),
+		failures:           failures,
 		interval:           DefaultInterval,
 		perHostConcurrency: DefaultPerHostConcurrency,
 		reconfigured:       make(chan struct{}, 1),
 		live:               map[types.NamespacedName]targetRef{},
 		observations:       map[types.NamespacedName]record{},
 	}
-}
-
-// registerFailureCounter registers wavefront_ref_list_failures_total (DESIGN
-// §6), tolerating a registry that already holds it.
-func registerFailureCounter(reg prometheus.Registerer) *prometheus.CounterVec {
-	if reg == nil {
-		return nil
-	}
-
-	counter := prometheus.NewCounterVec(prometheus.CounterOpts{
-		Name: "wavefront_ref_list_failures_total",
-		Help: "Total ref-advertisement listing failures, by git host.",
-	}, []string{"host"})
-
-	err := reg.Register(counter)
-	if err == nil {
-		return counter
-	}
-
-	var already prometheus.AlreadyRegisteredError
-	if errors.As(err, &already) {
-		if existing, ok := already.ExistingCollector.(*prometheus.CounterVec); ok {
-			return existing
-		}
-	}
-	return nil
 }
 
 // Configure sets the sweep cadence. Non-positive values are clamped to the
