@@ -69,7 +69,9 @@ type Poller struct {
 	notify   func()
 	strategy selection.Strategy
 
-	// failures is nil when no Registerer was supplied.
+	// failures counts ref-listing failures per host
+	// (wavefront_ref_list_failures_total, DESIGN §6); nil when no Registerer
+	// was supplied.
 	failures *prometheus.CounterVec
 
 	// reconfigured wakes a waiting Start when the sweep cadence changes, so a

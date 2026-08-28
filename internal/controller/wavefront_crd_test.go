@@ -106,7 +106,7 @@ var _ = Describe("Wavefront CRD validation", func() {
 	})
 
 	It("accepts a fully specified Wavefront", func() {
-		// DESIGN §4.1 example, group substituted for the real API group.
+		// DESIGN §4.1 example; this is the real API group, not a stand-in.
 		wf := &wavefrontv1alpha1.Wavefront{
 			ObjectMeta: metav1.ObjectMeta{
 				Name: "fleet",

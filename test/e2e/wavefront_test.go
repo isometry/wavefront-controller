@@ -209,11 +209,18 @@ var _ = Describe("Wavefront fleet", Ordered, func() {
 		// never rolls it back, so it is monotone: "team-a moved, therefore
 		// infra must already have applied shaI" is safe to evaluate at any
 		// sample, and an out-of-order admission cannot hide in a status dip.
+		// That monotonicity holds only up to shaI: this scenario's spec never
+		// pushes infra past shaI, so LastAppliedRevision cannot advance again
+		// mid-test and invalidate an earlier positive read.
 		infraApplied := func(g Gomega) bool {
 			ks := getKustomization(g, infraNode)
 			return fluxgit.ExtractHashFromRevision(ks.Status.LastAppliedRevision).String() == shaI
 		}
 
+		// This guard covers only infra: an unpinned gate node (wave-gate) has
+		// no durable revision evidence to sample the same way (no pin, no
+		// LastAppliedRevision tied to an admitted SHA), so it cannot be
+		// guarded here. Scenario 3 covers gate-mediated blocking instead.
 		By("checking team-a does not advance before infra has applied shaI")
 		Consistently(func(g Gomega) {
 			if pinOf(g, teamNode) != teamBefore {
@@ -471,7 +478,9 @@ data:
 }
 
 // workloadYAML is a Deployment whose minReadySeconds holds the owning
-// Kustomization Progressing for ten seconds after its pod is up.
+// Kustomization Progressing for ten seconds after its pod is up. The infra
+// Kustomization's timeout (fixtures.yaml, 1m) must stay comfortably above
+// this value plus pod start time, or wait:true times out before Ready.
 func workloadYAML(node string) string {
 	return fmt.Sprintf(`apiVersion: apps/v1
 kind: Deployment

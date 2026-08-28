@@ -55,6 +55,9 @@ metadata:
 spec:
   interval: 1m
   retryInterval: 15s
+  # timeout must cover the workload's minReadySeconds (10s, wavefront_test.go
+  # workloadYAML) plus pod start, or the wait:true health gate times out
+  # before the slow-payload scenario's Deployment ever goes Ready.
   timeout: 1m
   path: ./kustomize
   prune: true
