@@ -18,7 +18,6 @@ package gitpoll
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"maps"
 	"net/url"
@@ -323,15 +322,25 @@ func (p *Poller) sweepHost(ctx context.Context, host string, targets []Target, p
 
 // poll performs one target's listing and queues the outcome for publication.
 //
-// A cancelled context is the manager shutting the poller down, not a detection
-// failure: it must neither blip wavefront_ref_list_failures_total (a §6 safety
-// alarm operators rate-alert on) nor stamp a shutdown artefact onto the
-// observation. Such a listing is discarded outright, exactly as a superseded
-// target's is in publish — it answers no question anyone is still asking, and
-// the last good observation stands untouched.
+// Shutdown is judged by ctx.Err(), never by the error chain: go-git
+// transports surface cancellation as EOF/closed-connection errors that never
+// wrap context.Canceled, and a healthy sweep's error chain may still contain
+// one that is not ours (e.g. an HTTP/2 stream reset). ctx.Err() is the only
+// authority. A cancelled context is the manager shutting the poller down, not
+// a detection failure: it must neither blip wavefront_ref_list_failures_total
+// (a §6 safety alarm operators rate-alert on) nor stamp a shutdown artefact
+// onto the observation. Such a listing is discarded outright, exactly as a
+// superseded target's is in publish — it answers no question anyone is still
+// asking, and the last good observation stands untouched. This does not
+// spuriously swallow a genuine listing timeout: the lister's own per-listing
+// WithTimeout (lister.go:55-59) is a child context, so its expiry leaves the
+// sweep ctx healthy and the failure is correctly still counted.
 func (p *Poller) poll(ctx context.Context, host string, t Target, results chan<- result) {
 	sha, err := p.observe(ctx, t)
-	if errors.Is(err, context.Canceled) {
+	if ctx.Err() != nil {
+		// The manager is shutting the poller down (or this sweep was
+		// superseded): whatever observe returned answers no question anyone
+		// is still asking.
 		return
 	}
 	if err != nil {

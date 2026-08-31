@@ -528,12 +528,15 @@ func TestPollerFailureRetainsLastGoodSHA(t *testing.T) {
 	})
 }
 
-// TestPollerCancelledListingIsNotAFailure: at manager shutdown every in-flight
-// listing ends in context.Canceled. That is the poller being stopped, not
-// detection breaking, so it must not blip wavefront_ref_list_failures_total —
-// operators rate-alert on that gauge (DESIGN §6) and a rolling restart would
-// otherwise page — nor stamp a shutdown artefact over a good observation.
-func TestPollerCancelledListingIsNotAFailure(t *testing.T) {
+// TestPollerWrappedCancelledErrorIsCountedFailure: an error chain containing
+// context.Canceled is not proof of a shutdown — ctx.Err() is the only
+// authority for that (see poll's doc comment) — so while the sweep context is
+// healthy, an error that merely happens to wrap context.Canceled (e.g. an
+// HTTP/2 stream reset) must be treated as an ordinary listing failure: it
+// blips wavefront_ref_list_failures_total and freezes the last good
+// observation with Err stamped, exactly like any other failure (DESIGN §6,
+// D4).
+func TestPollerWrappedCancelledErrorIsCountedFailure(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		lister := newFakeLister()
 		lister.setAdvertised(alphaURL, map[string]string{trackedRef: shaA})
@@ -550,23 +553,87 @@ func TestPollerCancelledListingIsNotAFailure(t *testing.T) {
 		synctest.Wait()
 		good, ok := p.Observation(source("alpha"))
 		if !ok || good.SHA != shaA {
-			t.Fatalf("Observation = %+v, want %q observed before the shutdown", good, shaA)
+			t.Fatalf("Observation = %+v, want %q observed on the first sweep", good, shaA)
 		}
 
-		// The next sweep runs into cancellation, wrapped as a real transport
-		// error would wrap it.
-		lister.setErr(alphaURL, fmt.Errorf("listing %s: %w", alphaURL, context.Canceled))
+		// The context stays healthy; only the error happens to wrap
+		// context.Canceled, as an HTTP/2 stream reset might.
+		wrapped := fmt.Errorf("http2 stream reset: %w", context.Canceled)
+		lister.setErr(alphaURL, wrapped)
 		time.Sleep(10 * time.Second)
 		synctest.Wait()
 
 		after, ok := p.Observation(source("alpha"))
 		if !ok {
-			t.Fatal("Observation dropped by a cancelled listing")
+			t.Fatal("Observation dropped after a listing failure")
 		}
-		if after.Err != nil {
-			t.Errorf("Err = %v, want nil: cancellation is a shutdown, not a listing failure", after.Err)
+		if after.SHA != good.SHA {
+			t.Errorf("SHA = %q, want the last good %q retained across a failure", after.SHA, good.SHA)
 		}
-		if after.SHA != good.SHA || !after.ObservedAt.Equal(good.ObservedAt) {
+		if after.Err == nil || !errors.Is(after.Err, context.Canceled) {
+			t.Errorf("Err = %v, want it to wrap context.Canceled", after.Err)
+		}
+		if got := failureCount(t, reg, exampleHost); got != 1 {
+			t.Errorf("%s{host=%q} = %v, want 1", failuresMetric, exampleHost, got)
+		}
+	})
+}
+
+// TestPollerShutdownDiscardsInFlightListing: at manager shutdown, go-git
+// transports surface cancellation as plain EOF/closed-connection errors that
+// never wrap context.Canceled. The poller must still recognise the shutdown —
+// by ctx.Err(), not the error chain — and discard the in-flight listing
+// outright: it must neither blip wavefront_ref_list_failures_total (a §6
+// safety alarm operators rate-alert on, which a rolling restart would
+// otherwise page) nor stamp a shutdown artefact over a good observation.
+func TestPollerShutdownDiscardsInFlightListing(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		lister := newFakeLister()
+		lister.setAdvertised(alphaURL, map[string]string{trackedRef: shaA})
+		reg := prometheus.NewRegistry()
+
+		p := gitpoll.NewPoller(newFakeSecrets(), lister, func() {}, metrics.New(reg).RefListFailures)
+		p.Configure(10*time.Second, 2)
+		p.SetTargets([]gitpoll.Target{target("alpha", alphaURL)})
+
+		ctx, cancel := context.WithCancel(t.Context())
+		errCh := make(chan error, 1)
+		go func() { errCh <- p.Start(ctx) }()
+
+		time.Sleep(10 * time.Second)
+		synctest.Wait()
+		good, ok := p.Observation(source("alpha"))
+		if !ok || good.SHA != shaA {
+			t.Fatalf("Observation = %+v, want %q observed before shutdown", good, shaA)
+		}
+
+		// Arm the next sweep to hang mid-listing, then have it eventually
+		// surface a plain transport error that shares no chain with
+		// context.Canceled — exactly what go-git's own EOF/closed-connection
+		// errors look like.
+		lister.gate(alphaURL)
+		lister.setErr(alphaURL, errors.New("EOF"))
+
+		time.Sleep(10 * time.Second)
+		synctest.Wait() // the listing is now durably blocked on the gate
+
+		cancel() // the manager shuts the poller down mid-listing
+		synctest.Wait()
+
+		select {
+		case err := <-errCh:
+			if err != nil {
+				t.Errorf("Start returned %v, want nil", err)
+			}
+		case <-time.After(time.Minute):
+			t.Fatal("Start did not return after context cancellation")
+		}
+
+		after, ok := p.Observation(source("alpha"))
+		if !ok {
+			t.Fatal("Observation dropped by a discarded listing")
+		}
+		if after.Err != nil || after.SHA != good.SHA || !after.ObservedAt.Equal(good.ObservedAt) {
 			t.Errorf("Observation = %+v, want %+v left untouched by the discarded listing", after, good)
 		}
 		if got := failureCount(t, reg, exampleHost); got != 0 {
