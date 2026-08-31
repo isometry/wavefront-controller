@@ -35,7 +35,6 @@ import (
 	"github.com/fluxcd/pkg/git"
 	"github.com/fluxcd/pkg/runtime/conditions"
 	sourcev1 "github.com/fluxcd/source-controller/api/v1"
-	"github.com/prometheus/client_golang/prometheus"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
@@ -718,10 +717,18 @@ func (r *WavefrontReconciler) holdEvents(p *pass) {
 // actively claim a settled fleet while Ready is False, and status.held — the
 // ledger holdEvents edge-triggers against — would be cleared, re-firing
 // HoldDetected for every still-held source on the next good pass. The last
-// known-good picture stands until a pass can prove a new one.
+// known-good picture stands until a pass can prove a new one. Its gauges,
+// unlike status, are live measurements rather than a last-known-good record:
+// they are retired instead, per findings #7/#8 (see summariseNodes).
 func (r *WavefrontReconciler) summarise(p *pass, passErr error) {
 	if p.resolved {
 		r.summariseNodes(p)
+	} else {
+		// An aborted pass can prove nothing about the fleet: its gauges are
+		// live measurements, so they go absent rather than freezing at a
+		// stale-but-plausible value the D4 alarm would read as healthy.
+		// Status below keeps the last known-good picture, as documented.
+		r.Metrics.Wavefront(p.wf.Name).Retire()
 	}
 
 	p.wf.Status.ObservedGeneration = p.wf.Generation
@@ -769,12 +776,20 @@ func (r *WavefrontReconciler) summarise(p *pass, passErr error) {
 // Reset(): Wavefronts are cluster-scoped and several may be co-resident, and
 // a Reset would erase a *sibling's* pin-lag series until its next pass — and
 // pin staleness is a D4 safety alarm that must not blink out.
+//
+// The gauges are published only when p.graphValid: a selector overlap or a
+// dependsOn cycle (findings #7/#8) means this pass's counts are not
+// authoritative for occupancy — the very node driving them may be
+// double-counted against another Wavefront's pass — so publishing them
+// would let the fleet gauges lie even while status.Nodes, below, stays live
+// (overlap is not an abort; the counts are still the best available picture
+// for status, just not for a measurement other Wavefronts' series must not
+// double up on).
 func (r *WavefrontReconciler) summariseNodes(p *pass) {
 	status := &p.wf.Status
-	mine := prometheus.Labels{metrics.LabelWavefront: p.wf.Name}
-
-	r.Metrics.PinLagSeconds.DeletePartialMatch(mine)
-	r.Metrics.BlockedNodes.DeletePartialMatch(mine)
+	scope := r.Metrics.Wavefront(p.wf.Name)
+	scope.Retire()
+	publish := p.graphValid // overlap/cycles: status stays live, gauges suppressed
 
 	counts := wavefrontv1alpha1.NodeCounts{}
 	fetchFailures := 0
@@ -789,7 +804,9 @@ func (r *WavefrontReconciler) summariseNodes(p *pass) {
 			fetchFailures++
 		}
 	}
-	r.Metrics.PinnedFetchFailures.With(mine).Set(float64(fetchFailures))
+	if publish {
+		scope.SetPinnedFetchFailures(fetchFailures)
+	}
 
 	blockedByReason := map[engine.BlockedReason]int{}
 	blocked := make([]wavefrontv1alpha1.BlockedNode, 0, len(p.eval.Nodes))
@@ -801,9 +818,8 @@ func (r *WavefrontReconciler) summariseNodes(p *pass) {
 		case engine.StateConverging:
 			counts.Converging++
 		}
-		if !result.PendingSince.IsZero() {
-			r.Metrics.PinLagSeconds.WithLabelValues(p.wf.Name, ref.Kind, ref.Namespace, ref.Name).
-				Set(r.Clock().Sub(result.PendingSince).Seconds())
+		if !result.PendingSince.IsZero() && publish {
+			scope.SetPinLag(ref.Kind, ref.Namespace, ref.Name, r.Clock().Sub(result.PendingSince).Seconds())
 		}
 		if result.Blocked == nil {
 			continue
@@ -813,8 +829,10 @@ func (r *WavefrontReconciler) summariseNodes(p *pass) {
 		stalled = stalled || blocking(result.Blocked.Reason)
 		blocked = append(blocked, blockedNode(ref, result, r.Clock))
 	}
-	for reason, count := range blockedByReason {
-		r.Metrics.BlockedNodes.WithLabelValues(p.wf.Name, string(reason)).Set(float64(count))
+	if publish {
+		for reason, count := range blockedByReason {
+			scope.SetBlocked(string(reason), count)
+		}
 	}
 	counts.Held = len(p.holds)
 

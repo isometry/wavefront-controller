@@ -314,6 +314,91 @@ func TestFleetGaugesAreRetiredPerWavefront(t *testing.T) {
 	}
 }
 
+// TestSummariseAbortedPassRetiresItsGauges: findings #7 — an aborted pass has
+// proven nothing about the fleet, so a stale-but-plausible gauge value must
+// not freeze in place, where the D4 pin-staleness alarm would read it as
+// healthy. Its series must go absent, while status.Nodes (covered already by
+// TestSummariseAbortedPassPreservesTheFleetPicture) keeps the last known-good
+// picture.
+func TestSummariseAbortedPassRetiresItsGauges(t *testing.T) {
+	now := time.Unix(4000, 0)
+	instr := metrics.Nop()
+	r := &WavefrontReconciler{
+		Recorder: events.NewFakeRecorder(16),
+		Clock:    func() time.Time { return now },
+		Metrics:  instr,
+	}
+
+	// A good pass leaves fleet's gauges standing, alongside a co-resident
+	// infra's.
+	r.summariseNodes(gaugePass(fleetName, teamAName, now.Add(-60*time.Second)))
+	r.summariseNodes(gaugePass("infra", "team-c", now.Add(-30*time.Second)))
+
+	wf := settledFleet()
+	before := wf.Status.DeepCopy()
+	r.summarise(&pass{wf: wf, graphValid: true}, errors.New(passFailure))
+
+	if got := wf.Status.Nodes; got != before.Nodes {
+		t.Errorf("counts = %+v, want the previous %+v left untouched", got, before.Nodes)
+	}
+
+	if got := testutil.CollectAndCount(instr.PinLagSeconds); got != 1 {
+		t.Errorf("PinLagSeconds series after the abort = %d, want 1 (fleet retired, infra survives)", got)
+	}
+	if got := testutil.CollectAndCount(instr.BlockedNodes); got != 1 {
+		t.Errorf("BlockedNodes series after the abort = %d, want 1 (fleet retired, infra survives)", got)
+	}
+	if got := testutil.CollectAndCount(instr.PinnedFetchFailures); got != 1 {
+		t.Errorf("PinnedFetchFailures series after the abort = %d, want 1 (fleet retired, infra survives)", got)
+	}
+	if lag := testutil.ToFloat64(instr.PinLagSeconds.WithLabelValues(
+		"infra", kindKustomization, fluxNamespace, "team-c")); lag != 30 {
+		t.Errorf("surviving infra pin lag = %v, want 30: an unrelated abort must not disturb it", lag)
+	}
+}
+
+// TestSummariseNodesOverlapPassSuppressesGauges: findings #8 — a selector
+// overlap (or a cycle) means p.graphValid is false and this pass's counts are
+// not authoritative for occupancy, so publishing its gauges alongside the
+// Wavefront it overlaps with would double-count the shared node. status.Nodes
+// stays live (overlap is not an abort — DESIGN's overlap rule), but the gauge
+// writes are suppressed, and any series a prior valid pass left behind are
+// still retired rather than left to go stale.
+func TestSummariseNodesOverlapPassSuppressesGauges(t *testing.T) {
+	now := time.Unix(5000, 0)
+	instr := metrics.Nop()
+	r := &WavefrontReconciler{
+		Recorder: events.NewFakeRecorder(16),
+		Clock:    func() time.Time { return now },
+		Metrics:  instr,
+	}
+
+	// A prior valid pass leaves fleet's gauges standing, alongside infra's.
+	r.summariseNodes(gaugePass(fleetName, teamAName, now.Add(-60*time.Second)))
+	r.summariseNodes(gaugePass("infra", "team-c", now.Add(-30*time.Second)))
+
+	overlapping := gaugePass(fleetName, teamAName, now.Add(-90*time.Second))
+	overlapping.graphValid = false
+	r.summariseNodes(overlapping)
+
+	if got := testutil.CollectAndCount(instr.PinLagSeconds); got != 1 {
+		t.Errorf("PinLagSeconds series after an overlapping pass = %d, want 1 (fleet retired, no republish, infra survives)", got)
+	}
+	if got := testutil.CollectAndCount(instr.BlockedNodes); got != 1 {
+		t.Errorf("BlockedNodes series after an overlapping pass = %d, want 1 (fleet retired, no republish, infra survives)", got)
+	}
+	if got := testutil.CollectAndCount(instr.PinnedFetchFailures); got != 1 {
+		t.Errorf("PinnedFetchFailures series after an overlapping pass = %d, want 1 (fleet retired, no republish, infra survives)", got)
+	}
+
+	if got := overlapping.wf.Status.Nodes.Observed; got != 1 {
+		t.Errorf("status.Nodes.Observed = %d, want 1: overlap keeps status live", got)
+	}
+	if got := overlapping.wf.Status.Nodes.Blocked; got != 1 {
+		t.Errorf("status.Nodes.Blocked = %d, want 1: overlap keeps status live", got)
+	}
+}
+
 // TestWavefrontDeletionRetiresItsMetricSeries: deletion carries no finalizer
 // by design (DESIGN D8), so Reconcile's IsNotFound branch is the only signal
 // that a Wavefront is gone. It must retire every series that Wavefront ever
