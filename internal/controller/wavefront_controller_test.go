@@ -285,7 +285,7 @@ var _ = Describe("Wavefront reconciler", func() {
 
 			By("incrementing wavefront_admissions_total{result=\"initial\"}")
 			Eventually(func() float64 {
-				return testutil.ToFloat64(instruments.AdmissionsTotal.WithLabelValues("initial"))
+				return testutil.ToFloat64(instruments.AdmissionsTotal.WithLabelValues("wf-initial-pin", "initial"))
 			}).Should(BeNumerically(">=", 1))
 
 			By("reporting Ready")

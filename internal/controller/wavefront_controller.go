@@ -596,7 +596,7 @@ func (r *WavefrontReconciler) execute(ctx context.Context, p *pass) error {
 			r.event(p.wf, corev1.EventTypeNormal, reasonShadowAdmission,
 				"would pin %s to %s (from %s, ref %s)",
 				admission.Source, admission.To, previousPin(admission), admission.ObservedRef)
-			r.Metrics.AdmissionsTotal.WithLabelValues(resultShadow).Inc()
+			r.Metrics.Wavefront(p.wf.Name).CountAdmission(resultShadow)
 		}
 		return nil
 	}
@@ -627,7 +627,7 @@ func (r *WavefrontReconciler) advance(ctx context.Context, p *pass, admission en
 		return nil
 	case errors.Is(err, pin.ErrHeld):
 		p.holds[admission.Source] = r.holderOf(ctx, admission.Source)
-		r.Metrics.AdmissionsTotal.WithLabelValues(resultConflict).Inc()
+		r.Metrics.Wavefront(p.wf.Name).CountAdmission(resultConflict)
 		return nil
 	default:
 		r.event(p.wf, corev1.EventTypeWarning, reasonPinFailed,
@@ -666,9 +666,9 @@ func (r *WavefrontReconciler) pinEvent(p *pass, admission engine.Admission) {
 	}
 	r.event(p.wf, corev1.EventTypeNormal, reason, "%s", message)
 
-	r.Metrics.AdmissionsTotal.WithLabelValues(result).Inc()
+	r.Metrics.Wavefront(p.wf.Name).CountAdmission(result)
 	if since := admission.PendingSince; !since.IsZero() {
-		r.Metrics.AdmissionWaitSeconds.Observe(r.Clock().Sub(since).Seconds())
+		r.Metrics.Wavefront(p.wf.Name).ObserveAdmissionWait(r.Clock().Sub(since).Seconds())
 	}
 }
 

@@ -34,11 +34,11 @@ func TestNewExpositionText(t *testing.T) {
 	reg := prometheus.NewRegistry()
 	instr := metrics.New(reg)
 
-	instr.AdmissionsTotal.WithLabelValues("admitted").Inc()
-	instr.AdmissionsTotal.WithLabelValues("admitted").Inc()
-	instr.AdmissionsTotal.WithLabelValues("initial").Inc()
-	instr.AdmissionsTotal.WithLabelValues("shadow").Inc()
-	instr.AdmissionsTotal.WithLabelValues("conflict").Inc()
+	instr.AdmissionsTotal.WithLabelValues("fleet", "admitted").Inc()
+	instr.AdmissionsTotal.WithLabelValues("fleet", "admitted").Inc()
+	instr.AdmissionsTotal.WithLabelValues("fleet", "initial").Inc()
+	instr.AdmissionsTotal.WithLabelValues("fleet", "shadow").Inc()
+	instr.AdmissionsTotal.WithLabelValues("fleet", "conflict").Inc()
 
 	instr.PinLagSeconds.WithLabelValues("fleet", "Kustomization", "flux-system", "team-a").Set(42)
 	instr.PinLagSeconds.WithLabelValues("fleet", "Kustomization", "flux-system", "team-b").Set(7)
@@ -46,8 +46,8 @@ func TestNewExpositionText(t *testing.T) {
 	// owning Wavefront so one Wavefront's pass cannot retire another's series.
 	instr.PinLagSeconds.WithLabelValues("infra", "Kustomization", "flux-system", "team-c").Set(11)
 
-	instr.AdmissionWaitSeconds.Observe(45)
-	instr.AdmissionWaitSeconds.Observe(600)
+	instr.AdmissionWaitSeconds.WithLabelValues("fleet").Observe(45)
+	instr.AdmissionWaitSeconds.WithLabelValues("fleet").Observe(600)
 
 	instr.BlockedNodes.WithLabelValues("fleet", "AncestorPending").Set(3)
 	instr.BlockedNodes.WithLabelValues("fleet", "SelfHeld").Set(1)
@@ -61,10 +61,10 @@ func TestNewExpositionText(t *testing.T) {
 	const want = `
 # HELP wavefront_admissions_total Total pin admissions, by result (admitted, initial, shadow, conflict).
 # TYPE wavefront_admissions_total counter
-wavefront_admissions_total{result="admitted"} 2
-wavefront_admissions_total{result="conflict"} 1
-wavefront_admissions_total{result="initial"} 1
-wavefront_admissions_total{result="shadow"} 1
+wavefront_admissions_total{result="admitted",wavefront="fleet"} 2
+wavefront_admissions_total{result="conflict",wavefront="fleet"} 1
+wavefront_admissions_total{result="initial",wavefront="fleet"} 1
+wavefront_admissions_total{result="shadow",wavefront="fleet"} 1
 # HELP wavefront_blocked_nodes Number of nodes currently blocked, by owning Wavefront and reason; sum() over the wavefront label for a fleet total.
 # TYPE wavefront_blocked_nodes gauge
 wavefront_blocked_nodes{reason="AncestorPending",wavefront="fleet"} 3
@@ -95,7 +95,11 @@ wavefront_ref_list_failures_total{host="git.example.com"} 5
 	if count := testutil.CollectAndCount(instr.AdmissionWaitSeconds); count != 1 {
 		t.Errorf("AdmissionWaitSeconds collected %d metrics, want 1", count)
 	}
-	if got := histogramSampleCount(t, instr.AdmissionWaitSeconds); got != 2 {
+	fleetWait, ok := instr.AdmissionWaitSeconds.WithLabelValues("fleet").(prometheus.Histogram)
+	if !ok {
+		t.Fatalf("AdmissionWaitSeconds.WithLabelValues did not return a prometheus.Histogram")
+	}
+	if got := histogramSampleCount(t, fleetWait); got != 2 {
 		t.Errorf("AdmissionWaitSeconds sample count = %v, want 2", got)
 	}
 }
@@ -123,6 +127,7 @@ func TestNewCollectAndLint(t *testing.T) {
 		instr.BlockedNodes,
 		instr.RefListFailures,
 		instr.PinnedFetchFailures,
+		instr.CredentialReadFailures,
 	}
 	for _, c := range collectors {
 		problems, err := testutil.CollectAndLint(c)
@@ -153,10 +158,10 @@ func TestNewDoubleRegisterSameRegistryDoesNotPanic(t *testing.T) {
 		second = metrics.New(reg)
 	}()
 
-	first.AdmissionsTotal.WithLabelValues("admitted").Inc()
-	second.AdmissionsTotal.WithLabelValues("admitted").Inc()
+	first.AdmissionsTotal.WithLabelValues("fleet", "admitted").Inc()
+	second.AdmissionsTotal.WithLabelValues("fleet", "admitted").Inc()
 
-	if got := testutil.ToFloat64(second.AdmissionsTotal.WithLabelValues("admitted")); got != 2 {
+	if got := testutil.ToFloat64(second.AdmissionsTotal.WithLabelValues("fleet", "admitted")); got != 2 {
 		t.Errorf("admissions after two increments via either handle = %v, want 2 (same underlying series)", got)
 	}
 
@@ -180,9 +185,54 @@ func TestNopIsolatesRegistries(t *testing.T) {
 	a := metrics.Nop()
 	b := metrics.Nop()
 
-	a.AdmissionsTotal.WithLabelValues("admitted").Inc()
+	a.AdmissionsTotal.WithLabelValues("fleet", "admitted").Inc()
 
-	if got := testutil.ToFloat64(b.AdmissionsTotal.WithLabelValues("admitted")); got != 0 {
+	if got := testutil.ToFloat64(b.AdmissionsTotal.WithLabelValues("fleet", "admitted")); got != 0 {
 		t.Errorf("second Nop's counter = %v, want 0: independent registries must not share state", got)
+	}
+}
+
+// TestWavefrontScopeRetireLeavesSiblings covers Retire: it deletes only the
+// per-pass gauges (PinLagSeconds, BlockedNodes, PinnedFetchFailures) for the
+// named Wavefront, leaving a co-resident Wavefront's series untouched.
+func TestWavefrontScopeRetireLeavesSiblings(t *testing.T) {
+	instr := metrics.Nop()
+	instr.Wavefront("fleet").SetPinnedFetchFailures(2)
+	instr.Wavefront("infra").SetPinnedFetchFailures(1)
+	instr.Wavefront("fleet").SetBlocked("UnsettledAncestor", 3)
+	instr.Wavefront("fleet").SetPinLag("Kustomization", "ns", "app", 42)
+
+	instr.Wavefront("fleet").Retire()
+
+	if got := testutil.CollectAndCount(instr.PinnedFetchFailures); got != 1 {
+		t.Errorf("PinnedFetchFailures series = %d, want 1 (sibling only)", got)
+	}
+	if got := testutil.CollectAndCount(instr.PinLagSeconds); got != 0 {
+		t.Errorf("PinLagSeconds series = %d, want 0", got)
+	}
+	if got := testutil.CollectAndCount(instr.BlockedNodes); got != 0 {
+		t.Errorf("BlockedNodes series = %d, want 0", got)
+	}
+	if got := testutil.ToFloat64(instr.PinnedFetchFailures.WithLabelValues("infra")); got != 1 {
+		t.Errorf("sibling PinnedFetchFailures = %v, want 1", got)
+	}
+}
+
+// TestWavefrontScopeForgetRetiresCumulativeSeries covers Forget: unlike
+// Retire, it also deletes the cumulative counter and histogram series for the
+// named Wavefront, since no pass ever recomputes those wholesale.
+func TestWavefrontScopeForgetRetiresCumulativeSeries(t *testing.T) {
+	instr := metrics.Nop()
+	instr.Wavefront("fleet").CountAdmission("admitted")
+	instr.Wavefront("infra").CountAdmission("admitted")
+	instr.Wavefront("fleet").ObserveAdmissionWait(45)
+
+	instr.Wavefront("fleet").Forget()
+
+	if got := testutil.CollectAndCount(instr.AdmissionsTotal); got != 1 {
+		t.Errorf("AdmissionsTotal series = %d, want 1 (sibling only)", got)
+	}
+	if got := testutil.CollectAndCount(instr.AdmissionWaitSeconds); got != 0 {
+		t.Errorf("AdmissionWaitSeconds series = %d, want 0", got)
 	}
 }
