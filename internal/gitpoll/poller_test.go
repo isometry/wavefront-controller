@@ -56,7 +56,8 @@ const (
 	shaA = "1111111111111111111111111111111111111111"
 	shaB = "2222222222222222222222222222222222222222"
 
-	failuresMetric = "wavefront_ref_list_failures_total"
+	failuresMetric           = "wavefront_ref_list_failures_total"
+	credentialFailuresMetric = "wavefront_credential_read_failures_total"
 
 	// listDelay is the fake lister's simulated round-trip; inside a synctest
 	// bubble it is virtual time, so it costs the test nothing.
@@ -64,6 +65,11 @@ const (
 )
 
 var errListFailed = errors.New("simulated ref listing failure")
+
+// errSecretReadFailed simulates an apiserver blip reading a credential
+// Secret — distinct from errListFailed so a test can tell which counter a
+// failure landed on.
+var errSecretReadFailed = errors.New("simulated secret read failure")
 
 // --- fakes ------------------------------------------------------------------
 
@@ -179,12 +185,14 @@ func hostOf(repoURL string) string {
 type fakeSecrets struct {
 	mu   sync.Mutex
 	data map[types.NamespacedName]map[string][]byte
+	errs map[types.NamespacedName]error
 	gets map[types.NamespacedName]int
 }
 
 func newFakeSecrets() *fakeSecrets {
 	return &fakeSecrets{
 		data: map[types.NamespacedName]map[string][]byte{},
+		errs: map[types.NamespacedName]error{},
 		gets: map[types.NamespacedName]int{},
 	}
 }
@@ -194,6 +202,9 @@ func (f *fakeSecrets) Get(_ context.Context, key client.ObjectKey, obj client.Ob
 	defer f.mu.Unlock()
 
 	f.gets[key]++
+	if err := f.errs[key]; err != nil {
+		return err
+	}
 	data, ok := f.data[key]
 	if !ok {
 		return apierrors.NewNotFound(schema.GroupResource{Resource: "secrets"}, key.Name)
@@ -216,6 +227,14 @@ func (f *fakeSecrets) set(key types.NamespacedName, data map[string][]byte) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.data[key] = data
+}
+
+// setErr makes Get(key) fail with err, simulating an apiserver blip reading
+// the credential Secret.
+func (f *fakeSecrets) setErr(key types.NamespacedName, err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.errs[key] = err
 }
 
 func (f *fakeSecrets) getCount(key types.NamespacedName) int {
@@ -297,6 +316,28 @@ func failureCount(t *testing.T, reg *prometheus.Registry, host string) float64 {
 	return 0
 }
 
+// credentialFailureCount reads wavefront_credential_read_failures_total — a
+// plain Counter (no labels), unlike failureCount's CounterVec.
+func credentialFailureCount(t *testing.T, reg *prometheus.Registry) float64 {
+	t.Helper()
+
+	families, err := reg.Gather()
+	if err != nil {
+		t.Fatalf("Gather: %v", err)
+	}
+	for _, family := range families {
+		if family.GetName() != credentialFailuresMetric {
+			continue
+		}
+		var total float64
+		for _, metric := range family.GetMetric() {
+			total += metric.GetCounter().GetValue()
+		}
+		return total
+	}
+	return 0
+}
+
 // --- tests ------------------------------------------------------------------
 
 func TestPollerIsManagerRunnable(t *testing.T) {
@@ -309,7 +350,7 @@ func TestPollerSweepsOnInterval(t *testing.T) {
 		lister.setAdvertised(alphaURL, map[string]string{trackedRef: shaA})
 		notify := &counter{}
 
-		p := gitpoll.NewPoller(newFakeSecrets(), lister, notify.inc, nil)
+		p := gitpoll.NewPoller(newFakeSecrets(), lister, notify.inc, nil, nil)
 		p.Configure(10*time.Second, 2)
 		p.SetTargets([]gitpoll.Target{target("alpha", alphaURL)})
 
@@ -362,7 +403,7 @@ func TestPollerNotifiesOncePerSweep(t *testing.T) {
 		}
 		notify := &counter{}
 
-		p := gitpoll.NewPoller(newFakeSecrets(), lister, notify.inc, nil)
+		p := gitpoll.NewPoller(newFakeSecrets(), lister, notify.inc, nil, nil)
 		p.Configure(10*time.Second, 2)
 		p.SetTargets([]gitpoll.Target{
 			target("alpha", alphaURL),
@@ -407,7 +448,7 @@ func TestPollerBoundsPerHostConcurrency(t *testing.T) {
 		lister.setAdvertised(otherURL, map[string]string{trackedRef: shaA})
 		targets = append(targets, target(otherHostTarget, otherURL))
 
-		p := gitpoll.NewPoller(newFakeSecrets(), lister, func() {}, nil)
+		p := gitpoll.NewPoller(newFakeSecrets(), lister, func() {}, nil, nil)
 		p.Configure(time.Minute, perHost)
 		p.SetTargets(targets)
 
@@ -436,7 +477,7 @@ func TestPollerFirstObservedStableUntilSHAChanges(t *testing.T) {
 		lister := newFakeLister()
 		lister.setAdvertised(alphaURL, map[string]string{trackedRef: shaA})
 
-		p := gitpoll.NewPoller(newFakeSecrets(), lister, func() {}, nil)
+		p := gitpoll.NewPoller(newFakeSecrets(), lister, func() {}, nil, nil)
 		p.Configure(10*time.Second, 2)
 		p.SetTargets([]gitpoll.Target{target("alpha", alphaURL)})
 
@@ -478,7 +519,7 @@ func TestPollerFailureRetainsLastGoodSHA(t *testing.T) {
 		lister.setAdvertised(alphaURL, map[string]string{trackedRef: shaA})
 		reg := prometheus.NewRegistry()
 
-		p := gitpoll.NewPoller(newFakeSecrets(), lister, func() {}, metrics.New(reg).RefListFailures)
+		p := gitpoll.NewPoller(newFakeSecrets(), lister, func() {}, metrics.New(reg).RefListFailures, nil)
 		p.Configure(10*time.Second, 2)
 		p.SetTargets([]gitpoll.Target{target("alpha", alphaURL)})
 
@@ -542,7 +583,7 @@ func TestPollerWrappedCancelledErrorIsCountedFailure(t *testing.T) {
 		lister.setAdvertised(alphaURL, map[string]string{trackedRef: shaA})
 		reg := prometheus.NewRegistry()
 
-		p := gitpoll.NewPoller(newFakeSecrets(), lister, func() {}, metrics.New(reg).RefListFailures)
+		p := gitpoll.NewPoller(newFakeSecrets(), lister, func() {}, metrics.New(reg).RefListFailures, nil)
 		p.Configure(10*time.Second, 2)
 		p.SetTargets([]gitpoll.Target{target("alpha", alphaURL)})
 
@@ -592,7 +633,7 @@ func TestPollerShutdownDiscardsInFlightListing(t *testing.T) {
 		lister.setAdvertised(alphaURL, map[string]string{trackedRef: shaA})
 		reg := prometheus.NewRegistry()
 
-		p := gitpoll.NewPoller(newFakeSecrets(), lister, func() {}, metrics.New(reg).RefListFailures)
+		p := gitpoll.NewPoller(newFakeSecrets(), lister, func() {}, metrics.New(reg).RefListFailures, nil)
 		p.Configure(10*time.Second, 2)
 		p.SetTargets([]gitpoll.Target{target("alpha", alphaURL)})
 
@@ -648,7 +689,7 @@ func TestPollerSetTargetsReplacesAndDropsObservations(t *testing.T) {
 		lister.setAdvertised(alphaURL, map[string]string{trackedRef: shaA})
 		lister.setAdvertised(betaURL, map[string]string{trackedRef: shaB})
 
-		p := gitpoll.NewPoller(newFakeSecrets(), lister, func() {}, nil)
+		p := gitpoll.NewPoller(newFakeSecrets(), lister, func() {}, nil, nil)
 		p.Configure(10*time.Second, 2)
 		p.SetTargets([]gitpoll.Target{target("alpha", alphaURL), target("beta", betaURL)})
 
@@ -703,7 +744,7 @@ func TestPollerSetTargetsInvalidatesChangedPlumbing(t *testing.T) {
 				lister.setAdvertised(alphaURL, map[string]string{trackedRef: shaA, tagRefV2: shaB})
 				lister.setAdvertised(betaURL, map[string]string{trackedRef: shaB})
 
-				p := gitpoll.NewPoller(newFakeSecrets(), lister, func() {}, nil)
+				p := gitpoll.NewPoller(newFakeSecrets(), lister, func() {}, nil, nil)
 				p.Configure(10*time.Second, 2)
 				p.SetTargets([]gitpoll.Target{target("alpha", alphaURL)})
 
@@ -745,7 +786,7 @@ func TestPollerMidSweepPlumbingSwapDiscardsInFlightResult(t *testing.T) {
 		lister.setAdvertised(betaURL, map[string]string{tagRefV2: shaB})
 		gate := lister.gate(alphaURL)
 
-		p := gitpoll.NewPoller(newFakeSecrets(), lister, func() {}, nil)
+		p := gitpoll.NewPoller(newFakeSecrets(), lister, func() {}, nil, nil)
 		p.Configure(10*time.Second, 2)
 		p.SetTargets([]gitpoll.Target{target("alpha", alphaURL)})
 
@@ -794,7 +835,7 @@ func TestPollerReadsSecretFreshEachSweep(t *testing.T) {
 		lister := newFakeLister()
 		lister.setAdvertised(alphaURL, map[string]string{trackedRef: shaA})
 
-		p := gitpoll.NewPoller(secrets, lister, func() {}, nil)
+		p := gitpoll.NewPoller(secrets, lister, func() {}, nil, nil)
 		p.Configure(10*time.Second, 2)
 
 		tgt := target("alpha", alphaURL)
@@ -830,14 +871,20 @@ func TestPollerReadsSecretFreshEachSweep(t *testing.T) {
 	})
 }
 
+// TestPollerMissingSecretIsAFailure covers finding #3 (misattribution): a
+// missing/unreadable credential Secret is an apiserver-side problem, not a
+// git-host one, so it must land on wavefront_credential_read_failures_total
+// and leave wavefront_ref_list_failures_total{host} untouched — while the
+// target's Observation.Err is still stamped.
 func TestPollerMissingSecretIsAFailure(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		secretRef := types.NamespacedName{Namespace: testNamespace, Name: "absent"}
 		reg := prometheus.NewRegistry()
+		instr := metrics.New(reg)
 		lister := newFakeLister()
 		lister.setAdvertised(alphaURL, map[string]string{trackedRef: shaA})
 
-		p := gitpoll.NewPoller(newFakeSecrets(), lister, func() {}, metrics.New(reg).RefListFailures)
+		p := gitpoll.NewPoller(newFakeSecrets(), lister, func() {}, instr.RefListFailures, instr.CredentialReadFailures)
 		p.Configure(10*time.Second, 2)
 
 		tgt := target("alpha", alphaURL)
@@ -863,8 +910,152 @@ func TestPollerMissingSecretIsAFailure(t *testing.T) {
 		if got := lister.callCount(alphaURL); got != 0 {
 			t.Errorf("listings = %d, want 0 when the secret cannot be read", got)
 		}
+		if got := failureCount(t, reg, exampleHost); got != 0 {
+			t.Errorf("%s{host=%q} = %v, want 0: a Secret-read failure must not blame the git host", failuresMetric, exampleHost, got)
+		}
+		if got := credentialFailureCount(t, reg); got != 1 {
+			t.Errorf("%s = %v, want 1", credentialFailuresMetric, got)
+		}
+	})
+}
+
+// TestPollerDedupsSecretReadsPerSweep covers finding #4 (no dedup): a fleet
+// routinely shares one deploy-key Secret across hundreds of targets, and each
+// sweep must read it once per distinct SecretRef, not once per target. The
+// memo must not survive past the sweep it was built for, so rotated
+// credentials are still picked up next sweep.
+func TestPollerDedupsSecretReadsPerSweep(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		shared := types.NamespacedName{Namespace: testNamespace, Name: "shared-auth"}
+		distinct := types.NamespacedName{Namespace: testNamespace, Name: "distinct-auth"}
+
+		secrets := newFakeSecrets()
+		secrets.set(shared, map[string][]byte{keyUsername: []byte("alice"), keyPassword: []byte("pw")})
+		secrets.set(distinct, map[string][]byte{keyUsername: []byte("bob"), keyPassword: []byte("pw2")})
+
+		lister := newFakeLister()
+		var targets []gitpoll.Target
+		for i := range 5 {
+			u := "https://" + exampleHost + "/org/shared" + string(rune('a'+i)) + ".git"
+			lister.setAdvertised(u, map[string]string{trackedRef: shaA})
+			tgt := target("shared"+string(rune('a'+i)), u)
+			tgt.SecretRef = &shared
+			targets = append(targets, tgt)
+		}
+		distinctURL := "https://" + exampleHost + "/org/distinct.git"
+		lister.setAdvertised(distinctURL, map[string]string{trackedRef: shaA})
+		distinctTgt := target("distinct", distinctURL)
+		distinctTgt.SecretRef = &distinct
+		targets = append(targets, distinctTgt)
+
+		p := gitpoll.NewPoller(secrets, lister, func() {}, nil, nil)
+		p.Configure(10*time.Second, 4)
+		p.SetTargets(targets)
+
+		stop := runPoller(t, p)
+		defer stop()
+
+		time.Sleep(10 * time.Second)
+		synctest.Wait()
+
+		if got := secrets.getCount(shared); got != 1 {
+			t.Errorf("Gets for a Secret shared by 5 targets = %d, want exactly 1 per sweep", got)
+		}
+		if got := secrets.getCount(distinct); got != 1 {
+			t.Errorf("Gets for a distinct ref = %d, want 1", got)
+		}
+
+		// Next sweep must read afresh: the memo dies with the sweep.
+		time.Sleep(10 * time.Second)
+		synctest.Wait()
+
+		if got := secrets.getCount(shared); got != 2 {
+			t.Errorf("Gets for the shared ref after two sweeps = %d, want 2 (memo must not survive past its sweep)", got)
+		}
+	})
+}
+
+// TestPollerCredentialReadFailureCountedSeparately covers findings #3/#4
+// together: a Secret-read failure must land on
+// wavefront_credential_read_failures_total exactly once per distinct
+// SecretRef regardless of how many targets share it — never on
+// wavefront_ref_list_failures_total{host} — while every sharing target still
+// gets its Observation.Err stamped so the result is queued as usual.
+func TestPollerCredentialReadFailureCountedSeparately(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		shared := types.NamespacedName{Namespace: testNamespace, Name: "shared-auth"}
+		secrets := newFakeSecrets()
+		secrets.setErr(shared, errSecretReadFailed)
+
+		lister := newFakeLister()
+		var targets []gitpoll.Target
+		for i := range 5 {
+			u := "https://" + exampleHost + "/org/cred" + string(rune('a'+i)) + ".git"
+			lister.setAdvertised(u, map[string]string{trackedRef: shaA})
+			tgt := target("cred"+string(rune('a'+i)), u)
+			tgt.SecretRef = &shared
+			targets = append(targets, tgt)
+		}
+
+		reg := prometheus.NewRegistry()
+		instr := metrics.New(reg)
+
+		p := gitpoll.NewPoller(secrets, lister, func() {}, instr.RefListFailures, instr.CredentialReadFailures)
+		p.Configure(10*time.Second, 4)
+		p.SetTargets(targets)
+
+		stop := runPoller(t, p)
+		defer stop()
+
+		time.Sleep(10 * time.Second)
+		synctest.Wait()
+
+		if got := credentialFailureCount(t, reg); got != 1 {
+			t.Errorf("%s = %v, want 1 (once per distinct ref, not per target)", credentialFailuresMetric, got)
+		}
+		if got := failureCount(t, reg, exampleHost); got != 0 {
+			t.Errorf("%s{host=%q} = %v, want 0: a credential-read failure must not blame the git host", failuresMetric, exampleHost, got)
+		}
+		for _, tgt := range targets {
+			obs, ok := p.Observation(tgt.Source)
+			if !ok {
+				t.Fatalf("Observation missing for %v", tgt.Source)
+			}
+			if obs.Err == nil {
+				t.Errorf("Observation.Err for %v = nil, want the credential failure surfaced", tgt.Source)
+			}
+		}
+	})
+}
+
+// TestPollerListingFailureStillCountsHostNotCredential is the regression
+// guard for the fix: an ordinary ref-listing failure (no Secret involved)
+// must still count against wavefront_ref_list_failures_total{host}, and must
+// never touch wavefront_credential_read_failures_total.
+func TestPollerListingFailureStillCountsHostNotCredential(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		lister := newFakeLister()
+		lister.setAdvertised(alphaURL, map[string]string{trackedRef: shaA})
+		lister.setErr(alphaURL, errListFailed)
+
+		reg := prometheus.NewRegistry()
+		instr := metrics.New(reg)
+
+		p := gitpoll.NewPoller(newFakeSecrets(), lister, func() {}, instr.RefListFailures, instr.CredentialReadFailures)
+		p.Configure(10*time.Second, 2)
+		p.SetTargets([]gitpoll.Target{target("alpha", alphaURL)})
+
+		stop := runPoller(t, p)
+		defer stop()
+
+		time.Sleep(10 * time.Second)
+		synctest.Wait()
+
 		if got := failureCount(t, reg, exampleHost); got != 1 {
 			t.Errorf("%s{host=%q} = %v, want 1", failuresMetric, exampleHost, got)
+		}
+		if got := credentialFailureCount(t, reg); got != 0 {
+			t.Errorf("%s = %v, want 0: a listing failure must not count as a credential-read failure", credentialFailuresMetric, got)
 		}
 	})
 }
@@ -874,7 +1065,7 @@ func TestPollerUnadvertisedTrackingRefIsAFailure(t *testing.T) {
 		lister := newFakeLister()
 		lister.setAdvertised(alphaURL, map[string]string{"refs/heads/other": shaA})
 
-		p := gitpoll.NewPoller(newFakeSecrets(), lister, func() {}, nil)
+		p := gitpoll.NewPoller(newFakeSecrets(), lister, func() {}, nil, nil)
 		p.Configure(10*time.Second, 2)
 		p.SetTargets([]gitpoll.Target{target("alpha", alphaURL)})
 
@@ -901,7 +1092,7 @@ func TestPollerPrefersPeeledTag(t *testing.T) {
 		lister := newFakeLister()
 		lister.setAdvertised(alphaURL, map[string]string{tag: shaA, tag + "^{}": shaB})
 
-		p := gitpoll.NewPoller(newFakeSecrets(), lister, func() {}, nil)
+		p := gitpoll.NewPoller(newFakeSecrets(), lister, func() {}, nil, nil)
 		p.Configure(10*time.Second, 2)
 		p.SetTargets([]gitpoll.Target{{Source: source("alpha"), URL: alphaURL, TrackingRef: tag}})
 
@@ -937,7 +1128,7 @@ func TestPollerConfigureClampsNonPositiveValues(t *testing.T) {
 			targets = append(targets, target("clamp"+string(rune('a'+i)), u))
 		}
 
-		p := gitpoll.NewPoller(newFakeSecrets(), lister, func() {}, nil)
+		p := gitpoll.NewPoller(newFakeSecrets(), lister, func() {}, nil, nil)
 		p.Configure(0, 0)
 		p.SetTargets(targets)
 
@@ -977,7 +1168,7 @@ func TestPollerObservationsNeverMixSweeps(t *testing.T) {
 		lister.setAdvertised(alphaURL, map[string]string{trackedRef: shaA})
 		lister.setAdvertised(betaURL, map[string]string{trackedRef: shaA})
 
-		p := gitpoll.NewPoller(newFakeSecrets(), lister, func() {}, nil)
+		p := gitpoll.NewPoller(newFakeSecrets(), lister, func() {}, nil, nil)
 		p.Configure(10*time.Second, 4)
 		p.SetTargets([]gitpoll.Target{target("alpha", alphaURL), target("beta", betaURL)})
 
@@ -1032,7 +1223,7 @@ func TestPollerObservationsSnapshotIsIndependent(t *testing.T) {
 	lister.setAdvertised(alphaURL, map[string]string{trackedRef: shaA})
 	lister.setAdvertised(betaURL, map[string]string{trackedRef: shaB})
 
-	p := gitpoll.NewPoller(newFakeSecrets(), lister, func() {}, nil)
+	p := gitpoll.NewPoller(newFakeSecrets(), lister, func() {}, nil, nil)
 	p.Configure(time.Millisecond, 4)
 	p.SetTargets([]gitpoll.Target{target("alpha", alphaURL), target("beta", betaURL)})
 
@@ -1078,7 +1269,7 @@ func TestPollerConfigureAppliesWithoutWaitingOutTheOldInterval(t *testing.T) {
 		lister := newFakeLister()
 		lister.setAdvertised(alphaURL, map[string]string{trackedRef: shaA})
 
-		p := gitpoll.NewPoller(newFakeSecrets(), lister, func() {}, nil)
+		p := gitpoll.NewPoller(newFakeSecrets(), lister, func() {}, nil, nil)
 		p.Configure(90*time.Second, 4)
 		p.SetTargets([]gitpoll.Target{target("alpha", alphaURL)})
 
@@ -1112,7 +1303,7 @@ func TestPollerRepeatedConfigureDoesNotStarveSweeps(t *testing.T) {
 		lister := newFakeLister()
 		lister.setAdvertised(alphaURL, map[string]string{trackedRef: shaA})
 
-		p := gitpoll.NewPoller(newFakeSecrets(), lister, func() {}, nil)
+		p := gitpoll.NewPoller(newFakeSecrets(), lister, func() {}, nil, nil)
 		p.Configure(10*time.Second, 4)
 		p.SetTargets([]gitpoll.Target{target("alpha", alphaURL)})
 
@@ -1135,7 +1326,7 @@ func TestPollerRepeatedConfigureDoesNotStarveSweeps(t *testing.T) {
 
 func TestPollerStartBlocksUntilContextDone(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		p := gitpoll.NewPoller(newFakeSecrets(), newFakeLister(), func() {}, nil)
+		p := gitpoll.NewPoller(newFakeSecrets(), newFakeLister(), func() {}, nil, nil)
 		p.Configure(10*time.Second, 2)
 
 		ctx, cancel := context.WithCancel(t.Context())

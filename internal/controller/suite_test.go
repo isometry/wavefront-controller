@@ -177,7 +177,7 @@ var _ = BeforeSuite(func() {
 	lister = newFakeLister()
 	// Non-caching reader, exactly as main wires it: the poller must never
 	// start a cluster-wide Secret informer.
-	poller = gitpoll.NewPoller(mgr.GetAPIReader(), lister, notify, instruments.RefListFailures)
+	poller = gitpoll.NewPoller(mgr.GetAPIReader(), lister, notify, instruments.RefListFailures, instruments.CredentialReadFailures)
 	poller.Configure(100*time.Millisecond, 4)
 	Expect(mgr.Add(poller)).To(Succeed())
 

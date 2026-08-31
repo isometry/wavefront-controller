@@ -18,6 +18,7 @@ package gitpoll
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"maps"
 	"net/url"
@@ -61,6 +62,58 @@ type Observation struct {
 	Err           error     // last listing error, nil on success
 }
 
+// credentialError marks a failure to read a target's credential Secret —
+// an apiserver problem, not a git-host one: poll must not attribute it to
+// wavefront_ref_list_failures_total{host}.
+type credentialError struct{ err error }
+
+func (e *credentialError) Error() string { return e.err.Error() }
+func (e *credentialError) Unwrap() error { return e.err }
+
+// sweepSecrets memoizes credential Secret reads for one sweep: a fleet
+// routinely shares one deploy-key Secret across hundreds of targets. The
+// memo dies with the sweep, so credentials are still resolved afresh every
+// sweep — once per distinct SecretRef instead of once per target.
+type sweepSecrets struct {
+	reader   client.Reader
+	failures prometheus.Counter
+
+	mu      sync.Mutex
+	entries map[types.NamespacedName]*secretEntry
+}
+
+type secretEntry struct {
+	once sync.Once
+	data map[string][]byte
+	err  error
+}
+
+func (s *sweepSecrets) get(ctx context.Context, ref types.NamespacedName) (map[string][]byte, error) {
+	s.mu.Lock()
+	e, ok := s.entries[ref]
+	if !ok {
+		e = &secretEntry{}
+		s.entries[ref] = e
+	}
+	s.mu.Unlock()
+
+	e.once.Do(func() {
+		var secret corev1.Secret
+		if err := s.reader.Get(ctx, ref, &secret); err != nil {
+			e.err = &credentialError{err: fmt.Errorf("getting secret %s: %w", ref, err)}
+			// Counted here, not in poll: once per distinct ref per sweep,
+			// and never for a read that only failed because the sweep is
+			// shutting down.
+			if ctx.Err() == nil && s.failures != nil {
+				s.failures.Inc()
+			}
+			return
+		}
+		e.data = secret.Data
+	})
+	return e.data, e.err
+}
+
 // Poller periodically sweeps all targets, batched per git host with bounded
 // per-host concurrency (DESIGN §3.1, §4.1 poll.*). Implements manager.Runnable.
 type Poller struct {
@@ -73,6 +126,12 @@ type Poller struct {
 	// (wavefront_ref_list_failures_total, DESIGN §6); nil when the caller
 	// supplied no counter, in which case nothing is recorded.
 	failures *prometheus.CounterVec
+	// credentialFailures counts credential Secret-read failures
+	// (wavefront_credential_read_failures_total); nil when the caller
+	// supplied no counter, in which case nothing is recorded. Never the same
+	// signal as failures: a Secret-read failure is an apiserver problem, not
+	// a git-host one (see credentialError).
+	credentialFailures prometheus.Counter
 
 	// reconfigured wakes a waiting Start when the sweep cadence changes, so a
 	// shortened interval applies now rather than after the old one elapses.
@@ -126,17 +185,19 @@ var _ manager.Runnable = (*Poller)(nil)
 // NewPoller returns a Poller with the CRD's default cadence, ready for
 // Configure and SetTargets.
 //
-// failures is wavefront_ref_list_failures_total (DESIGN §6), already created
+// failures is wavefront_ref_list_failures_total and credentialFailures is
+// wavefront_credential_read_failures_total (DESIGN §6), both already created
 // and registered by the caller — internal/metrics owns every collector's
-// registration, so the poller only ever records against a handle it is
-// given. failures may be nil, in which case no metric is recorded.
-func NewPoller(secrets client.Reader, lister Lister, notify func(), failures *prometheus.CounterVec) *Poller {
+// registration, so the poller only ever records against handles it is
+// given. Both may be nil, in which case nothing is recorded.
+func NewPoller(secrets client.Reader, lister Lister, notify func(), failures *prometheus.CounterVec, credentialFailures prometheus.Counter) *Poller {
 	return &Poller{
 		secrets:            secrets,
 		lister:             lister,
 		notify:             notify,
 		strategy:           selection.TrackRef(),
 		failures:           failures,
+		credentialFailures: credentialFailures,
 		interval:           DefaultInterval,
 		perHostConcurrency: DefaultPerHostConcurrency,
 		reconfigured:       make(chan struct{}, 1),
@@ -284,10 +345,19 @@ func (p *Poller) sweep(ctx context.Context) {
 
 	results := make(chan result, len(targets))
 
+	// One memo for the whole sweep: a fleet routinely shares one deploy-key
+	// Secret across hundreds of targets, and it dies with this sweep so
+	// credentials are still resolved afresh every sweep (see sweepSecrets).
+	creds := &sweepSecrets{
+		reader:   p.secrets,
+		failures: p.credentialFailures,
+		entries:  map[types.NamespacedName]*secretEntry{},
+	}
+
 	var hosts sync.WaitGroup
 	for host, hostTargets := range byHost {
 		hosts.Go(func() {
-			p.sweepHost(ctx, host, hostTargets, perHost, results)
+			p.sweepHost(ctx, host, hostTargets, perHost, creds, results)
 		})
 	}
 	hosts.Wait()
@@ -301,7 +371,7 @@ func (p *Poller) sweep(ctx context.Context) {
 }
 
 // sweepHost polls one host's targets, at most perHost at a time.
-func (p *Poller) sweepHost(ctx context.Context, host string, targets []Target, perHost int, results chan<- result) {
+func (p *Poller) sweepHost(ctx context.Context, host string, targets []Target, perHost int, creds *sweepSecrets, results chan<- result) {
 	semaphore := make(chan struct{}, perHost)
 
 	var wg sync.WaitGroup
@@ -314,7 +384,7 @@ func (p *Poller) sweepHost(ctx context.Context, host string, targets []Target, p
 				return
 			}
 
-			p.poll(ctx, host, t, results)
+			p.poll(ctx, host, t, creds, results)
 		})
 	}
 	wg.Wait()
@@ -335,8 +405,8 @@ func (p *Poller) sweepHost(ctx context.Context, host string, targets []Target, p
 // spuriously swallow a genuine listing timeout: the lister's own per-listing
 // WithTimeout (lister.go:55-59) is a child context, so its expiry leaves the
 // sweep ctx healthy and the failure is correctly still counted.
-func (p *Poller) poll(ctx context.Context, host string, t Target, results chan<- result) {
-	sha, err := p.observe(ctx, t)
+func (p *Poller) poll(ctx context.Context, host string, t Target, creds *sweepSecrets, results chan<- result) {
+	sha, err := p.observe(ctx, t, creds)
 	if ctx.Err() != nil {
 		// The manager is shutting the poller down (or this sweep was
 		// superseded): whatever observe returned answers no question anyone
@@ -344,7 +414,10 @@ func (p *Poller) poll(ctx context.Context, host string, t Target, results chan<-
 		return
 	}
 	if err != nil {
-		p.countFailure(host)
+		var credErr *credentialError
+		if !errors.As(err, &credErr) {
+			p.countFailure(host)
+		}
 	}
 	results <- result{target: t, sha: sha, at: time.Now(), err: err}
 }
@@ -393,8 +466,8 @@ func (p *Poller) current(t Target) bool {
 
 // observe resolves credentials afresh, lists the advertisement and selects the
 // candidate SHA for the target's tracking ref.
-func (p *Poller) observe(ctx context.Context, t Target) (string, error) {
-	data, err := p.secretData(ctx, t)
+func (p *Poller) observe(ctx context.Context, t Target, creds *sweepSecrets) (string, error) {
+	data, err := p.secretData(ctx, t, creds)
 	if err != nil {
 		return "", err
 	}
@@ -416,9 +489,10 @@ func (p *Poller) observe(ctx context.Context, t Target) (string, error) {
 	return sha, nil
 }
 
-// secretData reads the target's credentials, freshly on every sweep because
-// credentials rotate.
-func (p *Poller) secretData(ctx context.Context, t Target) (map[string][]byte, error) {
+// secretData reads the target's credentials via creds, which memoizes the
+// read for the whole sweep — freshly on every sweep because credentials
+// rotate, but at most once per distinct SecretRef within one.
+func (p *Poller) secretData(ctx context.Context, t Target, creds *sweepSecrets) (map[string][]byte, error) {
 	if t.SecretRef == nil {
 		return nil, nil
 	}
@@ -426,11 +500,7 @@ func (p *Poller) secretData(ctx context.Context, t Target) (map[string][]byte, e
 		return nil, fmt.Errorf("secret %s is referenced but no secret reader is configured", t.SecretRef)
 	}
 
-	var secret corev1.Secret
-	if err := p.secrets.Get(ctx, *t.SecretRef, &secret); err != nil {
-		return nil, fmt.Errorf("getting secret %s: %w", t.SecretRef, err)
-	}
-	return secret.Data, nil
+	return creds.get(ctx, *t.SecretRef)
 }
 
 func (p *Poller) countFailure(host string) {

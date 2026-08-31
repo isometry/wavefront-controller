@@ -223,6 +223,7 @@ func main() {
 		gitpoll.NewGoGitLister(refListTimeout),
 		notifyWavefronts(mgr, events),
 		instruments.RefListFailures,
+		instruments.CredentialReadFailures,
 	)
 	if err := mgr.Add(poller); err != nil {
 		setupLog.Error(err, "Failed to add the ref-advertisement poller")
