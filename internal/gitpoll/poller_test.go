@@ -140,10 +140,12 @@ func (f *fakeLister) setAdvertised(repoURL string, refs map[string]string) {
 	f.advertised[repoURL] = refs
 }
 
-func (f *fakeLister) setErr(repoURL string, err error) {
+// setErr arms alphaURL's listing to fail with err (every call site in this
+// file only ever fails alphaURL).
+func (f *fakeLister) setErr(err error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.errs[repoURL] = err
+	f.errs[alphaURL] = err
 }
 
 // gate makes listings of repoURL block until the returned channel is closed.
@@ -293,8 +295,9 @@ func runPoller(t *testing.T, p *gitpoll.Poller) func() {
 	}
 }
 
-// failureCount reads wavefront_ref_list_failures_total for one host label.
-func failureCount(t *testing.T, reg *prometheus.Registry, host string) float64 {
+// failureCount reads wavefront_ref_list_failures_total for the exampleHost
+// label (every call site in this file only ever checks exampleHost).
+func failureCount(t *testing.T, reg *prometheus.Registry) float64 {
 	t.Helper()
 
 	families, err := reg.Gather()
@@ -307,7 +310,7 @@ func failureCount(t *testing.T, reg *prometheus.Registry, host string) float64 {
 		}
 		for _, metric := range family.GetMetric() {
 			for _, label := range metric.GetLabel() {
-				if label.GetName() == "host" && label.GetValue() == host {
+				if label.GetName() == "host" && label.GetValue() == exampleHost {
 					return metric.GetCounter().GetValue()
 				}
 			}
@@ -530,7 +533,7 @@ func TestPollerFailureRetainsLastGoodSHA(t *testing.T) {
 		synctest.Wait()
 		good, _ := p.Observation(source("alpha"))
 
-		lister.setErr(alphaURL, errListFailed)
+		lister.setErr(errListFailed)
 		time.Sleep(10 * time.Second)
 		synctest.Wait()
 
@@ -549,12 +552,12 @@ func TestPollerFailureRetainsLastGoodSHA(t *testing.T) {
 		} else if !errors.Is(failed.Err, errListFailed) {
 			t.Errorf("Err = %v, want it to wrap %v", failed.Err, errListFailed)
 		}
-		if got := failureCount(t, reg, exampleHost); got != 1 {
+		if got := failureCount(t, reg); got != 1 {
 			t.Errorf("%s{host=%q} = %v, want 1", failuresMetric, exampleHost, got)
 		}
 
 		// Recovery clears Err and resumes normal observation.
-		lister.setErr(alphaURL, nil)
+		lister.setErr(nil)
 		lister.setAdvertised(alphaURL, map[string]string{trackedRef: shaB})
 		time.Sleep(10 * time.Second)
 		synctest.Wait()
@@ -600,7 +603,7 @@ func TestPollerWrappedCancelledErrorIsCountedFailure(t *testing.T) {
 		// The context stays healthy; only the error happens to wrap
 		// context.Canceled, as an HTTP/2 stream reset might.
 		wrapped := fmt.Errorf("http2 stream reset: %w", context.Canceled)
-		lister.setErr(alphaURL, wrapped)
+		lister.setErr(wrapped)
 		time.Sleep(10 * time.Second)
 		synctest.Wait()
 
@@ -614,7 +617,7 @@ func TestPollerWrappedCancelledErrorIsCountedFailure(t *testing.T) {
 		if after.Err == nil || !errors.Is(after.Err, context.Canceled) {
 			t.Errorf("Err = %v, want it to wrap context.Canceled", after.Err)
 		}
-		if got := failureCount(t, reg, exampleHost); got != 1 {
+		if got := failureCount(t, reg); got != 1 {
 			t.Errorf("%s{host=%q} = %v, want 1", failuresMetric, exampleHost, got)
 		}
 	})
@@ -653,7 +656,7 @@ func TestPollerShutdownDiscardsInFlightListing(t *testing.T) {
 		// context.Canceled — exactly what go-git's own EOF/closed-connection
 		// errors look like.
 		lister.gate(alphaURL)
-		lister.setErr(alphaURL, errors.New("EOF"))
+		lister.setErr(errors.New("EOF"))
 
 		time.Sleep(10 * time.Second)
 		synctest.Wait() // the listing is now durably blocked on the gate
@@ -677,7 +680,7 @@ func TestPollerShutdownDiscardsInFlightListing(t *testing.T) {
 		if after.Err != nil || after.SHA != good.SHA || !after.ObservedAt.Equal(good.ObservedAt) {
 			t.Errorf("Observation = %+v, want %+v left untouched by the discarded listing", after, good)
 		}
-		if got := failureCount(t, reg, exampleHost); got != 0 {
+		if got := failureCount(t, reg); got != 0 {
 			t.Errorf("%s{host=%q} = %v, want 0", failuresMetric, exampleHost, got)
 		}
 	})
@@ -910,7 +913,7 @@ func TestPollerMissingSecretIsAFailure(t *testing.T) {
 		if got := lister.callCount(alphaURL); got != 0 {
 			t.Errorf("listings = %d, want 0 when the secret cannot be read", got)
 		}
-		if got := failureCount(t, reg, exampleHost); got != 0 {
+		if got := failureCount(t, reg); got != 0 {
 			t.Errorf("%s{host=%q} = %v, want 0: a Secret-read failure must not blame the git host", failuresMetric, exampleHost, got)
 		}
 		if got := credentialFailureCount(t, reg); got != 1 {
@@ -934,7 +937,7 @@ func TestPollerDedupsSecretReadsPerSweep(t *testing.T) {
 		secrets.set(distinct, map[string][]byte{keyUsername: []byte("bob"), keyPassword: []byte("pw2")})
 
 		lister := newFakeLister()
-		var targets []gitpoll.Target
+		targets := make([]gitpoll.Target, 0, 6)
 		for i := range 5 {
 			u := "https://" + exampleHost + "/org/shared" + string(rune('a'+i)) + ".git"
 			lister.setAdvertised(u, map[string]string{trackedRef: shaA})
@@ -988,7 +991,7 @@ func TestPollerCredentialReadFailureCountedSeparately(t *testing.T) {
 		secrets.setErr(shared, errSecretReadFailed)
 
 		lister := newFakeLister()
-		var targets []gitpoll.Target
+		targets := make([]gitpoll.Target, 0, 5)
 		for i := range 5 {
 			u := "https://" + exampleHost + "/org/cred" + string(rune('a'+i)) + ".git"
 			lister.setAdvertised(u, map[string]string{trackedRef: shaA})
@@ -1013,7 +1016,7 @@ func TestPollerCredentialReadFailureCountedSeparately(t *testing.T) {
 		if got := credentialFailureCount(t, reg); got != 1 {
 			t.Errorf("%s = %v, want 1 (once per distinct ref, not per target)", credentialFailuresMetric, got)
 		}
-		if got := failureCount(t, reg, exampleHost); got != 0 {
+		if got := failureCount(t, reg); got != 0 {
 			t.Errorf("%s{host=%q} = %v, want 0: a credential-read failure must not blame the git host", failuresMetric, exampleHost, got)
 		}
 		for _, tgt := range targets {
@@ -1036,7 +1039,7 @@ func TestPollerListingFailureStillCountsHostNotCredential(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		lister := newFakeLister()
 		lister.setAdvertised(alphaURL, map[string]string{trackedRef: shaA})
-		lister.setErr(alphaURL, errListFailed)
+		lister.setErr(errListFailed)
 
 		reg := prometheus.NewRegistry()
 		instr := metrics.New(reg)
@@ -1051,7 +1054,7 @@ func TestPollerListingFailureStillCountsHostNotCredential(t *testing.T) {
 		time.Sleep(10 * time.Second)
 		synctest.Wait()
 
-		if got := failureCount(t, reg, exampleHost); got != 1 {
+		if got := failureCount(t, reg); got != 1 {
 			t.Errorf("%s{host=%q} = %v, want 1", failuresMetric, exampleHost, got)
 		}
 		if got := credentialFailureCount(t, reg); got != 0 {
