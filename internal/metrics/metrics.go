@@ -95,7 +95,7 @@ func New(reg prometheus.Registerer) *Instruments {
 	return &Instruments{
 		AdmissionsTotal: register(reg, prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "wavefront_admissions_total",
-			Help: "Total pin admissions, by result (admitted, initial, shadow, conflict).",
+			Help: "Total pin admissions, by result (admitted, initial, shadow, conflict) and owning Wavefront.",
 		}, []string{LabelWavefront, "result"})),
 		PinLagSeconds: register(reg, prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Name: "wavefront_node_pin_lag_seconds",

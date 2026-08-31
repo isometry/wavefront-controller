@@ -408,9 +408,8 @@ func (p *Poller) sweepHost(ctx context.Context, host string, targets []Target, p
 func (p *Poller) poll(ctx context.Context, host string, t Target, creds *sweepSecrets, results chan<- result) {
 	sha, err := p.observe(ctx, t, creds)
 	if ctx.Err() != nil {
-		// The manager is shutting the poller down (or this sweep was
-		// superseded): whatever observe returned answers no question anyone
-		// is still asking.
+		// The manager is shutting the poller down: whatever observe returned
+		// answers no question anyone is still asking.
 		return
 	}
 	if err != nil {

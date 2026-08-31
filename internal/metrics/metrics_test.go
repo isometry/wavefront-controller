@@ -59,7 +59,7 @@ func TestNewExpositionText(t *testing.T) {
 	instr.PinnedFetchFailures.WithLabelValues("infra").Set(0)
 
 	const want = `
-# HELP wavefront_admissions_total Total pin admissions, by result (admitted, initial, shadow, conflict).
+# HELP wavefront_admissions_total Total pin admissions, by result (admitted, initial, shadow, conflict) and owning Wavefront.
 # TYPE wavefront_admissions_total counter
 wavefront_admissions_total{result="admitted",wavefront="fleet"} 2
 wavefront_admissions_total{result="conflict",wavefront="fleet"} 1
