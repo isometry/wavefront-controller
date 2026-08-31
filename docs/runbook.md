@@ -120,7 +120,10 @@ Effects:
    `spec.nodes.selector`. Let it run through several poll cycles.
 2. Validate before flipping:
    - `status.conditions[type=GraphValid]` is `True` — no `dependsOn` cycles
-     or selector overlaps with another `Wavefront`.
+     or selector overlaps with another `Wavefront`. While `GraphValid` is
+     `False`, this Wavefront's per-Wavefront gauges are suppressed (retired,
+     not zeroed) so a fleet-wide `sum()` never double-counts against the
+     Wavefront it overlaps with — see [Safety alarms](#safety-alarms-6).
    - `ShadowAdmission` events look sane for a representative sample of
      flotillas (correct candidate SHAs, expected sequencing given
      `dependsOn`).
@@ -223,6 +226,18 @@ Wire these before ramping past a pilot (DESIGN §9, Phase 2):
   cases](#known-limitations-unsupported-git-auth) (TLS-only, or a
   provider-auth scheme such as github/azure/aws apps) before assuming an
   outage.
+- **Credential-read failure rate — `rate(wavefront_credential_read_failures_total[...])`
+  (counter, no labels).** Counts failures reading a git-credential `Secret`
+  during a ref-advertisement sweep — an apiserver-side problem (RBAC, a
+  missing or malformed `Secret`), distinct from
+  `wavefront_ref_list_failures_total` above (a git-host problem). Secret
+  reads are memoized once per distinct `secretRef` per sweep (the memo dies
+  with the sweep, so a rotated credential is still picked up on the very
+  next sweep), and happen ahead of any one Wavefront's evaluation, so this
+  metric carries no `wavefront` label — correlate the alert time with recent
+  `Secret` changes rather than trying to attribute it to a Wavefront. Both
+  failure kinds still stamp the affected source's `Observation.Err` and
+  surface via `status`.
 - **Pinned-commit fetch failures — `wavefront_pinned_fetch_failures{wavefront}` (gauge;
   `sum()` it for a cross-fleet total).** source-controller reporting `FetchFailed` on a pinned commit (typically a
   force-push rewriting the pinned SHA out of history, §10). Deployed state
@@ -232,9 +247,25 @@ Wire these before ramping past a pilot (DESIGN §9, Phase 2):
   one *unrecoverable* side effect: a rollback target rewritten away is
   genuinely lost.
 - Also useful, not launch-blocking safety alarms per se but worth a
-  dashboard: `wavefront_admissions_total{result}`,
-  `wavefront_admission_wait_seconds` (the starvation signal, D13), and
-  `wavefront_blocked_nodes{wavefront,reason}`.
+  dashboard: `wavefront_admissions_total{wavefront,result}`,
+  `wavefront_admission_wait_seconds{wavefront}` (the starvation signal,
+  D13), and `wavefront_blocked_nodes{wavefront,reason}`.
+- **Deadman / gauge-absence.** Per-Wavefront gauges
+  (`wavefront_node_pin_lag_seconds`, `wavefront_blocked_nodes`,
+  `wavefront_pinned_fetch_failures`) are published only by a valid, resolved
+  pass, and are deleted — not zeroed — on an aborted pass, on graph
+  invalidation (selector overlap or a `dependsOn` cycle — this is also why a
+  fleet-wide `sum()` never double-counts a Wavefront twice during an overlap
+  window), and on the Wavefront's deletion. **Absent means "not currently
+  measured", not zero** — never build a deadman alert on a standing zero
+  series or on bare `absent()`; pair it with that Wavefront's `status.conditions[type=Ready]`
+  instead (e.g. via `kube-state-metrics`'s CustomResourceState feature, or
+  by alerting on `absent()` **and** a separate check that the Wavefront
+  object itself still exists and reports `Ready`), so the alert distinguishes
+  "genuinely nothing pending" from "this Wavefront isn't being measured
+  right now". `wavefront_admissions_total` and `wavefront_admission_wait_seconds`
+  are cumulative and are never affected by this — they persist across passes
+  and are deleted only on Wavefront deletion.
 
 ## Known limitations: unsupported git auth
 

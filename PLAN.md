@@ -748,19 +748,27 @@ ctrl.NewControllerManagedBy(mgr).
 package metrics
 
 type Instruments struct {
-	AdmissionsTotal     *prometheus.CounterVec   // wavefront_admissions_total{result="admitted|initial|shadow|conflict"}
-	PinLagSeconds       *prometheus.GaugeVec     // wavefront_node_pin_lag_seconds{kind,namespace,name}
-	AdmissionWaitSeconds prometheus.Histogram    // wavefront_admission_wait_seconds (buckets: 30s..2h exponential)
-	BlockedNodes        *prometheus.GaugeVec     // wavefront_blocked_nodes{reason}
-	RefListFailures     *prometheus.CounterVec   // wavefront_ref_list_failures_total{host}
-	PinnedFetchFailures prometheus.Gauge         // wavefront_pinned_fetch_failures
+	AdmissionsTotal        *prometheus.CounterVec   // wavefront_admissions_total{wavefront,result="admitted|initial|shadow|conflict"}
+	PinLagSeconds          *prometheus.GaugeVec     // wavefront_node_pin_lag_seconds{wavefront,kind,namespace,name}
+	AdmissionWaitSeconds   *prometheus.HistogramVec // wavefront_admission_wait_seconds{wavefront} (buckets: 30s..2h exponential)
+	BlockedNodes           *prometheus.GaugeVec     // wavefront_blocked_nodes{wavefront,reason}
+	RefListFailures        *prometheus.CounterVec   // wavefront_ref_list_failures_total{host}
+	PinnedFetchFailures    *prometheus.GaugeVec     // wavefront_pinned_fetch_failures{wavefront}
+	CredentialReadFailures prometheus.Counter       // wavefront_credential_read_failures_total
 }
 
 func New(reg prometheus.Registerer) *Instruments  // main passes ctrlmetrics.Registry
 func Nop() *Instruments                            // isolated registry, for tests/earlier tasks
 ```
 
-Gauges are recomputed wholesale each reconcile pass (`Reset()` then set) so removed nodes don't linger.
+Per-Wavefront gauges (`PinLagSeconds`, `BlockedNodes`, `PinnedFetchFailures`) are
+recomputed wholesale each pass, but a pass retires only its own Wavefront's
+series — `DeletePartialMatch` on the `wavefront` label, never `Reset()`,
+which would erase a co-resident Wavefront's series until its own next pass —
+and only a valid resolved pass publishes series at all, so an aborted pass or
+a graph-invalidated Wavefront leaves its series retired rather than stale.
+`AdmissionsTotal` and `AdmissionWaitSeconds` are cumulative: a pass never
+retires them; only Wavefront deletion (`Forget`) deletes them.
 
 - [ ] **Step 1: Failing tests** with `prometheus/client_golang/prometheus/testutil`: after a scripted sequence of calls, `CollectAndCompare` against expected exposition text; `testutil.CollectAndLint` passes; double-`New` on one registry does not panic (guard or document single-call).
 - [ ] **Step 2:** Run — fail. Implement; inject into reconciler step 10 and the poller's failure path; extend one envtest scenario to assert `wavefront_admissions_total` increments.

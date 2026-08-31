@@ -114,7 +114,9 @@ carries the controller's configuration and fleet-level status. It declares
 scope and policy only — never topology, which is discovered from
 `dependsOn` (DESIGN §3.2). Multiple `Wavefront`s are permitted (e.g. per
 context) but their node selectors must not overlap; overlap is reported as
-an error condition on both.
+an error condition on both, and their per-Wavefront gauges (see
+[Metrics](#metrics)) are suppressed for as long as the overlap stands, so a
+fleet-wide `sum()` never double-counts either Wavefront.
 
 ```yaml
 apiVersion: wavefront.as-code.io/v1alpha1
@@ -187,16 +189,28 @@ API), attached to the `Wavefront` object:
 
 | Metric | Type | Labels | Meaning |
 |---|---|---|---|
-| `wavefront_admissions_total` | Counter | `result` | Admission attempts by outcome |
+| `wavefront_admissions_total` | Counter | `wavefront`, `result` | Admission attempts by outcome |
 | `wavefront_node_pin_lag_seconds` | Gauge | `wavefront`, `kind`, `namespace`, `name` | Age of an unadmitted observed revision per node |
-| `wavefront_admission_wait_seconds` | Histogram | — | Observed→admitted latency; the starvation signal for the settled-ancestors rule |
+| `wavefront_admission_wait_seconds` | Histogram | `wavefront` | Observed→admitted latency; the starvation signal for the settled-ancestors rule |
 | `wavefront_blocked_nodes` | Gauge | `wavefront`, `reason` | Currently blocked nodes |
 | `wavefront_ref_list_failures_total` | Counter | `host` | Ref-listing failures per git host |
+| `wavefront_credential_read_failures_total` | Counter | — | Git credential Secret-read failures during ref-advertisement sweeps (apiserver-side, distinct from ref-listing failures above) |
 | `wavefront_pinned_fetch_failures` | Gauge | `wavefront` | `source-controller` reporting `FetchFailed` on a pinned commit |
 
-Every fleet gauge carries the owning Wavefront's name so that co-resident
-Wavefronts cannot retire each other's series: a cross-fleet total is a PromQL
-`sum()` (e.g. `sum(wavefront_pinned_fetch_failures)`).
+Every per-Wavefront gauge (`wavefront_node_pin_lag_seconds`,
+`wavefront_blocked_nodes`, `wavefront_pinned_fetch_failures`) is published
+only by a valid, resolved pass for that Wavefront, and is retired — deleted,
+not zeroed — on an aborted pass, when the Wavefront's graph is invalidated
+(selector overlap or a `dependsOn` cycle), and when the Wavefront itself is
+deleted. That means a cross-fleet `sum()` (e.g.
+`sum(wavefront_pinned_fetch_failures)`) never double-counts a Wavefront's
+series during an overlap window, and an absent series means "not currently
+measured", not zero — don't alert on `absent()` alone; pair it with the
+Wavefront's `Ready` condition (see the
+[runbook's safety alarms](docs/runbook.md#safety-alarms-6)).
+`wavefront_admissions_total` and `wavefront_admission_wait_seconds` are
+cumulative and attributed per Wavefront the same way, but are deleted only
+when their Wavefront is deleted — a pass never retires them.
 
 ## Shadow → Enforce rollout
 
