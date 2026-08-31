@@ -17,6 +17,7 @@ limitations under the License.
 package controller
 
 import (
+	"context"
 	"errors"
 	"slices"
 	"strings"
@@ -26,8 +27,11 @@ import (
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/events"
+	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	wavefrontv1alpha1 "github.com/isometry/wavefront-controller/api/v1alpha1"
 	"github.com/isometry/wavefront-controller/internal/adapter"
@@ -307,6 +311,73 @@ func TestFleetGaugesAreRetiredPerWavefront(t *testing.T) {
 	r.summariseNodes(gaugePass(fleetName, "team-b", now.Add(-10*time.Second)))
 	if got := testutil.CollectAndCount(instr.PinLagSeconds); got != 2 {
 		t.Errorf("pin-lag series after team-a dropped out = %d, want 2 (team-a retired, infra untouched)", got)
+	}
+}
+
+// TestWavefrontDeletionRetiresItsMetricSeries: deletion carries no finalizer
+// by design (DESIGN D8), so Reconcile's IsNotFound branch is the only signal
+// that a Wavefront is gone. It must retire every series that Wavefront ever
+// contributed — both the per-pass gauges a pass recomputes wholesale and the
+// cumulative admission counters no pass ever reconciles — while leaving a
+// co-resident Wavefront's series standing.
+func TestWavefrontDeletionRetiresItsMetricSeries(t *testing.T) {
+	now := time.Unix(3000, 0)
+	instr := metrics.Nop()
+
+	scheme := runtime.NewScheme()
+	if err := wavefrontv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme: %v", err)
+	}
+
+	r := &WavefrontReconciler{
+		Client:   fake.NewClientBuilder().WithScheme(scheme).Build(),
+		Recorder: events.NewFakeRecorder(16),
+		Clock:    func() time.Time { return now },
+		Metrics:  instr,
+	}
+
+	// Populate the per-pass gauges (the fixture from
+	// TestFleetGaugesAreRetiredPerWavefront) and the cumulative admission
+	// counters for the doomed "fleet" Wavefront and a co-resident "infra"
+	// sibling that must survive.
+	r.summariseNodes(gaugePass(fleetName, teamAName, now.Add(-60*time.Second)))
+	r.summariseNodes(gaugePass("infra", "team-c", now.Add(-30*time.Second)))
+
+	instr.Wavefront(fleetName).CountAdmission("admitted")
+	instr.Wavefront(fleetName).ObserveAdmissionWait(45)
+	instr.Wavefront("infra").CountAdmission("admitted")
+	instr.Wavefront("infra").ObserveAdmissionWait(45)
+
+	// "fleet" no longer exists in the client: Reconcile takes the IsNotFound
+	// branch.
+	if _, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: fleetName},
+	}); err != nil {
+		t.Fatalf("Reconcile on a deleted Wavefront returned %v, want nil", err)
+	}
+
+	if got := testutil.CollectAndCount(instr.PinLagSeconds); got != 1 {
+		t.Errorf("PinLagSeconds series = %d, want 1 (infra survives, fleet retired)", got)
+	}
+	if got := testutil.CollectAndCount(instr.BlockedNodes); got != 1 {
+		t.Errorf("BlockedNodes series = %d, want 1 (infra survives, fleet retired)", got)
+	}
+	if got := testutil.CollectAndCount(instr.PinnedFetchFailures); got != 1 {
+		t.Errorf("PinnedFetchFailures series = %d, want 1 (infra survives, fleet retired)", got)
+	}
+	if got := testutil.CollectAndCount(instr.AdmissionsTotal); got != 1 {
+		t.Errorf("AdmissionsTotal series = %d, want 1 (infra survives, fleet retired)", got)
+	}
+	if got := testutil.CollectAndCount(instr.AdmissionWaitSeconds); got != 1 {
+		t.Errorf("AdmissionWaitSeconds series = %d, want 1 (infra survives, fleet retired)", got)
+	}
+
+	if lag := testutil.ToFloat64(instr.PinLagSeconds.WithLabelValues(
+		"infra", kindKustomization, fluxNamespace, "team-c")); lag != 30 {
+		t.Errorf("surviving infra pin lag = %v, want 30: an unrelated deletion must not disturb it", lag)
+	}
+	if got := testutil.ToFloat64(instr.AdmissionsTotal.WithLabelValues("infra", "admitted")); got != 1 {
+		t.Errorf("surviving infra AdmissionsTotal = %v, want 1: an unrelated deletion must not disturb it", got)
 	}
 }
 

@@ -205,6 +205,7 @@ func (r *WavefrontReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	if err := r.Get(ctx, req.NamespacedName, wf); err != nil {
 		if apierrors.IsNotFound(err) {
 			r.forgetPollSet(req.Name)
+			r.Metrics.Wavefront(req.Name).Forget()
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, err
