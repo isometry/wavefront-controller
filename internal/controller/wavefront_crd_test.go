@@ -54,6 +54,37 @@ func validWavefront(name string) *wavefrontv1alpha1.Wavefront {
 	}
 }
 
+// unstructuredWavefront builds a minimally valid Wavefront CR as unstructured
+// data (rather than the typed Wavefront struct), so callers can construct
+// wire payloads a typed struct cannot express - an invalid metav1.Duration,
+// or a spec.poll field omitted entirely to exercise CRD defaulting. poll is
+// set verbatim as spec.poll, or left absent when nil.
+func unstructuredWavefront(name string, poll map[string]any) *unstructured.Unstructured {
+	spec := map[string]any{
+		"nodes": map[string]any{
+			"kinds": []any{kindKustomization},
+			"selector": map[string]any{
+				"matchLabels": map[string]any{
+					managedLabelKey: managedLabelValue,
+				},
+			},
+		},
+	}
+	if poll != nil {
+		spec["poll"] = poll
+	}
+	return &unstructured.Unstructured{
+		Object: map[string]any{
+			"apiVersion": wavefrontv1alpha1.GroupVersion.String(),
+			"kind":       "Wavefront",
+			"metadata": map[string]any{
+				"name": name,
+			},
+			"spec": spec,
+		},
+	}
+}
+
 var _ = Describe("Wavefront CRD validation", func() {
 	It("rejects non-Kustomization node kinds", func() {
 		wf := validWavefront("wf-badkind")
@@ -73,26 +104,7 @@ var _ = Describe("Wavefront CRD validation", func() {
 		// an empty object first, and its nested defaults (interval, perHostConcurrency)
 		// - which only apply once their parent key exists - then fire in turn.
 		name := "wf-defaults"
-		u := &unstructured.Unstructured{
-			Object: map[string]any{
-				"apiVersion": wavefrontv1alpha1.GroupVersion.String(),
-				"kind":       "Wavefront",
-				"metadata": map[string]any{
-					"name": name,
-				},
-				"spec": map[string]any{
-					"nodes": map[string]any{
-						"kinds": []any{kindKustomization},
-						"selector": map[string]any{
-							"matchLabels": map[string]any{
-								managedLabelKey: managedLabelValue,
-							},
-						},
-					},
-					// poll intentionally omitted entirely.
-				},
-			},
-		}
+		u := unstructuredWavefront(name, nil) // poll intentionally omitted entirely.
 		Expect(k8sClient.Create(ctx, u)).To(Succeed())
 		defer func() {
 			Expect(k8sClient.Delete(ctx, u)).To(Succeed())
@@ -104,6 +116,34 @@ var _ = Describe("Wavefront CRD validation", func() {
 		Expect(got.Spec.Poll.Interval.Duration).To(Equal(90 * time.Second))
 		Expect(got.Spec.Poll.PerHostConcurrency).To(Equal(4))
 	})
+
+	DescribeTable("rejects malformed poll intervals",
+		func(interval string) {
+			// Built as unstructured (rather than the typed Wavefront struct) so
+			// that an invalid duration string reaches the apiserver at all: a
+			// typed struct cannot express an invalid metav1.Duration (it can only
+			// hold a value that already parsed).
+			name := "wf-badinterval"
+			u := unstructuredWavefront(name, map[string]any{"interval": interval})
+			Expect(k8sClient.Create(ctx, u)).To(MatchError(ContainSubstring("interval must be a valid Go duration")))
+		},
+		Entry("no unit", "90"),
+		Entry("unrecognized unit", "5x"),
+		Entry("day unit unsupported by Go durations", "1d"),
+	)
+
+	DescribeTable("accepts well-formed poll intervals",
+		func(interval string) {
+			name := "wf-goodinterval"
+			u := unstructuredWavefront(name, map[string]any{"interval": interval})
+			Expect(k8sClient.Create(ctx, u)).To(Succeed())
+			defer func() {
+				Expect(k8sClient.Delete(ctx, u)).To(Succeed())
+			}()
+		},
+		Entry("seconds", "90s"),
+		Entry("hours and minutes", "1h30m"),
+	)
 
 	It("accepts a fully specified Wavefront", func() {
 		// DESIGN §4.1 example; this is the real API group, not a stand-in.

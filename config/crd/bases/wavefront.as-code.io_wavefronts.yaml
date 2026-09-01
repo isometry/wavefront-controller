@@ -131,6 +131,9 @@ spec:
                     default: 90s
                     description: Interval between ref-advertisement polling sweeps.
                     type: string
+                    x-kubernetes-validations:
+                    - message: interval must be a valid Go duration (e.g. "90s", "1h30m")
+                      rule: self.matches('^([0-9]+([.][0-9]+)?(ms|s|m|h))+$')
                   perHostConcurrency:
                     default: 4
                     description: PerHostConcurrency bounds concurrent ref listings

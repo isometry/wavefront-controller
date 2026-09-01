@@ -67,6 +67,7 @@ type NodesSpec struct {
 type PollSpec struct {
 	// Interval between ref-advertisement polling sweeps.
 	// +kubebuilder:default="90s"
+	// +kubebuilder:validation:XValidation:rule="self.matches('^([0-9]+([.][0-9]+)?(ms|s|m|h))+$')",message="interval must be a valid Go duration (e.g. \"90s\", \"1h30m\")"
 	Interval metav1.Duration `json:"interval,omitempty"`
 	// PerHostConcurrency bounds concurrent ref listings per git host.
 	// +kubebuilder:default=4
