@@ -439,6 +439,26 @@ var _ = Describe("Wavefront reconciler", func() {
 			Eventually(func() wavefrontv1alpha1.NodeCounts {
 				return getWavefront("wf-shadow").Status.Nodes
 			}).Should(And(HaveField("Observed", 1), HaveField("Pinned", 1)))
+
+			// finding 9 (decision D-H): the engine re-derives the identical
+			// would-be admission every reconcile, so the ShadowAdmission event
+			// and wavefront_admissions_total{result="shadow"} must announce it
+			// exactly once, edge-triggered against status.Shadow — not once
+			// per pass (40+/hour on a pending change).
+			By("announcing the would-be admission exactly once across repeated reconciles")
+			Eventually(func() int32 {
+				_, occurrences := recordedEvents("ShadowAdmission", "wf-shadow")
+				return occurrences
+			}).Should(Equal(int32(1)))
+			Consistently(func() int32 {
+				_, occurrences := recordedEvents("ShadowAdmission", "wf-shadow")
+				return occurrences
+			}).Should(Equal(int32(1)))
+
+			By("incrementing wavefront_admissions_total{result=\"shadow\"} exactly once")
+			Consistently(func() float64 {
+				return testutil.ToFloat64(instruments.AdmissionsTotal.WithLabelValues("wf-shadow", resultShadow))
+			}).Should(Equal(float64(1)))
 		})
 	})
 

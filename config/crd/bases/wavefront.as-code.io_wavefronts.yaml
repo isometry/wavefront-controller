@@ -338,6 +338,28 @@ spec:
                 - Advancing
                 - Blocked
                 type: string
+              shadow:
+                description: |-
+                  Shadow lists would-be admissions already announced in Shadow mode
+                  (capped at StatusListCap); the edge-trigger ledger for ShadowAdmission
+                  events and the shadow admissions counter.
+                items:
+                  description: |-
+                    ShadowAdmission records a would-be admission announced in Shadow mode:
+                    the pin write the controller would have performed in Enforce.
+                  properties:
+                    source:
+                      description: Source is the "<namespace>/<name>" of the GitRepository.
+                      type: string
+                    to:
+                      description: To is the SHA that would be pinned.
+                      type: string
+                  required:
+                  - source
+                  - to
+                  type: object
+                type: array
+                x-kubernetes-list-type: atomic
             type: object
         required:
         - spec

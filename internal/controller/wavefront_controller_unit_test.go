@@ -1148,6 +1148,214 @@ func TestHoldEventsReleasePromotes21st(t *testing.T) {
 	}
 }
 
+// --- the shadow-admission ledger (WP5, finding 9, decision D-H) ------------
+
+// admissionFor builds a minimal would-be admission for the shadowAdmissions
+// tests below; ObservedRef is fixed so the rendered event text is stable.
+func admissionFor(src types.NamespacedName, to string) engine.Admission {
+	return engine.Admission{Source: src, To: to, ObservedRef: mainRef}
+}
+
+// manyAdmissions builds n distinct would-be admissions, keyed on the same
+// deterministic source names as manyHolds, for the capped-mirror test below.
+func manyAdmissions(n int) []engine.Admission {
+	admissions := make([]engine.Admission, 0, n)
+	for i := range n {
+		admissions = append(admissions, admissionFor(manyHoldSource(i), shaA))
+	}
+	return admissions
+}
+
+// TestShadowAdmissionsNoRefireOnIdenticalPass is finding 9's core regression:
+// the engine re-derives the identical would-be admission every reconcile, so
+// the edge-trigger has to live in the controller, against a status ledger,
+// not in the engine.
+func TestShadowAdmissionsNoRefireOnIdenticalPass(t *testing.T) {
+	recorder := events.NewFakeRecorder(8)
+	instr := metrics.Nop()
+	r := &WavefrontReconciler{Recorder: recorder, Clock: time.Now, Metrics: instr}
+
+	wf := &wavefrontv1alpha1.Wavefront{ObjectMeta: metav1.ObjectMeta{Name: fleetName}}
+	admissions := []engine.Admission{admissionFor(teamAKey(), shaA)}
+
+	first := &pass{wf: wf}
+	r.shadowAdmissions(first, admissions)
+
+	recorded := drain(recorder.Events)
+	if len(recorded) != 1 || !strings.Contains(recorded[0], reasonShadowAdmission) || !strings.Contains(recorded[0], shaA) {
+		t.Fatalf("pass 1 events = %v, want exactly one %s carrying %s", recorded, reasonShadowAdmission, shaA)
+	}
+	if got := testutil.ToFloat64(instr.AdmissionsTotal.WithLabelValues(fleetName, resultShadow)); got != 1 {
+		t.Fatalf("AdmissionsTotal{shadow} after pass 1 = %v, want 1", got)
+	}
+
+	// Pass 2: the identical admission, re-derived exactly as the engine
+	// always has, must not re-announce.
+	second := &pass{wf: wf}
+	r.shadowAdmissions(second, admissions)
+
+	if recorded := drain(recorder.Events); len(recorded) != 0 {
+		t.Errorf("pass 2 (identical admission) events = %v, want none: same (Source, To) pair", recorded)
+	}
+	if got := testutil.ToFloat64(instr.AdmissionsTotal.WithLabelValues(fleetName, resultShadow)); got != 1 {
+		t.Errorf("AdmissionsTotal{shadow} after pass 2 = %v, want still 1 (no refire)", got)
+	}
+}
+
+// TestShadowAdmissionsNewToRefires: a new To for a known Source is a new
+// (Source, To) pair by VALUE, not merely a known key, and must refire.
+func TestShadowAdmissionsNewToRefires(t *testing.T) {
+	recorder := events.NewFakeRecorder(8)
+	instr := metrics.Nop()
+	r := &WavefrontReconciler{Recorder: recorder, Clock: time.Now, Metrics: instr}
+
+	wf := &wavefrontv1alpha1.Wavefront{ObjectMeta: metav1.ObjectMeta{Name: fleetName}}
+
+	first := &pass{wf: wf}
+	r.shadowAdmissions(first, []engine.Admission{admissionFor(teamAKey(), shaA)})
+	drain(recorder.Events)
+
+	second := &pass{wf: wf}
+	r.shadowAdmissions(second, []engine.Admission{admissionFor(teamAKey(), shaB)})
+
+	recorded := drain(recorder.Events)
+	if len(recorded) != 1 || !strings.Contains(recorded[0], shaB) {
+		t.Fatalf("events on a new To = %v, want exactly one ShadowAdmission carrying %s", recorded, shaB)
+	}
+	if got := testutil.ToFloat64(instr.AdmissionsTotal.WithLabelValues(fleetName, resultShadow)); got != 2 {
+		t.Errorf("AdmissionsTotal{shadow} = %v, want 2: one per distinct (Source, To) pair", got)
+	}
+	if len(wf.Status.Shadow) != 1 || wf.Status.Shadow[0].To != shaB {
+		t.Errorf("status.shadow = %+v, want one entry with To=%s", wf.Status.Shadow, shaB)
+	}
+}
+
+// TestExecuteEnforceClearsStaleShadowLedger covers brief item 5(b): flipping
+// to Enforce must clear a stale status.Shadow ledger even on a pass with zero
+// admissions — the len(admissions)==0 shortcut must not bypass the clear.
+func TestExecuteEnforceClearsStaleShadowLedger(t *testing.T) {
+	recorder := events.NewFakeRecorder(8)
+	r := &WavefrontReconciler{Recorder: recorder, Clock: time.Now, Metrics: metrics.Nop()}
+
+	wf := &wavefrontv1alpha1.Wavefront{
+		ObjectMeta: metav1.ObjectMeta{Name: fleetName},
+		Spec:       wavefrontv1alpha1.WavefrontSpec{Mode: wavefrontv1alpha1.ModeEnforce},
+		Status: wavefrontv1alpha1.WavefrontStatus{
+			Shadow: []wavefrontv1alpha1.ShadowAdmission{{Source: teamASource, To: shaA}},
+		},
+	}
+	p := &pass{wf: wf} // no admissions this pass (p.eval is the zero Evaluation)
+
+	if err := r.execute(context.Background(), p); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if wf.Status.Shadow != nil {
+		t.Errorf("status.shadow = %v, want nil after flipping to Enforce, even with zero admissions this pass", wf.Status.Shadow)
+	}
+}
+
+// TestExecuteSkipAdmissionsLeavesShadowLedgerUntouched and
+// TestExecuteSuspendLeavesShadowLedgerUntouched cover brief item 4: the
+// skipAdmissions and Suspend early returns must leave the ledger exactly as
+// they found it, so a resumed Wavefront does not refire on unchanged
+// would-be admissions.
+func TestExecuteSkipAdmissionsLeavesShadowLedgerUntouched(t *testing.T) {
+	recorder := events.NewFakeRecorder(8)
+	r := &WavefrontReconciler{Recorder: recorder, Clock: time.Now, Metrics: metrics.Nop()}
+
+	wf := &wavefrontv1alpha1.Wavefront{
+		ObjectMeta: metav1.ObjectMeta{Name: fleetName},
+		Spec:       wavefrontv1alpha1.WavefrontSpec{Mode: wavefrontv1alpha1.ModeShadow},
+		Status: wavefrontv1alpha1.WavefrontStatus{
+			Shadow: []wavefrontv1alpha1.ShadowAdmission{{Source: teamASource, To: shaA}},
+		},
+	}
+	p := &pass{
+		wf:             wf,
+		skipAdmissions: true,
+		eval:           engine.Evaluation{Initial: []engine.Admission{admissionFor(teamAKey(), shaB)}},
+	}
+
+	if err := r.execute(context.Background(), p); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if len(wf.Status.Shadow) != 1 || wf.Status.Shadow[0].To != shaA {
+		t.Errorf("status.shadow = %+v, want unchanged: selector overlap suppresses admissions entirely (DESIGN §4.1)", wf.Status.Shadow)
+	}
+	if recorded := drain(recorder.Events); len(recorded) != 0 {
+		t.Errorf("events = %v, want none", recorded)
+	}
+}
+
+func TestExecuteSuspendLeavesShadowLedgerUntouched(t *testing.T) {
+	recorder := events.NewFakeRecorder(8)
+	r := &WavefrontReconciler{Recorder: recorder, Clock: time.Now, Metrics: metrics.Nop()}
+
+	wf := &wavefrontv1alpha1.Wavefront{
+		ObjectMeta: metav1.ObjectMeta{Name: fleetName},
+		Spec:       wavefrontv1alpha1.WavefrontSpec{Mode: wavefrontv1alpha1.ModeShadow, Suspend: true},
+		Status: wavefrontv1alpha1.WavefrontStatus{
+			Shadow: []wavefrontv1alpha1.ShadowAdmission{{Source: teamASource, To: shaA}},
+		},
+	}
+	p := &pass{
+		wf:   wf,
+		eval: engine.Evaluation{Initial: []engine.Admission{admissionFor(teamAKey(), shaB)}},
+	}
+
+	if err := r.execute(context.Background(), p); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if len(wf.Status.Shadow) != 1 || wf.Status.Shadow[0].To != shaA {
+		t.Errorf("status.shadow = %+v, want unchanged: Suspend freezes all writes (DESIGN §4.1)", wf.Status.Shadow)
+	}
+	if recorded := drain(recorder.Events); len(recorded) != 0 {
+		t.Errorf("events = %v, want none", recorded)
+	}
+}
+
+// TestShadowAdmissionsCapMirrorsStatus mirrors TestHoldEventsCapMirrorsStatus
+// (finding 8's Held pattern, reused per decision D-H): with more would-be
+// admissions than StatusListCap, shadowAdmissions must announce exactly the
+// capped set and never refire for the truncated tail on a later, unchanged
+// pass.
+func TestShadowAdmissionsCapMirrorsStatus(t *testing.T) {
+	recorder := events.NewFakeRecorder(64)
+	instr := metrics.Nop()
+	r := &WavefrontReconciler{Recorder: recorder, Clock: time.Now, Metrics: instr}
+
+	wf := &wavefrontv1alpha1.Wavefront{ObjectMeta: metav1.ObjectMeta{Name: fleetName}}
+	admissions := manyAdmissions(25)
+
+	first := &pass{wf: wf}
+	r.shadowAdmissions(first, admissions)
+
+	recorded := drain(recorder.Events)
+	if len(recorded) != wavefrontv1alpha1.StatusListCap {
+		t.Fatalf("pass 1 ShadowAdmission events = %d, want exactly %d (the capped set)",
+			len(recorded), wavefrontv1alpha1.StatusListCap)
+	}
+	if len(wf.Status.Shadow) != wavefrontv1alpha1.StatusListCap {
+		t.Fatalf("status.shadow = %d entries, want %d", len(wf.Status.Shadow), wavefrontv1alpha1.StatusListCap)
+	}
+	if got := testutil.ToFloat64(instr.AdmissionsTotal.WithLabelValues(fleetName, resultShadow)); got != float64(wavefrontv1alpha1.StatusListCap) {
+		t.Fatalf("AdmissionsTotal{shadow} after pass 1 = %v, want %d", got, wavefrontv1alpha1.StatusListCap)
+	}
+
+	// Pass 2: the identical 25 admissions. The bug under test: diffing
+	// against an uncapped current set would re-report the truncated tail as
+	// newly would-be on every reconcile, forever.
+	second := &pass{wf: wf}
+	r.shadowAdmissions(second, admissions)
+
+	if recorded := drain(recorder.Events); len(recorded) != 0 {
+		t.Errorf("pass 2 (unchanged 25 admissions) events = %v, want none: no refire for capped-out sources", recorded)
+	}
+	if got := testutil.ToFloat64(instr.AdmissionsTotal.WithLabelValues(fleetName, resultShadow)); got != float64(wavefrontv1alpha1.StatusListCap) {
+		t.Errorf("AdmissionsTotal{shadow} after pass 2 = %v, want still %d (no refire)", got, wavefrontv1alpha1.StatusListCap)
+	}
+}
+
 // TestPollSetsCadenceDefaults: an empty set yields the zero cadence Configure
 // clamps, and a Wavefront that sent explicit zeros past CRD defaulting must not
 // drag the merged interval to zero and tight-loop the poller.

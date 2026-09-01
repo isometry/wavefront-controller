@@ -102,11 +102,13 @@ const managedOptIn = "true"
 // Every pass is a full recalculation: discovery, source resolution, graph
 // derivation and admissibility are all derived from live cluster state plus
 // the poller's observations, never from stored orchestration state
-// (DESIGN D9). The only thing status carries forward is the hold ledger, and
-// only to edge-trigger events — against the capped, source-sorted mirror of
-// p.holds that status.Held itself holds (decision D-C), not the unbounded
-// p.holds map, so a restart replays at most StatusListCap detections rather
-// than an unbounded backlog.
+// (DESIGN D9). The only state status carries forward is edge-trigger
+// ledgers, each diffed against the exact capped, sorted mirror it itself
+// holds (decision D-C): the hold ledger (status.Held, against p.holds) and
+// the shadow-admission ledger (status.Shadow, against this pass's
+// admissions, decision D-H), never against the unbounded live-derived set,
+// so a restart replays at most StatusListCap detections rather than an
+// unbounded backlog.
 type WavefrontReconciler struct {
 	client.Client
 	Scheme    *runtime.Scheme
@@ -659,10 +661,18 @@ func (r *WavefrontReconciler) derive(p *pass) {
 // Admissions and Initial combined (WP2, gateSharedSources).
 func (r *WavefrontReconciler) execute(ctx context.Context, p *pass) error {
 	admissions := slices.Concat(p.eval.Initial, p.eval.Admissions)
-	if len(admissions) == 0 {
-		return nil
-	}
 
+	// item 5: the old len(admissions)==0 shortcut ran before skipAdmissions,
+	// Suspend and the mode switch alike, so it would also have skipped an
+	// Enforce-mode ledger clear on a pass with nothing to admit. Both
+	// status.Shadow writes below are therefore unconditioned on admissions
+	// being non-empty and live inside their own branch instead: Shadow's
+	// shadowAdmissions call recomputes (and, on an empty pass, shrinks) the
+	// ledger from this pass's admissions like every other full recomputation
+	// in this reconciler (DESIGN D9); Enforce's clear fires on the mode
+	// switch itself, admissions or not. skipAdmissions and Suspend, below,
+	// return before either branch, leaving the ledger exactly as they found
+	// it (DESIGN §4.1).
 	switch {
 	case p.skipAdmissions:
 		return nil
@@ -672,12 +682,16 @@ func (r *WavefrontReconciler) execute(ctx context.Context, p *pass) error {
 		return nil
 	case p.wf.Spec.Mode != wavefrontv1alpha1.ModeEnforce:
 		// Shadow suppresses every write, initial pins included (DESIGN §3.5.4).
-		for _, admission := range admissions {
-			r.event(p.wf, corev1.EventTypeNormal, reasonShadowAdmission,
-				"would pin %s to %s (from %s, ref %s)",
-				admission.Source, admission.To, previousPin(admission), admission.ObservedRef)
-			r.Metrics.Wavefront(p.wf.Name).CountAdmission(resultShadow)
-		}
+		r.shadowAdmissions(p, admissions)
+		return nil
+	}
+
+	// Stale shadow entries must not survive a mode flip (DESIGN §3.5.4): a
+	// Wavefront that flips Shadow -> Enforce clears its ledger here, even on
+	// a pass with zero admissions.
+	p.wf.Status.Shadow = nil
+
+	if len(admissions) == 0 {
 		return nil
 	}
 
@@ -688,6 +702,55 @@ func (r *WavefrontReconciler) execute(ctx context.Context, p *pass) error {
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// shadowAdmissions implements the Shadow branch of execute (finding 9,
+// decision D-H): the engine re-derives the identical would-be admission
+// every reconcile regardless of mode, so the once-only announcement has to
+// be edge-triggered here, against status.Shadow, exactly as holdEvents
+// edge-triggers against status.Held (DESIGN §3.5.4, §4.2, §6).
+//
+// current is computed once — sorted and capped — and used both as the diff's
+// current side and as the value written to status.Shadow, so the ledger
+// written and the ledger diffed are the same list (mirrors heldSources). A
+// pair is diffed on VALUE (Source, To), not key presence: a new To for a
+// known Source is a new pair and refires. A pair that drops out of this
+// pass's admissions (no longer computed, e.g. the source became held) is
+// dropped from the ledger silently — Shadow mode has nothing analogous to
+// HoldReleased to announce.
+func (r *WavefrontReconciler) shadowAdmissions(p *pass, admissions []engine.Admission) {
+	bySource := make(map[string]engine.Admission, len(admissions))
+	current := make([]wavefrontv1alpha1.ShadowAdmission, 0, len(admissions))
+	for _, admission := range admissions {
+		src := admission.Source.String()
+		bySource[src] = admission
+		current = append(current, wavefrontv1alpha1.ShadowAdmission{Source: src, To: admission.To})
+	}
+	slices.SortFunc(current, func(a, b wavefrontv1alpha1.ShadowAdmission) int {
+		return cmp.Compare(a.Source, b.Source)
+	})
+	current = capped(current)
+
+	currentMap := make(map[string]string, len(current))
+	for _, sa := range current {
+		currentMap[sa.Source] = sa.To
+	}
+	previousMap := make(map[string]string, len(p.wf.Status.Shadow))
+	for _, sa := range p.wf.Status.Shadow {
+		previousMap[sa.Source] = sa.To
+	}
+
+	diffLedger(previousMap, currentMap,
+		func(src string, to string) {
+			admission := bySource[src]
+			r.event(p.wf, corev1.EventTypeNormal, reasonShadowAdmission,
+				"would pin %s to %s (from %s, ref %s)",
+				admission.Source, to, previousPin(admission), admission.ObservedRef)
+			r.Metrics.Wavefront(p.wf.Name).CountAdmission(resultShadow)
+		},
+		func(string, string) {})
+
+	p.wf.Status.Shadow = current
 }
 
 // advance performs one pin write. A hold is never forced past: it is detected

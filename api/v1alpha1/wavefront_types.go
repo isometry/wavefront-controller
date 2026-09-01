@@ -116,6 +116,15 @@ type HeldNode struct {
 	Reason string `json:"reason,omitempty"`
 }
 
+// ShadowAdmission records a would-be admission announced in Shadow mode:
+// the pin write the controller would have performed in Enforce.
+type ShadowAdmission struct {
+	// Source is the "<namespace>/<name>" of the GitRepository.
+	Source string `json:"source"`
+	// To is the SHA that would be pinned.
+	To string `json:"to"`
+}
+
 // WavefrontStatus defines the observed state of Wavefront.
 type WavefrontStatus struct {
 	Phase Phase      `json:"phase,omitempty"`
@@ -126,6 +135,12 @@ type WavefrontStatus struct {
 	Blocked []BlockedNode `json:"blocked,omitempty"`
 	// +listType=atomic
 	Held []HeldNode `json:"held,omitempty"`
+	// Shadow lists would-be admissions already announced in Shadow mode
+	// (capped at StatusListCap); the edge-trigger ledger for ShadowAdmission
+	// events and the shadow admissions counter.
+	// +listType=atomic
+	// +optional
+	Shadow []ShadowAdmission `json:"shadow,omitempty"`
 	// +listType=map
 	// +listMapKey=type
 	Conditions         []metav1.Condition `json:"conditions,omitempty"`
