@@ -202,17 +202,23 @@ var _ manager.Runnable = (*Poller)(nil)
 // NewPoller returns a Poller with the CRD's default cadence, ready for
 // Configure and SetTargets.
 //
+// strategy is required: the poller consults only its Candidate method, while
+// WavefrontReconciler.Strategy consults only TrackingRef — the two halves of
+// one selection policy. The caller must construct a single strategy instance
+// and share it between both, or a non-TrackRef strategy injected at one site
+// would be silently half-applied (finding 10).
+//
 // failures is wavefront_ref_list_failures_total and credentialFailures is
 // wavefront_credential_read_failures_total (DESIGN §6), both already created
 // and registered by the caller — internal/metrics owns every collector's
 // registration, so the poller only ever records against handles it is
 // given. Both may be nil, in which case nothing is recorded.
-func NewPoller(secrets client.Reader, lister Lister, notify func(), failures *prometheus.CounterVec, credentialFailures prometheus.Counter) *Poller {
+func NewPoller(secrets client.Reader, lister Lister, notify func(), strategy selection.Strategy, failures *prometheus.CounterVec, credentialFailures prometheus.Counter) *Poller {
 	return &Poller{
 		secrets:            secrets,
 		lister:             lister,
 		notify:             notify,
-		strategy:           selection.TrackRef(),
+		strategy:           strategy,
 		failures:           failures,
 		credentialFailures: credentialFailures,
 		interval:           DefaultInterval,

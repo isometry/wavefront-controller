@@ -522,7 +522,7 @@ func targetNames(targets []gitpoll.Target) []string {
 // 90s Wavefront must not stall a co-resident 30s one, and neither may erase the
 // other's targets.
 func TestPollSetsMergeCadenceAndTargets(t *testing.T) {
-	r := &WavefrontReconciler{Poller: gitpoll.NewPoller(nil, nil, nil, nil, nil), Metrics: metrics.Nop()}
+	r := &WavefrontReconciler{Poller: gitpoll.NewPoller(nil, nil, nil, nil, nil, nil), Metrics: metrics.Nop()}
 
 	r.updatePollSet(pollPass("slow", 90*time.Second, 2, pollTarget(alphaSource)), wavefrontList("slow"))
 
@@ -572,7 +572,7 @@ func TestPollSetsPruneRestoresTheSurvivingCadence(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			r := &WavefrontReconciler{Poller: gitpoll.NewPoller(nil, nil, nil, nil, nil), Metrics: metrics.Nop()}
+			r := &WavefrontReconciler{Poller: gitpoll.NewPoller(nil, nil, nil, nil, nil, nil), Metrics: metrics.Nop()}
 			r.updatePollSet(pollPass("slow", 90*time.Second, 2, pollTarget(alphaSource)), wavefrontList("slow"))
 			r.updatePollSet(pollPass("fast", 30*time.Second, 4, pollTarget(betaSource)), wavefrontList("slow", "fast"))
 
@@ -1551,7 +1551,7 @@ func TestPollSetsCadenceDefaults(t *testing.T) {
 		t.Errorf("cadence of an empty set = %v/%d, want 0/0 for Configure to clamp", interval, perHost)
 	}
 
-	r := &WavefrontReconciler{Poller: gitpoll.NewPoller(nil, nil, nil, nil, nil), Metrics: metrics.Nop()}
+	r := &WavefrontReconciler{Poller: gitpoll.NewPoller(nil, nil, nil, nil, nil, nil), Metrics: metrics.Nop()}
 	r.updatePollSet(pollPass("zeroes", 0, 0, pollTarget(alphaSource)), wavefrontList("zeroes"))
 
 	interval, perHost := cadenceOf(r.pollSets)

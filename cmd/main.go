@@ -218,10 +218,16 @@ func main() {
 	// cache alone would blow the container's memory limit and add cluster-wide
 	// Secret list/watch load. It also makes "resolve credentials afresh on
 	// every sweep" literally true rather than "as fresh as the watch".
+	// One strategy instance, shared by the poller (which consults only
+	// Candidate) and the reconciler (which consults only TrackingRef): the
+	// two halves of one selection policy must never diverge (finding 10).
+	strategy := selection.TrackRef()
+
 	poller := gitpoll.NewPoller(
 		mgr.GetAPIReader(),
 		gitpoll.NewGoGitLister(refListTimeout),
 		notifyWavefronts(mgr, events),
+		strategy,
 		instruments.RefListFailures,
 		instruments.CredentialReadFailures,
 	)
@@ -235,7 +241,7 @@ func main() {
 		Scheme:    mgr.GetScheme(),
 		Recorder:  mgr.GetEventRecorder("wavefront-controller"),
 		Adapter:   adapter.NewKustomizationAdapter(),
-		Strategy:  selection.TrackRef(),
+		Strategy:  strategy,
 		Poller:    poller,
 		PinWriter: &pin.Writer{Client: mgr.GetClient()},
 		Clock:     time.Now,

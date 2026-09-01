@@ -27,6 +27,7 @@ import (
 	"testing/synctest"
 	"time"
 
+	sourcev1 "github.com/fluxcd/source-controller/api/v1"
 	"github.com/go-git/go-git/v5/plumbing/transport"
 	githttp "github.com/go-git/go-git/v5/plumbing/transport/http"
 	"github.com/prometheus/client_golang/prometheus"
@@ -39,6 +40,7 @@ import (
 
 	"github.com/isometry/wavefront-controller/internal/gitpoll"
 	"github.com/isometry/wavefront-controller/internal/metrics"
+	"github.com/isometry/wavefront-controller/internal/selection"
 )
 
 const (
@@ -353,7 +355,7 @@ func TestPollerSweepsOnInterval(t *testing.T) {
 		lister.setAdvertised(alphaURL, map[string]string{trackedRef: shaA})
 		notify := &counter{}
 
-		p := gitpoll.NewPoller(newFakeSecrets(), lister, notify.inc, nil, nil)
+		p := gitpoll.NewPoller(newFakeSecrets(), lister, notify.inc, selection.TrackRef(), nil, nil)
 		p.Configure(10*time.Second, 2)
 		p.SetTargets([]gitpoll.Target{target("alpha", alphaURL)})
 
@@ -409,7 +411,7 @@ func TestPollerNotifiesOncePerSweep(t *testing.T) {
 		}
 		notify := &counter{}
 
-		p := gitpoll.NewPoller(newFakeSecrets(), lister, notify.inc, nil, nil)
+		p := gitpoll.NewPoller(newFakeSecrets(), lister, notify.inc, selection.TrackRef(), nil, nil)
 		p.Configure(10*time.Second, 2)
 		p.SetTargets([]gitpoll.Target{
 			target("alpha", alphaURL),
@@ -454,7 +456,7 @@ func TestPollerBoundsPerHostConcurrency(t *testing.T) {
 		lister.setAdvertised(otherURL, map[string]string{trackedRef: shaA})
 		targets = append(targets, target(otherHostTarget, otherURL))
 
-		p := gitpoll.NewPoller(newFakeSecrets(), lister, func() {}, nil, nil)
+		p := gitpoll.NewPoller(newFakeSecrets(), lister, func() {}, selection.TrackRef(), nil, nil)
 		p.Configure(time.Minute, perHost)
 		p.SetTargets(targets)
 
@@ -483,7 +485,7 @@ func TestPollerFirstObservedStableUntilSHAChanges(t *testing.T) {
 		lister := newFakeLister()
 		lister.setAdvertised(alphaURL, map[string]string{trackedRef: shaA})
 
-		p := gitpoll.NewPoller(newFakeSecrets(), lister, func() {}, nil, nil)
+		p := gitpoll.NewPoller(newFakeSecrets(), lister, func() {}, selection.TrackRef(), nil, nil)
 		p.Configure(10*time.Second, 2)
 		p.SetTargets([]gitpoll.Target{target("alpha", alphaURL)})
 
@@ -525,7 +527,7 @@ func TestPollerFailureRetainsLastGoodSHA(t *testing.T) {
 		lister.setAdvertised(alphaURL, map[string]string{trackedRef: shaA})
 		reg := prometheus.NewRegistry()
 
-		p := gitpoll.NewPoller(newFakeSecrets(), lister, func() {}, metrics.New(reg).RefListFailures, nil)
+		p := gitpoll.NewPoller(newFakeSecrets(), lister, func() {}, selection.TrackRef(), metrics.New(reg).RefListFailures, nil)
 		p.Configure(10*time.Second, 2)
 		p.SetTargets([]gitpoll.Target{target("alpha", alphaURL)})
 
@@ -589,7 +591,7 @@ func TestPollerWrappedCancelledErrorIsCountedFailure(t *testing.T) {
 		lister.setAdvertised(alphaURL, map[string]string{trackedRef: shaA})
 		reg := prometheus.NewRegistry()
 
-		p := gitpoll.NewPoller(newFakeSecrets(), lister, func() {}, metrics.New(reg).RefListFailures, nil)
+		p := gitpoll.NewPoller(newFakeSecrets(), lister, func() {}, selection.TrackRef(), metrics.New(reg).RefListFailures, nil)
 		p.Configure(10*time.Second, 2)
 		p.SetTargets([]gitpoll.Target{target("alpha", alphaURL)})
 
@@ -639,7 +641,7 @@ func TestPollerShutdownDiscardsInFlightListing(t *testing.T) {
 		lister.setAdvertised(alphaURL, map[string]string{trackedRef: shaA})
 		reg := prometheus.NewRegistry()
 
-		p := gitpoll.NewPoller(newFakeSecrets(), lister, func() {}, metrics.New(reg).RefListFailures, nil)
+		p := gitpoll.NewPoller(newFakeSecrets(), lister, func() {}, selection.TrackRef(), metrics.New(reg).RefListFailures, nil)
 		p.Configure(10*time.Second, 2)
 		p.SetTargets([]gitpoll.Target{target("alpha", alphaURL)})
 
@@ -695,7 +697,7 @@ func TestPollerSetTargetsReplacesAndDropsObservations(t *testing.T) {
 		lister.setAdvertised(alphaURL, map[string]string{trackedRef: shaA})
 		lister.setAdvertised(betaURL, map[string]string{trackedRef: shaB})
 
-		p := gitpoll.NewPoller(newFakeSecrets(), lister, func() {}, nil, nil)
+		p := gitpoll.NewPoller(newFakeSecrets(), lister, func() {}, selection.TrackRef(), nil, nil)
 		p.Configure(10*time.Second, 2)
 		p.SetTargets([]gitpoll.Target{target("alpha", alphaURL), target("beta", betaURL)})
 
@@ -750,7 +752,7 @@ func TestPollerSetTargetsInvalidatesChangedPlumbing(t *testing.T) {
 				lister.setAdvertised(alphaURL, map[string]string{trackedRef: shaA, tagRefV2: shaB})
 				lister.setAdvertised(betaURL, map[string]string{trackedRef: shaB})
 
-				p := gitpoll.NewPoller(newFakeSecrets(), lister, func() {}, nil, nil)
+				p := gitpoll.NewPoller(newFakeSecrets(), lister, func() {}, selection.TrackRef(), nil, nil)
 				p.Configure(10*time.Second, 2)
 				p.SetTargets([]gitpoll.Target{target("alpha", alphaURL)})
 
@@ -792,7 +794,7 @@ func TestPollerMidSweepPlumbingSwapDiscardsInFlightResult(t *testing.T) {
 		lister.setAdvertised(betaURL, map[string]string{tagRefV2: shaB})
 		gate := lister.gate(alphaURL)
 
-		p := gitpoll.NewPoller(newFakeSecrets(), lister, func() {}, nil, nil)
+		p := gitpoll.NewPoller(newFakeSecrets(), lister, func() {}, selection.TrackRef(), nil, nil)
 		p.Configure(10*time.Second, 2)
 		p.SetTargets([]gitpoll.Target{target("alpha", alphaURL)})
 
@@ -841,7 +843,7 @@ func TestPollerReadsSecretFreshEachSweep(t *testing.T) {
 		lister := newFakeLister()
 		lister.setAdvertised(alphaURL, map[string]string{trackedRef: shaA})
 
-		p := gitpoll.NewPoller(secrets, lister, func() {}, nil, nil)
+		p := gitpoll.NewPoller(secrets, lister, func() {}, selection.TrackRef(), nil, nil)
 		p.Configure(10*time.Second, 2)
 
 		tgt := target("alpha", alphaURL)
@@ -890,7 +892,7 @@ func TestPollerMissingSecretIsAFailure(t *testing.T) {
 		lister := newFakeLister()
 		lister.setAdvertised(alphaURL, map[string]string{trackedRef: shaA})
 
-		p := gitpoll.NewPoller(newFakeSecrets(), lister, func() {}, instr.RefListFailures, instr.CredentialReadFailures)
+		p := gitpoll.NewPoller(newFakeSecrets(), lister, func() {}, selection.TrackRef(), instr.RefListFailures, instr.CredentialReadFailures)
 		p.Configure(10*time.Second, 2)
 
 		tgt := target("alpha", alphaURL)
@@ -954,7 +956,7 @@ func TestPollerDedupsSecretReadsPerSweep(t *testing.T) {
 		distinctTgt.SecretRef = &distinct
 		targets = append(targets, distinctTgt)
 
-		p := gitpoll.NewPoller(secrets, lister, func() {}, nil, nil)
+		p := gitpoll.NewPoller(secrets, lister, func() {}, selection.TrackRef(), nil, nil)
 		p.Configure(10*time.Second, 4)
 		p.SetTargets(targets)
 
@@ -1006,7 +1008,7 @@ func TestPollerCredentialReadFailureCountedSeparately(t *testing.T) {
 		reg := prometheus.NewRegistry()
 		instr := metrics.New(reg)
 
-		p := gitpoll.NewPoller(secrets, lister, func() {}, instr.RefListFailures, instr.CredentialReadFailures)
+		p := gitpoll.NewPoller(secrets, lister, func() {}, selection.TrackRef(), instr.RefListFailures, instr.CredentialReadFailures)
 		p.Configure(10*time.Second, 4)
 		p.SetTargets(targets)
 
@@ -1047,7 +1049,7 @@ func TestPollerListingFailureStillCountsHostNotCredential(t *testing.T) {
 		reg := prometheus.NewRegistry()
 		instr := metrics.New(reg)
 
-		p := gitpoll.NewPoller(newFakeSecrets(), lister, func() {}, instr.RefListFailures, instr.CredentialReadFailures)
+		p := gitpoll.NewPoller(newFakeSecrets(), lister, func() {}, selection.TrackRef(), instr.RefListFailures, instr.CredentialReadFailures)
 		p.Configure(10*time.Second, 2)
 		p.SetTargets([]gitpoll.Target{target("alpha", alphaURL)})
 
@@ -1071,7 +1073,7 @@ func TestPollerUnadvertisedTrackingRefIsAFailure(t *testing.T) {
 		lister := newFakeLister()
 		lister.setAdvertised(alphaURL, map[string]string{"refs/heads/other": shaA})
 
-		p := gitpoll.NewPoller(newFakeSecrets(), lister, func() {}, nil, nil)
+		p := gitpoll.NewPoller(newFakeSecrets(), lister, func() {}, selection.TrackRef(), nil, nil)
 		p.Configure(10*time.Second, 2)
 		p.SetTargets([]gitpoll.Target{target("alpha", alphaURL)})
 
@@ -1098,7 +1100,7 @@ func TestPollerPrefersPeeledTag(t *testing.T) {
 		lister := newFakeLister()
 		lister.setAdvertised(alphaURL, map[string]string{tag: shaA, tag + "^{}": shaB})
 
-		p := gitpoll.NewPoller(newFakeSecrets(), lister, func() {}, nil, nil)
+		p := gitpoll.NewPoller(newFakeSecrets(), lister, func() {}, selection.TrackRef(), nil, nil)
 		p.Configure(10*time.Second, 2)
 		p.SetTargets([]gitpoll.Target{{Source: source("alpha"), URL: alphaURL, TrackingRef: tag}})
 
@@ -1134,7 +1136,7 @@ func TestPollerConfigureClampsNonPositiveValues(t *testing.T) {
 			targets = append(targets, target("clamp"+string(rune('a'+i)), u))
 		}
 
-		p := gitpoll.NewPoller(newFakeSecrets(), lister, func() {}, nil, nil)
+		p := gitpoll.NewPoller(newFakeSecrets(), lister, func() {}, selection.TrackRef(), nil, nil)
 		p.Configure(0, 0)
 		p.SetTargets(targets)
 
@@ -1174,7 +1176,7 @@ func TestPollerObservationsNeverMixSweeps(t *testing.T) {
 		lister.setAdvertised(alphaURL, map[string]string{trackedRef: shaA})
 		lister.setAdvertised(betaURL, map[string]string{trackedRef: shaA})
 
-		p := gitpoll.NewPoller(newFakeSecrets(), lister, func() {}, nil, nil)
+		p := gitpoll.NewPoller(newFakeSecrets(), lister, func() {}, selection.TrackRef(), nil, nil)
 		p.Configure(10*time.Second, 4)
 		p.SetTargets([]gitpoll.Target{target("alpha", alphaURL), target("beta", betaURL)})
 
@@ -1229,7 +1231,7 @@ func TestPollerObservationsSnapshotIsIndependent(t *testing.T) {
 	lister.setAdvertised(alphaURL, map[string]string{trackedRef: shaA})
 	lister.setAdvertised(betaURL, map[string]string{trackedRef: shaB})
 
-	p := gitpoll.NewPoller(newFakeSecrets(), lister, func() {}, nil, nil)
+	p := gitpoll.NewPoller(newFakeSecrets(), lister, func() {}, selection.TrackRef(), nil, nil)
 	p.Configure(time.Millisecond, 4)
 	p.SetTargets([]gitpoll.Target{target("alpha", alphaURL), target("beta", betaURL)})
 
@@ -1275,7 +1277,7 @@ func TestPollerConfigureAppliesWithoutWaitingOutTheOldInterval(t *testing.T) {
 		lister := newFakeLister()
 		lister.setAdvertised(alphaURL, map[string]string{trackedRef: shaA})
 
-		p := gitpoll.NewPoller(newFakeSecrets(), lister, func() {}, nil, nil)
+		p := gitpoll.NewPoller(newFakeSecrets(), lister, func() {}, selection.TrackRef(), nil, nil)
 		p.Configure(90*time.Second, 4)
 		p.SetTargets([]gitpoll.Target{target("alpha", alphaURL)})
 
@@ -1309,7 +1311,7 @@ func TestPollerRepeatedConfigureDoesNotStarveSweeps(t *testing.T) {
 		lister := newFakeLister()
 		lister.setAdvertised(alphaURL, map[string]string{trackedRef: shaA})
 
-		p := gitpoll.NewPoller(newFakeSecrets(), lister, func() {}, nil, nil)
+		p := gitpoll.NewPoller(newFakeSecrets(), lister, func() {}, selection.TrackRef(), nil, nil)
 		p.Configure(10*time.Second, 4)
 		p.SetTargets([]gitpoll.Target{target("alpha", alphaURL)})
 
@@ -1332,7 +1334,7 @@ func TestPollerRepeatedConfigureDoesNotStarveSweeps(t *testing.T) {
 
 func TestPollerStartBlocksUntilContextDone(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		p := gitpoll.NewPoller(newFakeSecrets(), newFakeLister(), func() {}, nil, nil)
+		p := gitpoll.NewPoller(newFakeSecrets(), newFakeLister(), func() {}, selection.TrackRef(), nil, nil)
 		p.Configure(10*time.Second, 2)
 
 		ctx, cancel := context.WithCancel(t.Context())
@@ -1356,6 +1358,69 @@ func TestPollerStartBlocksUntilContextDone(t *testing.T) {
 			}
 		default:
 			t.Error("Start did not return after context cancellation")
+		}
+	})
+}
+
+// stubStrategy is a selection.Strategy whose Candidate always returns a
+// sentinel SHA (never the real advertised one) and records how many times it
+// was consulted. Used to prove NewPoller wires its injected strategy through
+// to the sweep, rather than hardcoding selection.TrackRef() (WP7, finding
+// 10).
+type stubStrategy struct {
+	mu    sync.Mutex
+	calls int
+}
+
+const stubSentinelSHA = "stub-sentinel-sha"
+
+func (s *stubStrategy) TrackingRef(_ *sourcev1.GitRepositoryRef) (string, error) {
+	return trackedRef, nil
+}
+
+func (s *stubStrategy) Candidate(_ map[string]string, _ string) (string, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.calls++
+	return stubSentinelSHA, true
+}
+
+func (s *stubStrategy) callCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.calls
+}
+
+// TestPollerUsesInjectedStrategy proves the strategy passed to NewPoller is
+// the one actually consulted during a sweep: a stub that never agrees with
+// the real advertisement must still win, and it must be invoked at least
+// once (WP7, finding 10 — no hardcoded selection.TrackRef() left behind).
+func TestPollerUsesInjectedStrategy(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		lister := newFakeLister()
+		lister.setAdvertised(alphaURL, map[string]string{trackedRef: shaA})
+
+		strategy := &stubStrategy{}
+		p := gitpoll.NewPoller(newFakeSecrets(), lister, func() {}, strategy, nil, nil)
+		p.Configure(10*time.Second, 2)
+		p.SetTargets([]gitpoll.Target{target("alpha", alphaURL)})
+
+		stop := runPoller(t, p)
+		defer stop()
+
+		time.Sleep(10 * time.Second)
+		synctest.Wait()
+
+		if got := strategy.callCount(); got < 1 {
+			t.Fatalf("stub strategy Candidate call count = %d, want >= 1: the injected strategy was never consulted", got)
+		}
+
+		obs, ok := p.Observation(source("alpha"))
+		if !ok {
+			t.Fatal("Observation(alpha) not found after a sweep")
+		}
+		if obs.SHA != stubSentinelSHA {
+			t.Errorf("Observation.SHA = %q, want %q (the injected stub's sentinel): NewPoller is not consulting the injected strategy", obs.SHA, stubSentinelSHA)
 		}
 	})
 }

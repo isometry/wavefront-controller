@@ -175,9 +175,13 @@ var _ = BeforeSuite(func() {
 	instruments = metrics.New(prometheus.NewRegistry())
 
 	lister = newFakeLister()
+	// One strategy instance, shared by the poller and reconciler exactly as
+	// main wires it: the two halves of one selection policy must never
+	// diverge (finding 10).
+	strategy := selection.TrackRef()
 	// Non-caching reader, exactly as main wires it: the poller must never
 	// start a cluster-wide Secret informer.
-	poller = gitpoll.NewPoller(mgr.GetAPIReader(), lister, notify, instruments.RefListFailures, instruments.CredentialReadFailures)
+	poller = gitpoll.NewPoller(mgr.GetAPIReader(), lister, notify, strategy, instruments.RefListFailures, instruments.CredentialReadFailures)
 	poller.Configure(100*time.Millisecond, 4)
 	Expect(mgr.Add(poller)).To(Succeed())
 
@@ -186,7 +190,7 @@ var _ = BeforeSuite(func() {
 		Scheme:    mgr.GetScheme(),
 		Recorder:  mgr.GetEventRecorder("wavefront-controller"),
 		Adapter:   adapter.NewKustomizationAdapter(),
-		Strategy:  selection.TrackRef(),
+		Strategy:  strategy,
 		Poller:    poller,
 		PinWriter: &pin.Writer{Client: mgr.GetClient()},
 		Clock:     time.Now,
