@@ -265,6 +265,9 @@ spec:
                 items:
                   properties:
                     manager:
+                      description: |-
+                        Manager names the foreign field manager owning spec.ref.commit; empty
+                        for a Suspend hold, which has no owning actor.
                       type: string
                     node:
                       description: |-
@@ -284,10 +287,17 @@ spec:
                       - name
                       - namespace
                       type: object
+                    reason:
+                      description: |-
+                        Reason distinguishes how the source is held: a foreign field manager
+                        owning spec.ref.commit (HandPin) or spec.suspend (Suspend).
+                      enum:
+                      - HandPin
+                      - Suspend
+                      type: string
                     source:
                       type: string
                   required:
-                  - manager
                   - node
                   - source
                   type: object

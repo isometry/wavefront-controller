@@ -103,9 +103,17 @@ type BlockedNode struct {
 }
 
 type HeldNode struct {
-	Node    NodeReference `json:"node"`
-	Source  string        `json:"source"` // "<namespace>/<name>" of the GitRepository
-	Manager string        `json:"manager"`
+	Node   NodeReference `json:"node"`
+	Source string        `json:"source"` // "<namespace>/<name>" of the GitRepository
+	// Manager names the foreign field manager owning spec.ref.commit; empty
+	// for a Suspend hold, which has no owning actor.
+	// +optional
+	Manager string `json:"manager,omitempty"`
+	// Reason distinguishes how the source is held: a foreign field manager
+	// owning spec.ref.commit (HandPin) or spec.suspend (Suspend).
+	// +kubebuilder:validation:Enum=HandPin;Suspend
+	// +optional
+	Reason string `json:"reason,omitempty"`
 }
 
 // WavefrontStatus defines the observed state of Wavefront.

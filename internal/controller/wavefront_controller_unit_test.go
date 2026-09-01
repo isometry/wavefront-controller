@@ -31,6 +31,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	sourcev1 "github.com/fluxcd/source-controller/api/v1"
@@ -88,6 +89,7 @@ func settledFleet() *wavefrontv1alpha1.Wavefront {
 				Node:    wavefrontv1alpha1.NodeReference{Kind: kindKustomization, Namespace: fluxNamespace, Name: teamAName},
 				Source:  teamASource,
 				Manager: humanManager,
+				Reason:  string(holdHandPin),
 			}},
 			ObservedGeneration: 6,
 		},
@@ -195,7 +197,7 @@ func TestHoldLedgerSurvivesAnAbortedPass(t *testing.T) {
 			resolved:     true,
 			graphChecked: true,
 			graphValid:   true,
-			holds:        map[types.NamespacedName]string{teamAKey(): humanManager},
+			holds:        map[types.NamespacedName]hold{teamAKey(): {manager: humanManager, kind: holdHandPin}},
 			nodeBySource: map[types.NamespacedName][]adapter.NodeRef{teamAKey(): {teamARef()}},
 		}
 	}
@@ -782,6 +784,257 @@ func TestResolveMixedSelectedAndGateSharersOfOneSource(t *testing.T) {
 	}
 	if got, want := p.nodeBySource[src], []adapter.NodeRef{pinned}; !slices.Equal(got, want) {
 		t.Errorf("nodeBySource[%s] = %v, want only the selected node %v", src, got, want)
+	}
+}
+
+// --- holds (WP3): suspended sources unify with hand-pins -------------------
+
+// TestResolveSuspendedSourceYieldsSuspendHold covers finding 7: a suspended
+// source must land in p.holds (kind Suspend, no manager), not just in the
+// engine's Held/Blocked signal.
+func TestResolveSuspendedSourceYieldsSuspendHold(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := sourcev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme: %v", err)
+	}
+
+	src := types.NamespacedName{Namespace: fluxNamespace, Name: "suspended"}
+	repo := &sourcev1.GitRepository{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: src.Namespace,
+			Name:      src.Name,
+			Labels:    map[string]string{pin.ManagedLabel: managedLabelValue},
+		},
+		Spec: sourcev1.GitRepositorySpec{
+			URL:       "https://git.example.com/org/suspended.git",
+			Reference: &sourcev1.GitRepositoryRef{Name: mainRef},
+			Suspend:   true,
+		},
+	}
+
+	r := &WavefrontReconciler{
+		Client:   fake.NewClientBuilder().WithScheme(scheme).WithObjects(repo).Build(),
+		Strategy: selection.TrackRef(),
+		Recorder: events.NewFakeRecorder(16),
+	}
+
+	node := teamARef()
+	p := &pass{
+		wf: &wavefrontv1alpha1.Wavefront{ObjectMeta: metav1.ObjectMeta{Name: fleetName}},
+		nodes: map[adapter.NodeRef]adapter.Node{
+			node: {Ref: node, SourceRef: &src, Readiness: adapter.Readiness{Ready: true}},
+		},
+		selected:     map[adapter.NodeRef]bool{node: true},
+		missing:      map[adapter.NodeRef]bool{},
+		observations: map[types.NamespacedName]gitpoll.Observation{},
+	}
+
+	if err := r.resolve(context.Background(), p); err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+
+	got, ok := p.holds[src]
+	if !ok {
+		t.Fatalf("holds[%s] missing, want a Suspend hold", src)
+	}
+	if got.kind != holdSuspend || got.manager != "" {
+		t.Errorf("hold = %+v, want {manager: \"\", kind: Suspend}", got)
+	}
+}
+
+// TestResolveHandPinAndSuspendYieldsHandPin: a source both hand-pinned and
+// suspended reports HandPin — it names an actor, so it wins over the
+// actor-less Suspend (brief D-B).
+func TestResolveHandPinAndSuspendYieldsHandPin(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := sourcev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme: %v", err)
+	}
+
+	src := types.NamespacedName{Namespace: fluxNamespace, Name: "both"}
+	repo := &sourcev1.GitRepository{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: src.Namespace,
+			Name:      src.Name,
+			Labels:    map[string]string{pin.ManagedLabel: managedLabelValue},
+		},
+		Spec: sourcev1.GitRepositorySpec{
+			URL:       "https://git.example.com/org/both.git",
+			Reference: &sourcev1.GitRepositoryRef{Name: mainRef},
+			Suspend:   true,
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(repo).WithReturnManagedFields().Build()
+
+	// Hand-pin spec.ref.commit under a foreign field manager, exactly as the
+	// envtest "hand-pin holds" scenario does, so pin.Hold sees a real
+	// managedFields entry rather than a hand-built one.
+	ctx := context.Background()
+	live := &sourcev1.GitRepository{}
+	if err := fakeClient.Get(ctx, src, live); err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	live.Spec.Reference.Commit = shaHand
+	if err := fakeClient.Update(ctx, live, client.FieldOwner(humanManager)); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+
+	r := &WavefrontReconciler{
+		Client:   fakeClient,
+		Strategy: selection.TrackRef(),
+		Recorder: events.NewFakeRecorder(16),
+	}
+
+	node := teamARef()
+	p := &pass{
+		wf: &wavefrontv1alpha1.Wavefront{ObjectMeta: metav1.ObjectMeta{Name: fleetName}},
+		nodes: map[adapter.NodeRef]adapter.Node{
+			node: {Ref: node, SourceRef: &src, Readiness: adapter.Readiness{Ready: true}},
+		},
+		selected:     map[adapter.NodeRef]bool{node: true},
+		missing:      map[adapter.NodeRef]bool{},
+		observations: map[types.NamespacedName]gitpoll.Observation{},
+	}
+
+	if err := r.resolve(ctx, p); err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+
+	got, ok := p.holds[src]
+	if !ok {
+		t.Fatalf("holds[%s] missing, want a HandPin hold", src)
+	}
+	if got.kind != holdHandPin || got.manager != humanManager {
+		t.Errorf("hold = %+v, want {manager: %q, kind: HandPin} even though the source is also suspended",
+			got, humanManager)
+	}
+}
+
+// heldStatus builds a one-entry status.Held ledger, keyed on teamASource, for
+// the holdEvents tests below.
+func heldStatus(manager, reason string) []wavefrontv1alpha1.HeldNode {
+	return []wavefrontv1alpha1.HeldNode{{
+		Node:    wavefrontv1alpha1.NodeReference{Kind: kindKustomization, Namespace: fluxNamespace, Name: teamAName},
+		Source:  teamASource,
+		Manager: manager,
+		Reason:  reason,
+	}}
+}
+
+// TestHoldEventsSuspendMessages covers the Suspend-flavoured detect/release
+// text (brief item 8): distinct from the HandPin wording, and naming no
+// field manager.
+func TestHoldEventsSuspendMessages(t *testing.T) {
+	recorder := events.NewFakeRecorder(32)
+	r := &WavefrontReconciler{Recorder: recorder, Clock: time.Now, Metrics: metrics.Nop()}
+
+	wf := &wavefrontv1alpha1.Wavefront{ObjectMeta: metav1.ObjectMeta{Name: fleetName}}
+	detect := &pass{
+		wf:       wf,
+		resolved: true,
+		holds:    map[types.NamespacedName]hold{teamAKey(): {kind: holdSuspend}},
+	}
+	r.holdEvents(detect)
+
+	recorded := drain(recorder.Events)
+	if len(recorded) != 1 || !strings.Contains(recorded[0], reasonHoldDetected) ||
+		!strings.Contains(recorded[0], "is suspended; not advancing") {
+		t.Fatalf("detect events = %v, want exactly one %s with the Suspend wording", recorded, reasonHoldDetected)
+	}
+
+	// The ledger now carries the Suspend hold; the next pass releases it.
+	wf.Status.Held = heldStatus("", string(holdSuspend))
+	release := &pass{wf: wf, resolved: true, holds: map[types.NamespacedName]hold{}}
+	r.holdEvents(release)
+
+	recorded = drain(recorder.Events)
+	if len(recorded) != 1 || !strings.Contains(recorded[0], reasonHoldReleased) ||
+		!strings.Contains(recorded[0], "suspension of") || !strings.Contains(recorded[0], "lifted") {
+		t.Fatalf("release events = %v, want exactly one %s with the Suspend wording", recorded, reasonHoldReleased)
+	}
+}
+
+// TestHoldEventsKindFlipFiresReleaseAndDetect: a source that goes from
+// Suspend to HandPin (same source) in one pass is a release of the old kind
+// and a detect of the new one, not silence — diffed on value (kind+manager)
+// equality, not key presence.
+func TestHoldEventsKindFlipFiresReleaseAndDetect(t *testing.T) {
+	recorder := events.NewFakeRecorder(32)
+	r := &WavefrontReconciler{Recorder: recorder, Clock: time.Now, Metrics: metrics.Nop()}
+
+	wf := &wavefrontv1alpha1.Wavefront{
+		ObjectMeta: metav1.ObjectMeta{Name: fleetName},
+		Status:     wavefrontv1alpha1.WavefrontStatus{Held: heldStatus("", string(holdSuspend))},
+	}
+	p := &pass{
+		wf:       wf,
+		resolved: true,
+		holds:    map[types.NamespacedName]hold{teamAKey(): {manager: humanManager, kind: holdHandPin}},
+	}
+	r.holdEvents(p)
+
+	recorded := drain(recorder.Events)
+	if len(recorded) != 2 {
+		t.Fatalf("events on a kind flip = %v, want exactly 2 (release + detect)", recorded)
+	}
+	var sawRelease, sawDetect bool
+	for _, e := range recorded {
+		switch {
+		case strings.Contains(e, reasonHoldReleased) && strings.Contains(e, "lifted"):
+			sawRelease = true
+		case strings.Contains(e, reasonHoldDetected) && strings.Contains(e, humanManager):
+			sawDetect = true
+		}
+	}
+	if !sawRelease || !sawDetect {
+		t.Errorf("events = %v, want a Suspend release and a HandPin detect", recorded)
+	}
+}
+
+// TestHoldEventsIdenticalLedgerFiresNothing: same source, same kind, same
+// manager between passes must not re-fire — the diff is on value equality.
+func TestHoldEventsIdenticalLedgerFiresNothing(t *testing.T) {
+	recorder := events.NewFakeRecorder(32)
+	r := &WavefrontReconciler{Recorder: recorder, Clock: time.Now, Metrics: metrics.Nop()}
+
+	wf := &wavefrontv1alpha1.Wavefront{
+		ObjectMeta: metav1.ObjectMeta{Name: fleetName},
+		Status:     wavefrontv1alpha1.WavefrontStatus{Held: heldStatus(humanManager, string(holdHandPin))},
+	}
+	p := &pass{
+		wf:       wf,
+		resolved: true,
+		holds:    map[types.NamespacedName]hold{teamAKey(): {manager: humanManager, kind: holdHandPin}},
+	}
+	r.holdEvents(p)
+
+	if recorded := drain(recorder.Events); len(recorded) != 0 {
+		t.Errorf("events = %v, want none: the hold is unchanged", recorded)
+	}
+}
+
+// TestHoldEventsEmptyReasonDefaultsToHandPin: status.held written by a
+// pre-upgrade controller carries no Reason at all. Reading it back must treat
+// that as HandPin, not as a spurious kind change against an unchanged
+// HandPin hold.
+func TestHoldEventsEmptyReasonDefaultsToHandPin(t *testing.T) {
+	recorder := events.NewFakeRecorder(32)
+	r := &WavefrontReconciler{Recorder: recorder, Clock: time.Now, Metrics: metrics.Nop()}
+
+	wf := &wavefrontv1alpha1.Wavefront{
+		ObjectMeta: metav1.ObjectMeta{Name: fleetName},
+		Status:     wavefrontv1alpha1.WavefrontStatus{Held: heldStatus(humanManager, "")},
+	}
+	p := &pass{
+		wf:       wf,
+		resolved: true,
+		holds:    map[types.NamespacedName]hold{teamAKey(): {manager: humanManager, kind: holdHandPin}},
+	}
+	r.holdEvents(p)
+
+	if recorded := drain(recorder.Events); len(recorded) != 0 {
+		t.Errorf("events = %v, want none: an empty pre-upgrade Reason must default to HandPin", recorded)
 	}
 }
 

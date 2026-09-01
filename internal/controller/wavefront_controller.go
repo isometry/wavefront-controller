@@ -133,6 +133,24 @@ type pollSet struct {
 	targets            []gitpoll.Target
 }
 
+// holdKind distinguishes how a source is held (finding 7, DESIGN §3.5.3,
+// §10): a foreign field manager owning spec.ref.commit, or spec.suspend.
+// Both are reported identically by the engine (NodeResult.Held,
+// engine.go SelfHeld/AncestorHeld) and must be reported identically here.
+type holdKind string
+
+const (
+	holdHandPin holdKind = "HandPin"
+	holdSuspend holdKind = "Suspend"
+)
+
+// hold is one source's entry in the unified hold ledger (decision D-B):
+// manager is "" for a Suspend hold, which names no owning actor.
+type hold struct {
+	manager string
+	kind    holdKind
+}
+
 // resolvedSource is one GitRepository's memoized resolution (decision D-A).
 // state != nil means the source itself is eligible (managed, resolvable ref
 // style) — not that any node was pinned to it: only resolve's caller, gated
@@ -169,8 +187,14 @@ type pass struct {
 	// events and status attribution need every referencing node, not just
 	// whichever last overwrote a single value.
 	nodeBySource map[types.NamespacedName][]adapter.NodeRef
-	holds        map[types.NamespacedName]string // field-manager holds only (R9)
-	targets      []gitpoll.Target
+	// holds is the unified hold ledger (finding 7, decision D-B): every
+	// source the engine reports Held for, whether a hand-pin (a foreign
+	// field manager owns spec.ref.commit) or a suspend (spec.suspend). It
+	// feeds counts.Held, status.held[], the HoldDetected/HoldReleased
+	// edge-trigger, and the advance() gate alike — matching the engine's
+	// own Held semantics (SelfHeld/AncestorHeld cover both).
+	holds   map[types.NamespacedName]hold
+	targets []gitpoll.Target
 
 	// observations is the pass's single snapshot of the poller. Strict
 	// ordering for co-arriving changes (DESIGN §3.3) is only structural if
@@ -381,7 +405,7 @@ func (r *WavefrontReconciler) resolve(ctx context.Context, p *pass) error {
 	p.repos = map[types.NamespacedName]*sourcev1.GitRepository{}
 	p.resolvedSources = map[types.NamespacedName]*resolvedSource{}
 	p.nodeBySource = map[types.NamespacedName][]adapter.NodeRef{}
-	p.holds = map[types.NamespacedName]string{}
+	p.holds = map[types.NamespacedName]hold{}
 	p.targets = make([]gitpoll.Target, 0, len(p.nodes))
 
 	for _, ref := range slices.SortedFunc(maps.Keys(p.nodes), compareRefs) {
@@ -412,8 +436,14 @@ func (r *WavefrontReconciler) resolve(ctx context.Context, p *pass) error {
 				// Nodes are walked in compareRefs order above, so each
 				// source's slice accumulates already sorted.
 				p.nodeBySource[*node.SourceRef] = append(p.nodeBySource[*node.SourceRef], ref)
-				if rs.state.Held {
-					p.holds[*node.SourceRef] = rs.state.HeldBy
+				// A source can be both hand-pinned and suspended at once;
+				// HandPin wins because it names an actor and Suspend does
+				// not (decision D-B, finding 7).
+				switch {
+				case rs.state.Held:
+					p.holds[*node.SourceRef] = hold{manager: rs.state.HeldBy, kind: holdHandPin}
+				case rs.state.Suspended:
+					p.holds[*node.SourceRef] = hold{kind: holdSuspend}
 				}
 			}
 		}
@@ -662,6 +692,10 @@ func (r *WavefrontReconciler) execute(ctx context.Context, p *pass) error {
 // conflict and would silently co-own it, DESIGN §3.5.3) and re-detected from
 // any conflict the apply does raise.
 func (r *WavefrontReconciler) advance(ctx context.Context, p *pass, admission engine.Admission) error {
+	// Defense-in-depth: the engine no longer emits admissions for a held or
+	// suspended source at all (finding 7), so this lookup should never match
+	// in practice. It stays as the controller's own backstop against that
+	// invariant.
 	if _, held := p.holds[admission.Source]; held {
 		return nil
 	}
@@ -673,7 +707,7 @@ func (r *WavefrontReconciler) advance(ctx context.Context, p *pass, admission en
 		r.pinEvent(p, admission)
 		return nil
 	case errors.Is(err, pin.ErrHeld):
-		p.holds[admission.Source] = r.holderOf(ctx, admission.Source)
+		p.holds[admission.Source] = hold{manager: r.holderOf(ctx, admission.Source), kind: holdHandPin}
 		r.Metrics.Wavefront(p.wf.Name).CountAdmission(resultConflict)
 		return nil
 	default:
@@ -729,29 +763,53 @@ func (r *WavefrontReconciler) holdEvents(p *pass) {
 		return
 	}
 
-	previous := make(map[string]string, len(p.wf.Status.Held))
+	previous := make(map[string]hold, len(p.wf.Status.Held))
 	for _, held := range p.wf.Status.Held {
-		previous[held.Source] = held.Manager
+		// An empty Reason is status written by a pre-upgrade controller
+		// (field-manager holds only, R9): treat it as HandPin rather than
+		// as a spurious kind change against an unchanged hold.
+		kind := holdKind(held.Reason)
+		if kind == "" {
+			kind = holdHandPin
+		}
+		previous[held.Source] = hold{manager: held.Manager, kind: kind}
 	}
 
-	current := make(map[string]string, len(p.holds))
-	for src, manager := range p.holds {
-		current[src.String()] = manager
+	current := make(map[string]hold, len(p.holds))
+	for src, h := range p.holds {
+		current[src.String()] = h
 	}
 
+	// Diffed on value (kind+manager) equality, not key presence: a kind or
+	// manager change on the same source (e.g. Suspend -> HandPin) is a
+	// release of the old hold and a detect of the new one in the same pass.
 	for _, src := range slices.Sorted(maps.Keys(current)) {
-		if _, was := previous[src]; was {
+		if was, ok := previous[src]; ok && was == current[src] {
 			continue
 		}
-		r.event(p.wf, corev1.EventTypeWarning, reasonHoldDetected,
-			"pin of %s is held by field manager %q; not advancing", src, current[src])
+		h := current[src]
+		switch h.kind {
+		case holdSuspend:
+			r.event(p.wf, corev1.EventTypeWarning, reasonHoldDetected,
+				"source %s is suspended; not advancing", src)
+		default:
+			r.event(p.wf, corev1.EventTypeWarning, reasonHoldDetected,
+				"pin of %s is held by field manager %q; not advancing", src, h.manager)
+		}
 	}
 	for _, src := range slices.Sorted(maps.Keys(previous)) {
-		if _, still := current[src]; still {
+		if now, ok := current[src]; ok && now == previous[src] {
 			continue
 		}
-		r.event(p.wf, corev1.EventTypeNormal, reasonHoldReleased,
-			"hold on %s released by %q", src, previous[src])
+		h := previous[src]
+		switch h.kind {
+		case holdSuspend:
+			r.event(p.wf, corev1.EventTypeNormal, reasonHoldReleased,
+				"suspension of %s lifted", src)
+		default:
+			r.event(p.wf, corev1.EventTypeNormal, reasonHoldReleased,
+				"hold on %s released by %q", src, h.manager)
+		}
 	}
 }
 
@@ -881,6 +939,9 @@ func (r *WavefrontReconciler) summariseNodes(p *pass) {
 			scope.SetBlocked(string(reason), count)
 		}
 	}
+	// p.holds now covers both hand-pins and suspends, so this matches the
+	// engine's own NodeResult.Held semantics (finding 7) rather than
+	// undercounting suspended sources.
 	counts.Held = len(p.holds)
 
 	slices.SortFunc(blocked, func(a, b wavefrontv1alpha1.BlockedNode) int {
@@ -888,14 +949,15 @@ func (r *WavefrontReconciler) summariseNodes(p *pass) {
 	})
 
 	held := make([]wavefrontv1alpha1.HeldNode, 0, len(p.holds))
-	for src, manager := range p.holds {
+	for src, h := range p.holds {
 		// A held source shared by more than one node (WP2) is attributed to
 		// the first referencing node in compareRefs order — deterministic,
 		// not an arbitrary map read.
 		held = append(held, wavefrontv1alpha1.HeldNode{
 			Node:    nodeReference(p.nodeBySource[src][0]),
 			Source:  src.String(),
-			Manager: manager,
+			Manager: h.manager,
+			Reason:  string(h.kind),
 		})
 	}
 	slices.SortFunc(held, func(a, b wavefrontv1alpha1.HeldNode) int {

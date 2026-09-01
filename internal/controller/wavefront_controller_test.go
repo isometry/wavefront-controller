@@ -550,6 +550,72 @@ var _ = Describe("Wavefront reconciler", func() {
 		})
 	})
 
+	Describe("suspended source holds", func() {
+		It("treats a suspended GitRepository as a hold, distinct from a hand-pin", func() {
+			const ns, scenario = "suspend-hold", "suspend-hold"
+			makeNamespace(ns)
+
+			url := repoURLFor(ns, flotilla)
+			lister.advertise(url, mainRef, shaA)
+			repo := makeGitRepo(ns, flotilla, url, mainRef, true)
+			setArtifact(repo, revisionOf(shaA))
+			makeKustomization(ns, flotilla,
+				types.NamespacedName{Namespace: ns, Name: flotilla}, nil,
+				map[string]string{scenarioLabel: scenario})
+
+			makeWavefront("wf-suspend-hold", scenario, wavefrontv1alpha1.ModeEnforce)
+			Eventually(func() string { return pinOf(ns, flotilla) }).Should(Equal(shaA))
+
+			By("suspending the GitRepository")
+			Eventually(func() error {
+				repo := getRepo(ns, flotilla)
+				repo.Spec.Suspend = true
+				return k8sClient.Update(ctx, repo)
+			}).Should(Succeed())
+
+			By("naming the source as a Suspend hold in status.held, with no manager")
+			Eventually(func() []wavefrontv1alpha1.HeldNode {
+				return getWavefront("wf-suspend-hold").Status.Held
+			}).Should(HaveLen(1))
+			wf := getWavefront("wf-suspend-hold")
+			Expect(wf.Status.Held[0].Reason).To(Equal("Suspend"))
+			Expect(wf.Status.Held[0].Manager).To(BeEmpty())
+			Expect(wf.Status.Held[0].Source).To(Equal(ns + "/" + flotilla))
+			Expect(wf.Status.Held[0].Node.Name).To(Equal(flotilla))
+			Expect(wf.Status.Nodes.Held).To(Equal(1))
+
+			By("emitting HoldDetected exactly once")
+			Eventually(func() int32 {
+				_, occurrences := recordedEvents("HoldDetected", "wf-suspend-hold")
+				return occurrences
+			}).Should(Equal(int32(1)))
+			Consistently(func() int32 {
+				_, occurrences := recordedEvents("HoldDetected", "wf-suspend-hold")
+				return occurrences
+			}).Should(Equal(int32(1)))
+
+			By("unsuspending the GitRepository")
+			Eventually(func() error {
+				repo := getRepo(ns, flotilla)
+				repo.Spec.Suspend = false
+				return k8sClient.Update(ctx, repo)
+			}).Should(Succeed())
+
+			By("releasing the hold exactly once")
+			Eventually(func() int32 {
+				_, occurrences := recordedEvents("HoldReleased", "wf-suspend-hold")
+				return occurrences
+			}).Should(Equal(int32(1)))
+			Consistently(func() int32 {
+				_, occurrences := recordedEvents("HoldReleased", "wf-suspend-hold")
+				return occurrences
+			}).Should(Equal(int32(1)))
+			Eventually(func() []wavefrontv1alpha1.HeldNode {
+				return getWavefront("wf-suspend-hold").Status.Held
+			}).Should(BeEmpty())
+		})
+	})
+
 	Describe("selector overlap", func() {
 		It("marks both Wavefronts invalid and admits nothing", func() {
 			const ns, scenario = "overlap", "overlap"
