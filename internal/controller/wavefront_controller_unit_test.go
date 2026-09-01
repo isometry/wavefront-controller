@@ -33,11 +33,15 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
+	sourcev1 "github.com/fluxcd/source-controller/api/v1"
+
 	wavefrontv1alpha1 "github.com/isometry/wavefront-controller/api/v1alpha1"
 	"github.com/isometry/wavefront-controller/internal/adapter"
 	"github.com/isometry/wavefront-controller/internal/engine"
 	"github.com/isometry/wavefront-controller/internal/gitpoll"
 	"github.com/isometry/wavefront-controller/internal/metrics"
+	"github.com/isometry/wavefront-controller/internal/pin"
+	"github.com/isometry/wavefront-controller/internal/selection"
 )
 
 // Unit coverage for the two shared-state hazards the reconciler has to get
@@ -192,7 +196,7 @@ func TestHoldLedgerSurvivesAnAbortedPass(t *testing.T) {
 			graphChecked: true,
 			graphValid:   true,
 			holds:        map[types.NamespacedName]string{teamAKey(): humanManager},
-			nodeBySource: map[types.NamespacedName]adapter.NodeRef{teamAKey(): teamARef()},
+			nodeBySource: map[types.NamespacedName][]adapter.NodeRef{teamAKey(): {teamARef()}},
 		}
 	}
 
@@ -580,6 +584,204 @@ func TestPollSetsPruneRestoresTheSurvivingCadence(t *testing.T) {
 				t.Errorf("targets = %v, want only the survivor's [alpha]", got)
 			}
 		})
+	}
+}
+
+// --- shared-source resolution (WP2) -----------------------------------------
+
+const teamBName = "team-b"
+
+func teamBRef() adapter.NodeRef {
+	return adapter.NodeRef{Kind: kindKustomization, Namespace: fluxNamespace, Name: teamBName}
+}
+
+// TestResolveMemoizesASharedSource is decision D-A's controller-side
+// counterpart to the engine's gateSharedSources: two Kustomizations sharing
+// one GitRepository must see one r.Get, one *engine.SourceState and one poll
+// Target, and nodeBySource must list both referencing nodes rather than
+// silently keeping only the last writer.
+func TestResolveMemoizesASharedSource(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := sourcev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme: %v", err)
+	}
+
+	src := types.NamespacedName{Namespace: fluxNamespace, Name: "shared"}
+	repo := &sourcev1.GitRepository{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: src.Namespace,
+			Name:      src.Name,
+			Labels:    map[string]string{pin.ManagedLabel: managedLabelValue},
+		},
+		Spec: sourcev1.GitRepositorySpec{
+			URL:       "https://git.example.com/org/shared.git",
+			Reference: &sourcev1.GitRepositoryRef{Name: mainRef},
+		},
+	}
+
+	r := &WavefrontReconciler{
+		Client:   fake.NewClientBuilder().WithScheme(scheme).WithObjects(repo).Build(),
+		Strategy: selection.TrackRef(),
+		Recorder: events.NewFakeRecorder(16),
+	}
+
+	nodeA, nodeB := teamARef(), teamBRef()
+	p := &pass{
+		wf: &wavefrontv1alpha1.Wavefront{ObjectMeta: metav1.ObjectMeta{Name: fleetName}},
+		nodes: map[adapter.NodeRef]adapter.Node{
+			nodeA: {Ref: nodeA, SourceRef: &src, Readiness: adapter.Readiness{Ready: true}},
+			nodeB: {Ref: nodeB, SourceRef: &src, Readiness: adapter.Readiness{Ready: true}},
+		},
+		selected:     map[adapter.NodeRef]bool{nodeA: true, nodeB: true},
+		missing:      map[adapter.NodeRef]bool{},
+		observations: map[types.NamespacedName]gitpoll.Observation{},
+	}
+
+	if err := r.resolve(context.Background(), p); err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+
+	stateA, stateB := p.inputs[nodeA].Source, p.inputs[nodeB].Source
+	if stateA == nil || stateB == nil {
+		t.Fatalf("both sharers must resolve pinned, got a=%+v b=%+v", p.inputs[nodeA], p.inputs[nodeB])
+	}
+	if stateA != stateB {
+		t.Errorf("sharers got distinct *SourceState pointers (%p, %p), want the memoized one shared", stateA, stateB)
+	}
+
+	if len(p.targets) != 1 {
+		t.Errorf("targets = %d, want exactly 1 for the shared source, not one per referencing node", len(p.targets))
+	}
+
+	if got, want := p.nodeBySource[src], []adapter.NodeRef{nodeA, nodeB}; !slices.Equal(got, want) {
+		t.Errorf("nodeBySource[%s] = %v, want both referencing nodes in compareRefs order %v", src, got, want)
+	}
+}
+
+// TestResolveSkipsASourceReferencedOnlyByNonSelectedNodes is the fix for the
+// WP2 review finding: a source with no selected referencing node must never
+// register a poll Target or fire UnsupportedRefStyle — that would leak a
+// source this Wavefront has zero selected interest in into its pollSet
+// contribution (and misattribute the warning) purely because a
+// dependency-closure gate happens to reference it. The source's ref style is
+// deliberately unsupported (SemVer), the worst case: even that must not
+// resolve or fire an event when nothing selected reaches it.
+func TestResolveSkipsASourceReferencedOnlyByNonSelectedNodes(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := sourcev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme: %v", err)
+	}
+
+	src := types.NamespacedName{Namespace: fluxNamespace, Name: "upstream"}
+	repo := &sourcev1.GitRepository{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: src.Namespace,
+			Name:      src.Name,
+			Labels:    map[string]string{pin.ManagedLabel: managedLabelValue},
+		},
+		Spec: sourcev1.GitRepositorySpec{
+			URL:       "https://git.example.com/org/upstream.git",
+			Reference: &sourcev1.GitRepositoryRef{SemVer: ">=1.0.0"},
+		},
+	}
+
+	recorder := events.NewFakeRecorder(16)
+	r := &WavefrontReconciler{
+		Client:   fake.NewClientBuilder().WithScheme(scheme).WithObjects(repo).Build(),
+		Strategy: selection.TrackRef(),
+		Recorder: recorder,
+	}
+
+	gateOnly := teamARef()
+	p := &pass{
+		wf: &wavefrontv1alpha1.Wavefront{ObjectMeta: metav1.ObjectMeta{Name: fleetName}},
+		nodes: map[adapter.NodeRef]adapter.Node{
+			gateOnly: {Ref: gateOnly, SourceRef: &src, Readiness: adapter.Readiness{Ready: true}},
+		},
+		selected:     map[adapter.NodeRef]bool{}, // gateOnly is a dependency-closure gate, not selected
+		missing:      map[adapter.NodeRef]bool{},
+		observations: map[types.NamespacedName]gitpoll.Observation{},
+	}
+
+	if err := r.resolve(context.Background(), p); err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+
+	if got := p.inputs[gateOnly]; got.Role != engine.RoleGate || got.Source != nil {
+		t.Errorf("non-selected referencing node = %+v, want a plain gate with no Source", got)
+	}
+	if len(p.targets) != 0 {
+		t.Errorf("targets = %v, want none: no selected node references this source", p.targets)
+	}
+	if len(p.nodeBySource) != 0 {
+		t.Errorf("nodeBySource = %v, want empty", p.nodeBySource)
+	}
+	if len(p.resolvedSources) != 0 {
+		t.Errorf("resolvedSources = %v, want empty: the source was never resolved", p.resolvedSources)
+	}
+	if recorded := drain(recorder.Events); len(recorded) != 0 {
+		t.Errorf("events = %v, want none: UnsupportedRefStyle must not fire for a source no selected node references", recorded)
+	}
+}
+
+// TestResolveMixedSelectedAndGateSharersOfOneSource covers the mixed
+// topology the mono-repo gate above simplified away: one selected (pinned)
+// node and one non-selected (gate) node referencing the same source. The
+// source still resolves exactly once (one Target), the selected node is
+// pinned to it, and the gate node stays a plain gate — never added to
+// nodeBySource.
+func TestResolveMixedSelectedAndGateSharersOfOneSource(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := sourcev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme: %v", err)
+	}
+
+	src := types.NamespacedName{Namespace: fluxNamespace, Name: "shared"}
+	repo := &sourcev1.GitRepository{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: src.Namespace,
+			Name:      src.Name,
+			Labels:    map[string]string{pin.ManagedLabel: managedLabelValue},
+		},
+		Spec: sourcev1.GitRepositorySpec{
+			URL:       "https://git.example.com/org/shared.git",
+			Reference: &sourcev1.GitRepositoryRef{Name: mainRef},
+		},
+	}
+
+	r := &WavefrontReconciler{
+		Client:   fake.NewClientBuilder().WithScheme(scheme).WithObjects(repo).Build(),
+		Strategy: selection.TrackRef(),
+		Recorder: events.NewFakeRecorder(16),
+	}
+
+	pinned, gate := teamARef(), teamBRef()
+	p := &pass{
+		wf: &wavefrontv1alpha1.Wavefront{ObjectMeta: metav1.ObjectMeta{Name: fleetName}},
+		nodes: map[adapter.NodeRef]adapter.Node{
+			pinned: {Ref: pinned, SourceRef: &src, Readiness: adapter.Readiness{Ready: true}},
+			gate:   {Ref: gate, SourceRef: &src, Readiness: adapter.Readiness{Ready: true}},
+		},
+		selected:     map[adapter.NodeRef]bool{pinned: true}, // gate deliberately absent
+		missing:      map[adapter.NodeRef]bool{},
+		observations: map[types.NamespacedName]gitpoll.Observation{},
+	}
+
+	if err := r.resolve(context.Background(), p); err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+
+	if got := p.inputs[pinned]; got.Role != engine.RolePinned || got.Source == nil {
+		t.Errorf("selected node = %+v, want RolePinned with a Source", got)
+	}
+	if got := p.inputs[gate]; got.Role != engine.RoleGate || got.Source != nil {
+		t.Errorf("non-selected node = %+v, want a plain gate with no Source", got)
+	}
+	if len(p.targets) != 1 {
+		t.Errorf("targets = %d, want exactly 1: registered once, by the selected node", len(p.targets))
+	}
+	if got, want := p.nodeBySource[src], []adapter.NodeRef{pinned}; !slices.Equal(got, want) {
+		t.Errorf("nodeBySource[%s] = %v, want only the selected node %v", src, got, want)
 	}
 }
 

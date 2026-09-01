@@ -133,6 +133,17 @@ type pollSet struct {
 	targets            []gitpoll.Target
 }
 
+// resolvedSource is one GitRepository's memoized resolution (decision D-A).
+// state != nil means the source itself is eligible (managed, resolvable ref
+// style) — not that any node was pinned to it: only resolve's caller, gated
+// on p.selected, decides whether a given referencing node becomes
+// RolePinned. state is nil for an absent or unmanaged source, or one whose
+// ref style v1 cannot sequence, in which case target is also nil.
+type resolvedSource struct {
+	state  *engine.SourceState
+	target *gitpoll.Target
+}
+
 // pass is one reconciliation's derived state, threaded through the numbered
 // steps of the flow so that each stays a pure-ish function of what came before.
 type pass struct {
@@ -144,10 +155,20 @@ type pass struct {
 	missing  map[adapter.NodeRef]bool // dependsOn targets that do not exist
 
 	// source resolution (step 4)
-	resolved     bool
-	inputs       map[adapter.NodeRef]engine.NodeInput
-	repos        map[types.NamespacedName]*sourcev1.GitRepository
-	nodeBySource map[types.NamespacedName]adapter.NodeRef
+	resolved bool
+	inputs   map[adapter.NodeRef]engine.NodeInput
+	repos    map[types.NamespacedName]*sourcev1.GitRepository
+	// resolvedSources memoizes each GitRepository's resolution (decision
+	// D-A): two or more nodes sharing one source (a standard Flux monorepo
+	// topology) see one r.Get, one trackingRef computation and one
+	// *engine.SourceState, rather than a separate — and possibly
+	// disagreeing — read per referencing node.
+	resolvedSources map[types.NamespacedName]*resolvedSource
+	// nodeBySource lists every selected, pinned node referencing a source,
+	// each slice in compareRefs order (decision D-D): a shared source's
+	// events and status attribution need every referencing node, not just
+	// whichever last overwrote a single value.
+	nodeBySource map[types.NamespacedName][]adapter.NodeRef
 	holds        map[types.NamespacedName]string // field-manager holds only (R9)
 	targets      []gitpoll.Target
 
@@ -358,7 +379,8 @@ func (r *WavefrontReconciler) detectOverlap(
 func (r *WavefrontReconciler) resolve(ctx context.Context, p *pass) error {
 	p.inputs = make(map[adapter.NodeRef]engine.NodeInput, len(p.nodes)+len(p.missing))
 	p.repos = map[types.NamespacedName]*sourcev1.GitRepository{}
-	p.nodeBySource = map[types.NamespacedName]adapter.NodeRef{}
+	p.resolvedSources = map[types.NamespacedName]*resolvedSource{}
+	p.nodeBySource = map[types.NamespacedName][]adapter.NodeRef{}
 	p.holds = map[types.NamespacedName]string{}
 	p.targets = make([]gitpoll.Target, 0, len(p.nodes))
 
@@ -372,18 +394,27 @@ func (r *WavefrontReconciler) resolve(ctx context.Context, p *pass) error {
 			AppliedSHA: node.Readiness.AppliedSHA,
 		}
 
-		state, target, err := r.resolveSource(ctx, p, node)
-		if err != nil {
-			return err
-		}
-		if state != nil {
-			input.Role, input.Source = engine.RolePinned, state
-			p.nodeBySource[state.Source] = ref
-			if state.Held {
-				p.holds[state.Source] = state.HeldBy
+		// Resolution (the read, trackingRef, event and Target registration)
+		// is triggered only by a selected node: a dependency dragged in by
+		// the closure is a health gate even when it shares a source with a
+		// pinned sibling, or when its own source is managed only by another
+		// Wavefront — and must never register a poll Target or fire
+		// UnsupportedRefStyle for a source this Wavefront has no selected
+		// interest in (WP2 review finding).
+		if node.SourceRef != nil && p.selected[ref] {
+			rs, err := r.resolveSource(ctx, p, *node.SourceRef)
+			if err != nil {
+				return err
 			}
-			if target != nil {
-				p.targets = append(p.targets, *target)
+
+			if rs.state != nil {
+				input.Role, input.Source = engine.RolePinned, rs.state
+				// Nodes are walked in compareRefs order above, so each
+				// source's slice accumulates already sorted.
+				p.nodeBySource[*node.SourceRef] = append(p.nodeBySource[*node.SourceRef], ref)
+				if rs.state.Held {
+					p.holds[*node.SourceRef] = rs.state.HeldBy
+				}
 			}
 		}
 
@@ -400,48 +431,59 @@ func (r *WavefrontReconciler) resolve(ctx context.Context, p *pass) error {
 	return nil
 }
 
-// resolveSource reads one node's GitRepository. It returns a nil SourceState
-// for every gate node — an absent or unmanaged source, or a ref style v1
-// cannot sequence (DESIGN D10) — which is what the engine requires of a gate.
-func (r *WavefrontReconciler) resolveSource(
-	ctx context.Context,
-	p *pass,
-	node adapter.Node,
-) (*engine.SourceState, *gitpoll.Target, error) {
-	if node.SourceRef == nil {
-		return nil, nil, nil
+// resolveSource returns src's memoized resolution (decision D-A, WP2). Only
+// called for a selected node (the caller's guard): the first selected node
+// to reference a GitRepository triggers resolveSourceOnce; every later
+// selected referencing node in this pass reuses the result without a second
+// read, a second trackingRef resolution, or a second UnsupportedRefStyle
+// event. A source referenced only by non-selected (dependency-closure) nodes
+// is never resolved at all, and registers no poll Target.
+func (r *WavefrontReconciler) resolveSource(ctx context.Context, p *pass, src types.NamespacedName) (*resolvedSource, error) {
+	if rs, done := p.resolvedSources[src]; done {
+		return rs, nil
 	}
 
+	rs, err := r.resolveSourceOnce(ctx, p, src)
+	if err != nil {
+		return nil, err
+	}
+	p.resolvedSources[src] = rs
+	return rs, nil
+}
+
+// resolveSourceOnce reads one GitRepository. It returns a zero-value
+// resolvedSource — nil state, nil target — for every gate source: absent,
+// unmanaged, or a ref style v1 cannot sequence (DESIGN D10), which is what
+// the engine requires of a gate.
+func (r *WavefrontReconciler) resolveSourceOnce(ctx context.Context, p *pass, src types.NamespacedName) (*resolvedSource, error) {
 	repo := &sourcev1.GitRepository{}
-	if err := r.Get(ctx, *node.SourceRef, repo); err != nil {
+	if err := r.Get(ctx, src, repo); err != nil {
 		if apierrors.IsNotFound(err) {
-			return nil, nil, nil
+			return &resolvedSource{}, nil
 		}
-		return nil, nil, fmt.Errorf("getting GitRepository %s: %w", node.SourceRef, err)
+		return nil, fmt.Errorf("getting GitRepository %s: %w", src, err)
 	}
-	p.repos[*node.SourceRef] = repo
+	p.repos[src] = repo
 
-	// Pinned iff selected *and* opted in by the catalog's participation label:
-	// a dependency dragged in by the closure is a health gate even when its
-	// own source is managed by another Wavefront.
-	if !p.selected[node.Ref] || repo.Labels[pin.ManagedLabel] != managedOptIn {
-		return nil, nil, nil
+	// Opted in by the catalog's participation label (DESIGN §8.2); the
+	// per-node selected check is applied by the caller.
+	if repo.Labels[pin.ManagedLabel] != managedOptIn {
+		return &resolvedSource{}, nil
 	}
 
 	trackingRef, err := r.Strategy.TrackingRef(repo.Spec.Reference)
 	if err != nil {
 		if errors.Is(err, selection.ErrUnsupportedRef) {
 			r.event(p.wf, corev1.EventTypeWarning, reasonUnsupportedRefStyle,
-				"%s tracks a ref style this version cannot sequence; %s demoted to a gate",
-				node.SourceRef, node.Ref)
-			return nil, nil, nil
+				"%s tracks a ref style this version cannot sequence; every referencing node demoted to a gate", src)
+			return &resolvedSource{}, nil
 		}
-		return nil, nil, fmt.Errorf("resolving tracking ref of %s: %w", node.SourceRef, err)
+		return nil, fmt.Errorf("resolving tracking ref of %s: %w", src, err)
 	}
 
 	manager, held := pin.Hold(repo)
 	state := &engine.SourceState{
-		Source:       *node.SourceRef,
+		Source:       src,
 		TrackingRef:  trackingRef,
 		Pin:          currentPin(repo),
 		Held:         held,
@@ -453,20 +495,23 @@ func (r *WavefrontReconciler) resolveSource(
 	// No observation is not a stale observation: the poller deliberately drops
 	// one whose plumbing changed, and an unobserved source is handled
 	// conservatively by the engine rather than guessed at.
-	if observation, ok := p.observations[*node.SourceRef]; ok {
+	if observation, ok := p.observations[src]; ok {
 		state.ObservedSHA, state.FirstObserved = observation.SHA, observation.FirstObserved
 	}
 
 	target := &gitpoll.Target{
-		Source:      *node.SourceRef,
+		Source:      src,
 		URL:         repo.Spec.URL,
 		TrackingRef: trackingRef,
 	}
 	if repo.Spec.SecretRef != nil {
 		target.SecretRef = &types.NamespacedName{Namespace: repo.Namespace, Name: repo.Spec.SecretRef.Name}
 	}
+	// Once per source (WP2): every other referencing node reuses this same
+	// Target via p.resolvedSources rather than appending a duplicate.
+	p.targets = append(p.targets, *target)
 
-	return state, target, nil
+	return &resolvedSource{state: state, target: target}, nil
 }
 
 // updatePollSet implements step 5. The Poller is shared fleet-wide, so this
@@ -576,7 +621,9 @@ func (r *WavefrontReconciler) derive(p *pass) {
 }
 
 // execute implements step 7: initial pins first, then ancestor-gated
-// admissions, in the engine's deterministic order.
+// admissions, in the engine's deterministic order. No per-source dedup is
+// needed here: the engine emits at most one admission per Source across
+// Admissions and Initial combined (WP2, gateSharedSources).
 func (r *WavefrontReconciler) execute(ctx context.Context, p *pass) error {
 	admissions := slices.Concat(p.eval.Initial, p.eval.Admissions)
 	if len(admissions) == 0 {
@@ -842,8 +889,11 @@ func (r *WavefrontReconciler) summariseNodes(p *pass) {
 
 	held := make([]wavefrontv1alpha1.HeldNode, 0, len(p.holds))
 	for src, manager := range p.holds {
+		// A held source shared by more than one node (WP2) is attributed to
+		// the first referencing node in compareRefs order — deterministic,
+		// not an arbitrary map read.
 		held = append(held, wavefrontv1alpha1.HeldNode{
-			Node:    nodeReference(p.nodeBySource[src]),
+			Node:    nodeReference(p.nodeBySource[src][0]),
 			Source:  src.String(),
 			Manager: manager,
 		})
@@ -908,6 +958,10 @@ func blocking(reason engine.BlockedReason) bool {
 	case engine.ReasonAncestorUnhealthy, engine.ReasonAncestorHeld,
 		engine.ReasonSelfHeld, engine.ReasonGraphCycle:
 		return true
+	case engine.ReasonSharedSourceBlocked:
+		// The blocking sibling already reports the actionable reason;
+		// counting both would double-blame one root cause.
+		return false
 	default:
 		return false
 	}

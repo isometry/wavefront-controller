@@ -62,6 +62,12 @@ const (
 	ReasonAncestorUnobserved BlockedReason = "AncestorUnobserved" // no ref observation yet
 	ReasonSelfHeld           BlockedReason = "SelfHeld"
 	ReasonGraphCycle         BlockedReason = "GraphCycle"
+	// ReasonSharedSourceBlocked marks a node that is itself admissible but
+	// shares its GitRepository with a sibling node that is not: a shared
+	// source's pin is one commit, so pending-ness is a property of the
+	// source, not of any one referencing node, and it advances only when
+	// every referencing node is admissible (gateSharedSources).
+	ReasonSharedSourceBlocked BlockedReason = "SharedSourceBlocked"
 )
 
 // SourceState is the controller's read of one managed GitRepository,
@@ -110,7 +116,9 @@ type NodeResult struct {
 
 // Blocked attributes a pending node's non-admission.
 type Blocked struct {
-	Ancestor adapter.NodeRef // nearest unsettled transitive ancestor (zero for SelfHeld/GraphCycle)
+	// Ancestor is the nearest unsettled transitive ancestor, or the blocking
+	// sibling for SharedSourceBlocked (zero for SelfHeld/GraphCycle).
+	Ancestor adapter.NodeRef
 	Reason   BlockedReason
 }
 
@@ -127,6 +135,11 @@ type Evaluation struct {
 // Only nodes present in inputs are evaluated; a graph member without an input
 // is never assigned a NodeResult, and — being unproven — counts as unsettled
 // wherever it appears as an ancestor.
+//
+// At most one admission (gated or initial) is ever emitted per Source: two or
+// more selected nodes sharing one GitRepository (a standard Flux monorepo
+// topology) advance it in lockstep, gated on every referencing node being
+// admissible, not on the least-blocked one alone (gateSharedSources).
 func Evaluate(g *graph.Graph, inputs map[adapter.NodeRef]NodeInput) Evaluation {
 	ev := Evaluation{Nodes: make(map[adapter.NodeRef]NodeResult, len(inputs))}
 
@@ -148,12 +161,111 @@ func Evaluate(g *graph.Graph, inputs map[adapter.NodeRef]NodeInput) Evaluation {
 		}
 	}
 
+	gateSharedSources(&ev, inputs)
+
 	// Rule 8: a deterministic order is part of the contract — the reconciler's
 	// writes, events, and metrics must not depend on map iteration order.
 	slices.SortFunc(ev.Admissions, byNode)
 	slices.SortFunc(ev.Initial, byNode)
 
 	return ev
+}
+
+// gateSharedSources enforces the shared-GitRepository invariant: two or more
+// selected nodes sourcing from the same GitRepository (a standard Flux
+// monorepo topology) share one pin, so "pending" is a property of the
+// source, not of any one referencing node — either every referencing node is
+// a candidate, or none is. Called after the per-node loop, before the
+// deterministic sort, so it sees every node's unsorted first-pass result.
+func gateSharedSources(ev *Evaluation, inputs map[adapter.NodeRef]NodeInput) {
+	bySource := map[types.NamespacedName][]adapter.NodeRef{}
+	for ref, in := range inputs {
+		if in.Role == RolePinned && in.Source != nil {
+			bySource[in.Source.Source] = append(bySource[in.Source.Source], ref)
+		}
+	}
+
+	drop := map[adapter.NodeRef]bool{}              // admissions to remove from ev.Admissions
+	demote := map[adapter.NodeRef]adapter.NodeRef{} // node -> blocking sibling
+
+	for _, refs := range bySource {
+		if len(refs) < 2 {
+			continue // referenced by exactly one node: untouched
+		}
+		slices.SortFunc(refs, byNodeRef)
+
+		var blocker adapter.NodeRef
+		allAdmissible := true
+		for _, ref := range refs {
+			if ev.Nodes[ref].State != StateAdmissible {
+				allAdmissible = false
+				blocker = ref
+				break
+			}
+		}
+
+		if allAdmissible {
+			// Every referencing node is a candidate: keep exactly one
+			// admission — the first by node order — and leave every
+			// NodeResult at StateAdmissible.
+			for _, ref := range refs[1:] {
+				drop[ref] = true
+			}
+			continue
+		}
+
+		// Not every referencing node is admissible: none may advance. Any
+		// node that WAS admissible loses its admission and is demoted,
+		// attributed to the blocking sibling rather than re-walking ancestors.
+		for _, ref := range refs {
+			if ev.Nodes[ref].State == StateAdmissible {
+				drop[ref] = true
+				demote[ref] = blocker
+			}
+		}
+	}
+
+	if len(drop) > 0 {
+		ev.Admissions = slices.DeleteFunc(ev.Admissions, func(a Admission) bool { return drop[a.Node] })
+	}
+	for ref, blocker := range demote {
+		res := ev.Nodes[ref]
+		res.State = StatePending
+		res.Blocked = &Blocked{Ancestor: blocker, Reason: ReasonSharedSourceBlocked}
+		ev.Nodes[ref] = res
+	}
+
+	// initialPin is source-derived and (Task 1) refuses held/suspended
+	// sources for every candidate alike, so every node referencing an
+	// unpinned shared source produces an identical Initial admission: the
+	// all-nodes gate above is trivially satisfied and only deduping to one
+	// per Source is needed. Skipped when there is nothing to dedupe, sparing
+	// the sort Evaluate's own rule-8 pass repeats regardless.
+	if len(ev.Initial) > 1 {
+		ev.Initial = dedupeBySource(ev.Initial)
+	}
+}
+
+// dedupeBySource keeps the first admission (by node order) per Source,
+// discarding the rest. Sorted internally so the result does not depend on
+// the caller's (map-iteration-derived) order.
+func dedupeBySource(admissions []Admission) []Admission {
+	slices.SortFunc(admissions, byNode)
+	seen := make(map[types.NamespacedName]bool, len(admissions))
+	kept := admissions[:0]
+	for _, a := range admissions {
+		if seen[a.Source] {
+			continue
+		}
+		seen[a.Source] = true
+		kept = append(kept, a)
+	}
+	return kept
+}
+
+// byNodeRef orders NodeRefs the same way byNode orders their Admissions.
+func byNodeRef(a, b adapter.NodeRef) int {
+	return cmp.Compare(a.String(), b.String())
 }
 
 // evaluateNode assigns one node's state (rule 6) and, when it is admissible
