@@ -465,13 +465,13 @@ func Evaluate(g *graph.Graph, inputs map[adapter.NodeRef]NodeInput) Evaluation
 ```
 
 Semantics to implement (each is a test below):
-1. **settled(n)** — gate: `Ready`. Pinned, held or suspended: `Ready && (ObservedSHA == "" || ObservedSHA == Pin)` (a held node with pending changes is unsettled, §3.3). Pinned normal: `Pin != "" && ObservedSHA == Pin && Ready && AppliedSHA == Pin`.
+1. **settled(n)** — gate: `Ready`. Pinned, held or suspended: `Ready && (ObservedSHA == "" || ObservedSHA == Pin) && (Pin == "" || AppliedSHA == Pin)` (a held node with pending changes is unsettled, §3.3; the `Pin == ""` escape is deliberate — with rule 5 also refusing an initial pin onto a held/suspended source, requiring `AppliedSHA == Pin` unconditionally would livelock a Ready, never-pinned, suspended source permanently unsettled). Pinned normal: `Pin != "" && ObservedSHA == Pin && Ready && AppliedSHA == Pin`.
 2. **Unobserved ancestors are unsettled** (conservative): a pinned ancestor with `ObservedSHA == ""` cannot prove quiescence, so it blocks (reason `AncestorUnobserved`). Gates need no observation.
 3. **pending(n)**: pinned, `Pin != ""`, `ObservedSHA != ""`, `ObservedSHA != Pin`.
-4. **Admissible** = pending ∧ ¬Held ∧ ¬Suspended ∧ ¬`g.InCycle` ∧ every transitive ancestor settled (D13). Emits `Admission{From: Pin, To: ObservedSHA}`.
-5. **Initial pin**: pinned role, `Pin == ""` → `Admission{Initial: true, To: ArtifactSHA or ObservedSHA}` (artifact preferred, §3.5.4); if neither exists yet, no admission (wait for first observation). Not ancestor-gated. `From` records `""`.
+4. **Admissible** = pending ∧ ¬Held ∧ ¬Suspended ∧ ¬`g.InCycle` ∧ every transitive ancestor settled (D13). Emits `Admission{From: Pin, To: ObservedSHA}`. Two or more selected nodes sharing one Source are gated together (`gateSharedSources`): a node's `NodeResult` stays Admissible only when every referencing node is admissible too, and the emitted `Admissions`/`Initial` slice carries at most one Admission per Source (first by node order) regardless of how many nodes reference it.
+5. **Initial pin**: pinned role, `Pin == ""`, source neither Held nor Suspended → `Admission{Initial: true, To: ArtifactSHA or ObservedSHA}` (artifact preferred, §3.5.4); if neither exists yet, no admission (wait for first observation); a held or suspended unpinned source gets no initial pin either. Not ancestor-gated. `From` records `""`.
 6. **State assignment** — gate: Settled iff Ready, else Unhealthy. Pinned: pending → Admissible/Pending (per rule 4); else Failing → Unhealthy; else settled → Settled; else → Converging.
-7. **Blocked attribution**: for each Pending-not-Admissible node, walk ancestors in BFS order from the node and report the nearest unsettled one with a reason derived from that ancestor (Unhealthy/Failing → `AncestorUnhealthy`; held/suspended → `AncestorHeld`; unobserved → `AncestorUnobserved`; else → `AncestorPending`). Self-held pending nodes get `SelfHeld`; cycle members/descendants get `GraphCycle`.
+7. **Blocked attribution**: for each Pending-not-Admissible node, walk ancestors in BFS order from the node and report the nearest unsettled one with a reason derived from that ancestor (Unhealthy/Failing → `AncestorUnhealthy`; held/suspended → `AncestorHeld`; unobserved → `AncestorUnobserved`; else → `AncestorPending`). Self-held pending nodes get `SelfHeld`; cycle members/descendants get `GraphCycle`; a node demoted by rule 4's shared-source gate because a sibling referencing the same Source is not admissible gets `SharedSourceBlocked`, attributed to that blocking sibling rather than an ancestor.
 8. **Determinism**: `Admissions`/`Initial` sorted by `NodeRef.String()`.
 
 - [ ] **Step 1: Write the failing test table.** Helper builders keep cases terse (`pinnedNode(ref, opts...)`, `gateNode(ref, ready)`, `chain(g, "A", "B", "C")`). Required cases (assert full `NodeResult` + admission set for each):
@@ -578,7 +578,7 @@ type Observation struct {
 // per-host concurrency (DESIGN §3.1, §4.1 poll.*). Implements manager.Runnable.
 type Poller struct { /* opaque */ }
 
-func NewPoller(secrets client.Reader, lister Lister, notify func(), reg prometheus.Registerer) *Poller
+func NewPoller(secrets client.Reader, lister Lister, notify func(), strategy selection.Strategy, reg prometheus.Registerer) *Poller
 func (p *Poller) Configure(interval time.Duration, perHostConcurrency int)
 func (p *Poller) SetTargets(targets []Target)  // replaces the poll set (reconciler calls this)
 func (p *Poller) Observation(src types.NamespacedName) (Observation, bool)
@@ -757,7 +757,7 @@ type Instruments struct {
 	CredentialReadFailures prometheus.Counter       // wavefront_credential_read_failures_total
 }
 
-func New(reg prometheus.Registerer) *Instruments  // main passes ctrlmetrics.Registry
+func New(reg prometheus.Registerer) (*Instruments, error)  // main passes ctrlmetrics.Registry; error is fatal in main
 func Nop() *Instruments                            // isolated registry, for tests/earlier tasks
 ```
 
