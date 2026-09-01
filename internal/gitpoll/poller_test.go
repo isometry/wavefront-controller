@@ -527,7 +527,11 @@ func TestPollerFailureRetainsLastGoodSHA(t *testing.T) {
 		lister.setAdvertised(alphaURL, map[string]string{trackedRef: shaA})
 		reg := prometheus.NewRegistry()
 
-		p := gitpoll.NewPoller(newFakeSecrets(), lister, func() {}, selection.TrackRef(), metrics.New(reg).RefListFailures, nil)
+		instr, err := metrics.New(reg)
+		if err != nil {
+			t.Fatalf("metrics.New: %v", err)
+		}
+		p := gitpoll.NewPoller(newFakeSecrets(), lister, func() {}, selection.TrackRef(), instr.RefListFailures, nil)
 		p.Configure(10*time.Second, 2)
 		p.SetTargets([]gitpoll.Target{target("alpha", alphaURL)})
 
@@ -591,7 +595,11 @@ func TestPollerWrappedCancelledErrorIsCountedFailure(t *testing.T) {
 		lister.setAdvertised(alphaURL, map[string]string{trackedRef: shaA})
 		reg := prometheus.NewRegistry()
 
-		p := gitpoll.NewPoller(newFakeSecrets(), lister, func() {}, selection.TrackRef(), metrics.New(reg).RefListFailures, nil)
+		instr, err := metrics.New(reg)
+		if err != nil {
+			t.Fatalf("metrics.New: %v", err)
+		}
+		p := gitpoll.NewPoller(newFakeSecrets(), lister, func() {}, selection.TrackRef(), instr.RefListFailures, nil)
 		p.Configure(10*time.Second, 2)
 		p.SetTargets([]gitpoll.Target{target("alpha", alphaURL)})
 
@@ -641,7 +649,11 @@ func TestPollerShutdownDiscardsInFlightListing(t *testing.T) {
 		lister.setAdvertised(alphaURL, map[string]string{trackedRef: shaA})
 		reg := prometheus.NewRegistry()
 
-		p := gitpoll.NewPoller(newFakeSecrets(), lister, func() {}, selection.TrackRef(), metrics.New(reg).RefListFailures, nil)
+		instr, err := metrics.New(reg)
+		if err != nil {
+			t.Fatalf("metrics.New: %v", err)
+		}
+		p := gitpoll.NewPoller(newFakeSecrets(), lister, func() {}, selection.TrackRef(), instr.RefListFailures, nil)
 		p.Configure(10*time.Second, 2)
 		p.SetTargets([]gitpoll.Target{target("alpha", alphaURL)})
 
@@ -888,7 +900,10 @@ func TestPollerMissingSecretIsAFailure(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		secretRef := types.NamespacedName{Namespace: testNamespace, Name: "absent"}
 		reg := prometheus.NewRegistry()
-		instr := metrics.New(reg)
+		instr, err := metrics.New(reg)
+		if err != nil {
+			t.Fatalf("metrics.New: %v", err)
+		}
 		lister := newFakeLister()
 		lister.setAdvertised(alphaURL, map[string]string{trackedRef: shaA})
 
@@ -1006,7 +1021,10 @@ func TestPollerCredentialReadFailureCountedSeparately(t *testing.T) {
 		}
 
 		reg := prometheus.NewRegistry()
-		instr := metrics.New(reg)
+		instr, err := metrics.New(reg)
+		if err != nil {
+			t.Fatalf("metrics.New: %v", err)
+		}
 
 		p := gitpoll.NewPoller(secrets, lister, func() {}, selection.TrackRef(), instr.RefListFailures, instr.CredentialReadFailures)
 		p.Configure(10*time.Second, 4)
@@ -1047,7 +1065,10 @@ func TestPollerListingFailureStillCountsHostNotCredential(t *testing.T) {
 		lister.setErr(errListFailed)
 
 		reg := prometheus.NewRegistry()
-		instr := metrics.New(reg)
+		instr, err := metrics.New(reg)
+		if err != nil {
+			t.Fatalf("metrics.New: %v", err)
+		}
 
 		p := gitpoll.NewPoller(newFakeSecrets(), lister, func() {}, selection.TrackRef(), instr.RefListFailures, instr.CredentialReadFailures)
 		p.Configure(10*time.Second, 2)

@@ -206,7 +206,11 @@ func main() {
 	// metrics registry, and threaded into every collaborator that records
 	// against it (DESIGN §6): the poller's ref-listing failures and the
 	// reconciler's admission, pin-lag and blocked-node metrics.
-	instruments := metrics.New(ctrlmetrics.Registry)
+	instruments, err := metrics.New(ctrlmetrics.Registry)
+	if err != nil {
+		setupLog.Error(err, "Failed to register metrics")
+		os.Exit(1)
+	}
 
 	// The poller drives the loop between spec changes: each sweep notifies
 	// every Wavefront through a channel source (DESIGN §3.1).

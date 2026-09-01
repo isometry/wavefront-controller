@@ -172,7 +172,8 @@ var _ = BeforeSuite(func() {
 		}
 	}
 
-	instruments = metrics.New(prometheus.NewRegistry())
+	instruments, err = metrics.New(prometheus.NewRegistry())
+	Expect(err).NotTo(HaveOccurred())
 
 	lister = newFakeLister()
 	// One strategy instance, shared by the poller and reconciler exactly as
