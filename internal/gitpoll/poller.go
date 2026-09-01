@@ -60,6 +60,12 @@ type Observation struct {
 	ObservedAt    time.Time // when the last sweep touched this target
 	FirstObserved time.Time // when this SHA value was first seen (reset on change)
 	Err           error     // last listing error, nil on success
+
+	// URL and TrackingRef record the plumbing the SHA was observed against,
+	// so a consumer can reject an observation that predates a repo edit
+	// (DESIGN §3.1: no stale candidate survives a plumbing change).
+	URL         string
+	TrackingRef string
 }
 
 // credentialError marks a failure to read a target's credential Secret —
@@ -172,6 +178,17 @@ type record struct {
 	obs Observation
 }
 
+// withRef stamps rec's plumbing onto its Observation for external callers:
+// the internal record and public Observation disagree on where the ref
+// lives, and a consumer needs it on the Observation itself to judge
+// staleness against its own, possibly newer, view of the target
+// (DESIGN §3.1).
+func withRef(rec record) Observation {
+	obs := rec.obs
+	obs.URL, obs.TrackingRef = rec.ref.url, rec.ref.trackingRef
+	return obs
+}
+
 // result is one completed listing, held until the whole sweep publishes.
 type result struct {
 	target Target
@@ -261,7 +278,7 @@ func (p *Poller) Observation(src types.NamespacedName) (Observation, bool) {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	rec, ok := p.observations[src]
-	return rec.obs, ok
+	return withRef(rec), ok
 }
 
 // Observations returns a coherent point-in-time snapshot of every current
@@ -282,7 +299,7 @@ func (p *Poller) Observations() map[types.NamespacedName]Observation {
 
 	observations := make(map[types.NamespacedName]Observation, len(p.observations))
 	for src, rec := range p.observations {
-		observations[src] = rec.obs
+		observations[src] = withRef(rec)
 	}
 	return observations
 }

@@ -788,6 +788,193 @@ func TestResolveMixedSelectedAndGateSharersOfOneSource(t *testing.T) {
 	}
 }
 
+// --- observation plumbing (WP6, DESIGN §3.1) --------------------------------
+//
+// r.Poller.Observations() is snapshotted before updatePollSet/SetTargets
+// prunes stale records for this pass, so an Observation surviving from a
+// GitRepository's old plumbing can still be present in p.observations when
+// resolveSourceOnce runs. resolveSourceOnce must reject it itself rather than
+// rely on the poller having pruned it already.
+
+// TestResolveRejectsObservationFromStaleTrackingRef: an Observation recorded
+// under refs/heads/main while the GitRepository now tracks a tag must not
+// pin the old ref's SHA — ObservedSHA/FirstObserved must stay unset so the
+// engine treats the source as unobserved.
+func TestResolveRejectsObservationFromStaleTrackingRef(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := sourcev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme: %v", err)
+	}
+
+	src := types.NamespacedName{Namespace: fluxNamespace, Name: "retagged"}
+	repoURL := "https://git.example.com/org/retagged.git"
+	repo := &sourcev1.GitRepository{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: src.Namespace,
+			Name:      src.Name,
+			Labels:    map[string]string{pin.ManagedLabel: managedLabelValue},
+		},
+		Spec: sourcev1.GitRepositorySpec{
+			URL:       repoURL,
+			Reference: &sourcev1.GitRepositoryRef{Tag: "v2"},
+		},
+	}
+
+	r := &WavefrontReconciler{
+		Client:   fake.NewClientBuilder().WithScheme(scheme).WithObjects(repo).Build(),
+		Strategy: selection.TrackRef(),
+		Recorder: events.NewFakeRecorder(16),
+	}
+
+	node := teamARef()
+	p := &pass{
+		wf: &wavefrontv1alpha1.Wavefront{ObjectMeta: metav1.ObjectMeta{Name: fleetName}},
+		nodes: map[adapter.NodeRef]adapter.Node{
+			node: {Ref: node, SourceRef: &src, Readiness: adapter.Readiness{Ready: true}},
+		},
+		selected: map[adapter.NodeRef]bool{node: true},
+		missing:  map[adapter.NodeRef]bool{},
+		observations: map[types.NamespacedName]gitpoll.Observation{
+			src: {SHA: shaA, FirstObserved: time.Unix(1000, 0), ObservedAt: time.Unix(1000, 0), URL: repoURL, TrackingRef: mainRef},
+		},
+	}
+
+	if err := r.resolve(context.Background(), p); err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+
+	state := p.inputs[node].Source
+	if state == nil {
+		t.Fatal("Source is nil, want a resolved SourceState")
+	}
+	if state.ObservedSHA != "" {
+		t.Errorf("ObservedSHA = %q, want \"\": the observation predates the retag", state.ObservedSHA)
+	}
+	if !state.FirstObserved.IsZero() {
+		t.Errorf("FirstObserved = %v, want zero: the observation predates the retag", state.FirstObserved)
+	}
+}
+
+// TestResolveRejectsObservationFromStaleURL: an Observation recorded against
+// the matching tracking ref but a different URL (the GitRepository was
+// repointed) must be rejected the same way as a ref mismatch.
+func TestResolveRejectsObservationFromStaleURL(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := sourcev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme: %v", err)
+	}
+
+	src := types.NamespacedName{Namespace: fluxNamespace, Name: "repointed"}
+	repo := &sourcev1.GitRepository{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: src.Namespace,
+			Name:      src.Name,
+			Labels:    map[string]string{pin.ManagedLabel: managedLabelValue},
+		},
+		Spec: sourcev1.GitRepositorySpec{
+			URL:       "https://git.example.com/org/repointed-new.git",
+			Reference: &sourcev1.GitRepositoryRef{Name: mainRef},
+		},
+	}
+
+	r := &WavefrontReconciler{
+		Client:   fake.NewClientBuilder().WithScheme(scheme).WithObjects(repo).Build(),
+		Strategy: selection.TrackRef(),
+		Recorder: events.NewFakeRecorder(16),
+	}
+
+	node := teamARef()
+	p := &pass{
+		wf: &wavefrontv1alpha1.Wavefront{ObjectMeta: metav1.ObjectMeta{Name: fleetName}},
+		nodes: map[adapter.NodeRef]adapter.Node{
+			node: {Ref: node, SourceRef: &src, Readiness: adapter.Readiness{Ready: true}},
+		},
+		selected: map[adapter.NodeRef]bool{node: true},
+		missing:  map[adapter.NodeRef]bool{},
+		observations: map[types.NamespacedName]gitpoll.Observation{
+			src: {
+				SHA: shaA, FirstObserved: time.Unix(1000, 0), ObservedAt: time.Unix(1000, 0),
+				URL: "https://git.example.com/org/repointed-old.git", TrackingRef: mainRef,
+			},
+		},
+	}
+
+	if err := r.resolve(context.Background(), p); err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+
+	state := p.inputs[node].Source
+	if state == nil {
+		t.Fatal("Source is nil, want a resolved SourceState")
+	}
+	if state.ObservedSHA != "" {
+		t.Errorf("ObservedSHA = %q, want \"\": the observation predates the URL change", state.ObservedSHA)
+	}
+	if !state.FirstObserved.IsZero() {
+		t.Errorf("FirstObserved = %v, want zero: the observation predates the URL change", state.FirstObserved)
+	}
+}
+
+// TestResolveAcceptsObservationMatchingPlumbing: an Observation whose URL and
+// TrackingRef both match the GitRepository's current plumbing flows through
+// unchanged — the baseline the two rejection tests above are contrasted
+// against.
+func TestResolveAcceptsObservationMatchingPlumbing(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := sourcev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme: %v", err)
+	}
+
+	src := types.NamespacedName{Namespace: fluxNamespace, Name: "steady"}
+	repoURL := "https://git.example.com/org/steady.git"
+	repo := &sourcev1.GitRepository{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: src.Namespace,
+			Name:      src.Name,
+			Labels:    map[string]string{pin.ManagedLabel: managedLabelValue},
+		},
+		Spec: sourcev1.GitRepositorySpec{
+			URL:       repoURL,
+			Reference: &sourcev1.GitRepositoryRef{Name: mainRef},
+		},
+	}
+
+	r := &WavefrontReconciler{
+		Client:   fake.NewClientBuilder().WithScheme(scheme).WithObjects(repo).Build(),
+		Strategy: selection.TrackRef(),
+		Recorder: events.NewFakeRecorder(16),
+	}
+
+	firstObserved := time.Unix(1000, 0)
+	node := teamARef()
+	p := &pass{
+		wf: &wavefrontv1alpha1.Wavefront{ObjectMeta: metav1.ObjectMeta{Name: fleetName}},
+		nodes: map[adapter.NodeRef]adapter.Node{
+			node: {Ref: node, SourceRef: &src, Readiness: adapter.Readiness{Ready: true}},
+		},
+		selected: map[adapter.NodeRef]bool{node: true},
+		missing:  map[adapter.NodeRef]bool{},
+		observations: map[types.NamespacedName]gitpoll.Observation{
+			src: {SHA: shaA, FirstObserved: firstObserved, ObservedAt: time.Unix(2000, 0), URL: repoURL, TrackingRef: mainRef},
+		},
+	}
+
+	if err := r.resolve(context.Background(), p); err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+
+	state := p.inputs[node].Source
+	if state == nil {
+		t.Fatal("Source is nil, want a resolved SourceState")
+	}
+	if state.ObservedSHA != shaA {
+		t.Errorf("ObservedSHA = %q, want %q", state.ObservedSHA, shaA)
+	}
+	if !state.FirstObserved.Equal(firstObserved) {
+		t.Errorf("FirstObserved = %v, want %v", state.FirstObserved, firstObserved)
+	}
+}
+
 // --- holds (WP3): suspended sources unify with hand-pins -------------------
 
 // TestResolveSuspendedSourceYieldsSuspendHold covers finding 7: a suspended

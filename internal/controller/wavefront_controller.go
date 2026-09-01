@@ -527,10 +527,15 @@ func (r *WavefrontReconciler) resolveSourceOnce(ctx context.Context, p *pass, sr
 		ArtifactSHA:  artifactSHA(repo),
 		FetchFailing: conditions.IsTrue(repo, sourcev1.FetchFailedCondition),
 	}
-	// No observation is not a stale observation: the poller deliberately drops
-	// one whose plumbing changed, and an unobserved source is handled
-	// conservatively by the engine rather than guessed at.
-	if observation, ok := p.observations[src]; ok {
+	// p.observations was snapshotted before updatePollSet/SetTargets prunes
+	// records whose plumbing no longer matches (evaluate calls
+	// Poller.Observations() ahead of updatePollSet), so a record for the
+	// GitRepository's *previous* URL or tracking ref can still be present
+	// here. Presence alone is not enough: verify it against the plumbing just
+	// resolved, or a one-pass window lets an edit's old SHA get pinned under
+	// the new ref (DESIGN §3.1, "no stale candidate can survive a plumbing
+	// change").
+	if observation, ok := p.observations[src]; ok && observedCurrentPlumbing(observation, repo.Spec.URL, trackingRef) {
 		state.ObservedSHA, state.FirstObserved = observation.SHA, observation.FirstObserved
 	}
 
@@ -547,6 +552,13 @@ func (r *WavefrontReconciler) resolveSourceOnce(ctx context.Context, p *pass, sr
 	p.targets = append(p.targets, *target)
 
 	return &resolvedSource{state: state, target: target}, nil
+}
+
+// observedCurrentPlumbing reports whether obs was observed against exactly
+// the plumbing now in effect: a URL change carries the same one-pass stale
+// window as a tracking-ref change, so both are checked (DESIGN §3.1).
+func observedCurrentPlumbing(obs gitpoll.Observation, url, trackingRef string) bool {
+	return obs.URL == url && obs.TrackingRef == trackingRef
 }
 
 // updatePollSet implements step 5. The Poller is shared fleet-wide, so this

@@ -389,6 +389,9 @@ func TestPollerSweepsOnInterval(t *testing.T) {
 		if obs.ObservedAt.IsZero() || obs.FirstObserved.IsZero() {
 			t.Errorf("ObservedAt/FirstObserved = %v/%v, want both set", obs.ObservedAt, obs.FirstObserved)
 		}
+		if obs.URL != alphaURL || obs.TrackingRef != trackedRef {
+			t.Errorf("URL/TrackingRef = %q/%q, want %q/%q", obs.URL, obs.TrackingRef, alphaURL, trackedRef)
+		}
 
 		time.Sleep(10 * time.Second)
 		synctest.Wait()
