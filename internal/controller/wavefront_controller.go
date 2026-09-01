@@ -103,7 +103,10 @@ const managedOptIn = "true"
 // derivation and admissibility are all derived from live cluster state plus
 // the poller's observations, never from stored orchestration state
 // (DESIGN D9). The only thing status carries forward is the hold ledger, and
-// only to edge-trigger events.
+// only to edge-trigger events — against the capped, source-sorted mirror of
+// p.holds that status.Held itself holds (decision D-C), not the unbounded
+// p.holds map, so a restart replays at most StatusListCap detections rather
+// than an unbounded backlog.
 type WavefrontReconciler struct {
 	client.Client
 	Scheme    *runtime.Scheme
@@ -753,9 +756,34 @@ func (r *WavefrontReconciler) pinEvent(p *pass, admission engine.Admission) {
 	}
 }
 
+// diffLedger compares previous against current by value (not mere key
+// presence) in sorted key order, so that a caller's onNew/onGone fire in a
+// deterministic sequence: onNew for every key added or changed, onGone for
+// every key removed or changed. A key whose value is unchanged fires
+// neither. Shared with the shadow-admission ledger (WP5).
+func diffLedger[V comparable](previous, current map[string]V, onNew, onGone func(key string, v V)) {
+	for _, key := range slices.Sorted(maps.Keys(current)) {
+		if was, ok := previous[key]; !ok || was != current[key] {
+			onNew(key, current[key])
+		}
+	}
+	for _, key := range slices.Sorted(maps.Keys(previous)) {
+		if now, ok := current[key]; !ok || now != previous[key] {
+			onGone(key, previous[key])
+		}
+	}
+}
+
 // holdEvents implements step 8: status.held from the previous pass is the
 // ledger the hold transitions are edge-triggered against, which keeps the
 // evaluation itself stateless.
+//
+// Events mirror the capped ledger (decision D-C), not the unbounded p.holds:
+// current is built by heldSources, the exact same capped, source-sorted list
+// summariseNodes writes to status.Held. Beyond StatusListCap a hold is
+// counted (status.Nodes.Held, DESIGN §4.1) but not individually announced
+// until a released slot promotes it into the cap — late but exactly once,
+// never on every reconcile.
 func (r *WavefrontReconciler) holdEvents(p *pass) {
 	if !p.resolved {
 		// An aborted pass proves nothing about holds; claiming release would
@@ -776,41 +804,34 @@ func (r *WavefrontReconciler) holdEvents(p *pass) {
 	}
 
 	current := make(map[string]hold, len(p.holds))
-	for src, h := range p.holds {
-		current[src.String()] = h
+	for _, h := range heldSources(p) {
+		current[h.Source] = hold{manager: h.Manager, kind: holdKind(h.Reason)}
 	}
 
 	// Diffed on value (kind+manager) equality, not key presence: a kind or
 	// manager change on the same source (e.g. Suspend -> HandPin) is a
 	// release of the old hold and a detect of the new one in the same pass.
-	for _, src := range slices.Sorted(maps.Keys(current)) {
-		if was, ok := previous[src]; ok && was == current[src] {
-			continue
-		}
-		h := current[src]
-		switch h.kind {
-		case holdSuspend:
-			r.event(p.wf, corev1.EventTypeWarning, reasonHoldDetected,
-				"source %s is suspended; not advancing", src)
-		default:
-			r.event(p.wf, corev1.EventTypeWarning, reasonHoldDetected,
-				"pin of %s is held by field manager %q; not advancing", src, h.manager)
-		}
-	}
-	for _, src := range slices.Sorted(maps.Keys(previous)) {
-		if now, ok := current[src]; ok && now == previous[src] {
-			continue
-		}
-		h := previous[src]
-		switch h.kind {
-		case holdSuspend:
-			r.event(p.wf, corev1.EventTypeNormal, reasonHoldReleased,
-				"suspension of %s lifted", src)
-		default:
-			r.event(p.wf, corev1.EventTypeNormal, reasonHoldReleased,
-				"hold on %s released by %q", src, h.manager)
-		}
-	}
+	diffLedger(previous, current,
+		func(src string, h hold) {
+			switch h.kind {
+			case holdSuspend:
+				r.event(p.wf, corev1.EventTypeWarning, reasonHoldDetected,
+					"source %s is suspended; not advancing", src)
+			default:
+				r.event(p.wf, corev1.EventTypeWarning, reasonHoldDetected,
+					"pin of %s is held by field manager %q; not advancing", src, h.manager)
+			}
+		},
+		func(src string, h hold) {
+			switch h.kind {
+			case holdSuspend:
+				r.event(p.wf, corev1.EventTypeNormal, reasonHoldReleased,
+					"suspension of %s lifted", src)
+			default:
+				r.event(p.wf, corev1.EventTypeNormal, reasonHoldReleased,
+					"hold on %s released by %q", src, h.manager)
+			}
+		})
 }
 
 // summarise implements step 9: fleet counts, capped exceptional-state lists,
@@ -948,6 +969,20 @@ func (r *WavefrontReconciler) summariseNodes(p *pass) {
 		return cmp.Compare(nodeKey(a.Node), nodeKey(b.Node))
 	})
 
+	status.Nodes = counts
+	status.Blocked = capped(blocked)
+	status.Held = heldSources(p)
+	status.Phase = phaseOf(counts, len(p.eval.Admissions)+len(p.eval.Initial), stalled)
+}
+
+// heldSources builds the capped, source-sorted hold ledger from p.holds
+// (decision D-C). summariseNodes writes this exact list to status.Held and
+// holdEvents diffs the current side of its edge-trigger against it, so the
+// ledger written and the ledger diffed are byte-identical: a source beyond
+// StatusListCap is counted in status.Nodes.Held but neither listed in
+// status.Held nor announced by an event until a freed slot promotes it into
+// the cap.
+func heldSources(p *pass) []wavefrontv1alpha1.HeldNode {
 	held := make([]wavefrontv1alpha1.HeldNode, 0, len(p.holds))
 	for src, h := range p.holds {
 		// A held source shared by more than one node (WP2) is attributed to
@@ -963,11 +998,7 @@ func (r *WavefrontReconciler) summariseNodes(p *pass) {
 	slices.SortFunc(held, func(a, b wavefrontv1alpha1.HeldNode) int {
 		return cmp.Compare(a.Source, b.Source)
 	})
-
-	status.Nodes = counts
-	status.Blocked = capped(blocked)
-	status.Held = capped(held)
-	status.Phase = phaseOf(counts, len(p.eval.Admissions)+len(p.eval.Initial), stalled)
+	return capped(held)
 }
 
 // SetupWithManager wires the controller into the manager. The Flux watches

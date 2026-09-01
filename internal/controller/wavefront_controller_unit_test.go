@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"errors"
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -931,9 +932,10 @@ func TestHoldEventsSuspendMessages(t *testing.T) {
 
 	wf := &wavefrontv1alpha1.Wavefront{ObjectMeta: metav1.ObjectMeta{Name: fleetName}}
 	detect := &pass{
-		wf:       wf,
-		resolved: true,
-		holds:    map[types.NamespacedName]hold{teamAKey(): {kind: holdSuspend}},
+		wf:           wf,
+		resolved:     true,
+		holds:        map[types.NamespacedName]hold{teamAKey(): {kind: holdSuspend}},
+		nodeBySource: map[types.NamespacedName][]adapter.NodeRef{teamAKey(): {teamARef()}},
 	}
 	r.holdEvents(detect)
 
@@ -968,9 +970,10 @@ func TestHoldEventsKindFlipFiresReleaseAndDetect(t *testing.T) {
 		Status:     wavefrontv1alpha1.WavefrontStatus{Held: heldStatus("", string(holdSuspend))},
 	}
 	p := &pass{
-		wf:       wf,
-		resolved: true,
-		holds:    map[types.NamespacedName]hold{teamAKey(): {manager: humanManager, kind: holdHandPin}},
+		wf:           wf,
+		resolved:     true,
+		holds:        map[types.NamespacedName]hold{teamAKey(): {manager: humanManager, kind: holdHandPin}},
+		nodeBySource: map[types.NamespacedName][]adapter.NodeRef{teamAKey(): {teamARef()}},
 	}
 	r.holdEvents(p)
 
@@ -1003,9 +1006,10 @@ func TestHoldEventsIdenticalLedgerFiresNothing(t *testing.T) {
 		Status:     wavefrontv1alpha1.WavefrontStatus{Held: heldStatus(humanManager, string(holdHandPin))},
 	}
 	p := &pass{
-		wf:       wf,
-		resolved: true,
-		holds:    map[types.NamespacedName]hold{teamAKey(): {manager: humanManager, kind: holdHandPin}},
+		wf:           wf,
+		resolved:     true,
+		holds:        map[types.NamespacedName]hold{teamAKey(): {manager: humanManager, kind: holdHandPin}},
+		nodeBySource: map[types.NamespacedName][]adapter.NodeRef{teamAKey(): {teamARef()}},
 	}
 	r.holdEvents(p)
 
@@ -1027,14 +1031,120 @@ func TestHoldEventsEmptyReasonDefaultsToHandPin(t *testing.T) {
 		Status:     wavefrontv1alpha1.WavefrontStatus{Held: heldStatus(humanManager, "")},
 	}
 	p := &pass{
-		wf:       wf,
-		resolved: true,
-		holds:    map[types.NamespacedName]hold{teamAKey(): {manager: humanManager, kind: holdHandPin}},
+		wf:           wf,
+		resolved:     true,
+		holds:        map[types.NamespacedName]hold{teamAKey(): {manager: humanManager, kind: holdHandPin}},
+		nodeBySource: map[types.NamespacedName][]adapter.NodeRef{teamAKey(): {teamARef()}},
 	}
 	r.holdEvents(p)
 
 	if recorded := drain(recorder.Events); len(recorded) != 0 {
 		t.Errorf("events = %v, want none: an empty pre-upgrade Reason must default to HandPin", recorded)
+	}
+}
+
+// --- the capped-mirror contract (finding 8) ---------------------------------
+
+// manyHoldSource returns the i-th of a deterministic, zero-padded run of
+// held-source names — sorted, by name, in index order — for exercising the
+// StatusListCap boundary.
+func manyHoldSource(i int) types.NamespacedName {
+	return types.NamespacedName{Namespace: fluxNamespace, Name: fmt.Sprintf("src-%02d", i)}
+}
+
+// manyHolds builds n distinct HandPin holds, with their nodeBySource
+// attribution, for the capped-mirror tests below.
+func manyHolds(n int) (map[types.NamespacedName]hold, map[types.NamespacedName][]adapter.NodeRef) {
+	holds := make(map[types.NamespacedName]hold, n)
+	nodeBySource := make(map[types.NamespacedName][]adapter.NodeRef, n)
+	for i := range n {
+		src := manyHoldSource(i)
+		holds[src] = hold{manager: humanManager, kind: holdHandPin}
+		nodeBySource[src] = []adapter.NodeRef{{Kind: kindKustomization, Namespace: fluxNamespace, Name: src.Name}}
+	}
+	return holds, nodeBySource
+}
+
+// TestHoldEventsCapMirrorsStatus is the regression finding 8 describes: with
+// more held sources than StatusListCap, holdEvents must fire exactly the
+// capped set (the same list summariseNodes writes to status.Held) and must
+// never refire for the truncated tail on a later, unchanged pass.
+func TestHoldEventsCapMirrorsStatus(t *testing.T) {
+	recorder := events.NewFakeRecorder(64)
+	r := &WavefrontReconciler{Recorder: recorder, Clock: time.Now, Metrics: metrics.Nop()}
+
+	wf := &wavefrontv1alpha1.Wavefront{ObjectMeta: metav1.ObjectMeta{Name: fleetName}}
+	holds, nodeBySource := manyHolds(25)
+
+	// Pass 1: 25 sources held, only StatusListCap (20) fit the mirrored ledger.
+	first := &pass{wf: wf, resolved: true, holds: holds, nodeBySource: nodeBySource}
+	r.holdEvents(first)
+	r.summarise(first, nil) // writes status.Held, exactly as Reconcile does
+
+	recorded := drain(recorder.Events)
+	if len(recorded) != wavefrontv1alpha1.StatusListCap {
+		t.Fatalf("pass 1 HoldDetected events = %d, want exactly %d (the capped set)",
+			len(recorded), wavefrontv1alpha1.StatusListCap)
+	}
+	if len(wf.Status.Held) != wavefrontv1alpha1.StatusListCap {
+		t.Fatalf("status.held = %d entries, want %d", len(wf.Status.Held), wavefrontv1alpha1.StatusListCap)
+	}
+
+	// Pass 2: identical 25 holds. The bug under test: diffing against the
+	// uncapped p.holds re-reports the truncated tail as newly detected on
+	// every reconcile, forever.
+	second := &pass{wf: wf, resolved: true, holds: holds, nodeBySource: nodeBySource}
+	r.holdEvents(second)
+
+	if recorded := drain(recorder.Events); len(recorded) != 0 {
+		t.Errorf("pass 2 (unchanged 25 holds) events = %v, want none: no refire for capped-out sources", recorded)
+	}
+}
+
+// TestHoldEventsReleasePromotes21st: releasing an in-cap hold fires its
+// HoldReleased and, in the same pass, HoldDetected for the source promoted
+// into the freed cap slot — late but exactly once (D-C).
+func TestHoldEventsReleasePromotes21st(t *testing.T) {
+	recorder := events.NewFakeRecorder(64)
+	r := &WavefrontReconciler{Recorder: recorder, Clock: time.Now, Metrics: metrics.Nop()}
+
+	wf := &wavefrontv1alpha1.Wavefront{ObjectMeta: metav1.ObjectMeta{Name: fleetName}}
+	holds, nodeBySource := manyHolds(25)
+
+	first := &pass{wf: wf, resolved: true, holds: holds, nodeBySource: nodeBySource}
+	r.holdEvents(first)
+	r.summarise(first, nil)
+	drain(recorder.Events) // discard pass 1's 20 HoldDetected events
+
+	// Release the lowest-sorted (in-cap) source; the 21st (index
+	// StatusListCap, capped out of pass 1) is promoted into the freed slot.
+	released := manyHoldSource(0)
+	promoted := manyHoldSource(wavefrontv1alpha1.StatusListCap)
+	holds2 := make(map[types.NamespacedName]hold, len(holds)-1)
+	for src, h := range holds {
+		if src != released {
+			holds2[src] = h
+		}
+	}
+
+	second := &pass{wf: wf, resolved: true, holds: holds2, nodeBySource: nodeBySource}
+	r.holdEvents(second)
+
+	recorded := drain(recorder.Events)
+	if len(recorded) != 2 {
+		t.Fatalf("events on release = %v, want exactly 2 (release + promoted detect)", recorded)
+	}
+	var sawRelease, sawDetect bool
+	for _, e := range recorded {
+		switch {
+		case strings.Contains(e, reasonHoldReleased) && strings.Contains(e, released.String()):
+			sawRelease = true
+		case strings.Contains(e, reasonHoldDetected) && strings.Contains(e, promoted.String()):
+			sawDetect = true
+		}
+	}
+	if !sawRelease || !sawDetect {
+		t.Errorf("events = %v, want a release of %s and a detect of %s", recorded, released, promoted)
 	}
 }
 
