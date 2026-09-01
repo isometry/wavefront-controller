@@ -220,9 +220,18 @@ func isSettled(in NodeInput) bool {
 		return in.Ready
 	}
 	if src.Held || src.Suspended {
-		// A held node is settled only while nothing is pending on its ref; an
-		// unobserved ref cannot contradict that, so it does not block.
-		return in.Ready && (src.ObservedSHA == "" || src.ObservedSHA == src.Pin)
+		// A held node is settled only while nothing is pending on its ref (an
+		// unobserved ref cannot contradict that, so it does not block) and its
+		// workload has actually converged to the pin ("Ready at that revision",
+		// DESIGN §3.3). The src.Pin == "" escape is deliberate (decision D-E):
+		// with initialPin (above) also refusing a held/suspended source, a
+		// suspended never-pinned source can never acquire a pin while
+		// suspended; requiring AppliedSHA == Pin unconditionally would leave a
+		// Ready, quiescent, suspended-unpinned node permanently unsettled and
+		// livelock all descendants.
+		return in.Ready &&
+			(src.ObservedSHA == "" || src.ObservedSHA == src.Pin) &&
+			(src.Pin == "" || in.AppliedSHA == src.Pin)
 	}
 	// Rule 2: an unpinned or unobserved pinned node cannot prove quiescence,
 	// so it is conservatively unsettled (ObservedSHA "" never equals a pin).
@@ -241,10 +250,13 @@ func isPending(in NodeInput) bool {
 // initialPin derives the ungated initial-pin-on-discovery admission
 // (rule 5, DESIGN §3.5.4): the current artifact's commit, or absent an
 // artifact the first observed SHA. With neither, there is nothing safe to
-// pin yet and the node waits for its first observation.
+// pin yet and the node waits for its first observation. A held or suspended
+// source is an external hold (DESIGN §3.5.4, §10: "Human hand-pins or
+// suspends a source → Controller treats it as an external hold and does not
+// advance it") and never receives an initial pin either.
 func initialPin(ref adapter.NodeRef, in NodeInput) (Admission, bool) {
 	src := in.Source
-	if in.Role != RolePinned || src == nil || src.Pin != "" {
+	if in.Role != RolePinned || src == nil || src.Pin != "" || src.Held || src.Suspended {
 		return Admission{}, false
 	}
 	to := cmp.Or(src.ArtifactSHA, src.ObservedSHA)

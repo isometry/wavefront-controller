@@ -117,6 +117,13 @@ func pinnedUnobserved(sha string) nodeOpt {
 	}
 }
 
+// appliedAt overrides AppliedSHA after atPin, leaving the workload converging
+// toward an already-observed pin (Ready is unaffected — this isolates the
+// AppliedSHA == Pin conjunct from the Ready/Failing signal).
+func appliedAt(sha string) nodeOpt {
+	return func(in *engine.NodeInput) { in.AppliedSHA = sha }
+}
+
 // pendingFrom is a node applied at from with to advertised on its ref.
 func pendingFrom(from, to string) nodeOpt {
 	return func(in *engine.NodeInput) {
@@ -150,10 +157,12 @@ func failing() nodeOpt {
 }
 
 // held marks the commit as owned by a foreign field manager (DESIGN §3.5.3).
-func held(by string) nodeOpt {
+// HeldBy is fixed rather than parameterized: no case asserts on it, and every
+// call site wants the same illustrative value.
+func held() nodeOpt {
 	return func(in *engine.NodeInput) {
 		in.Source.Held = true
-		in.Source.HeldBy = by
+		in.Source.HeldBy = "kubectl-edit"
 	}
 }
 
@@ -335,7 +344,7 @@ func TestEvaluate(t *testing.T) {
 			name: "held node with pending changes holds itself and its descendant",
 			deps: chain("h", "d"),
 			inputs: []engine.NodeInput{
-				pinnedNode("h", pendingFrom("h1", "h2"), held("kubectl-edit")),
+				pinnedNode("h", pendingFrom("h1", "h2"), held()),
 				pinnedNode("d", pendingFrom("d1", "d2")),
 			},
 			want: map[string]engine.NodeResult{
@@ -347,12 +356,28 @@ func TestEvaluate(t *testing.T) {
 			name: "held node with nothing pending is settled",
 			deps: chain("h", "d"),
 			inputs: []engine.NodeInput{
-				pinnedNode("h", atPin("h1"), held("kubectl-edit")),
+				pinnedNode("h", atPin("h1"), held()),
 				pinnedNode("d", atPin("d1")),
 			},
 			want: map[string]engine.NodeResult{
 				"h": {State: engine.StateSettled, Held: true},
 				"d": {State: engine.StateSettled},
+			},
+		},
+		{
+			// Finding 4 regression: the held/suspended branch of isSettled must
+			// require AppliedSHA == Pin like the normal branch does, or a freshly
+			// hand-pinned-but-still-converging ancestor counts settled and its
+			// descendant advances mid-rollout.
+			name: "held pin observed but not yet applied is not settled and blocks its descendant",
+			deps: chain("h", "d"),
+			inputs: []engine.NodeInput{
+				pinnedNode("h", atPin("s2"), appliedAt("s1"), held()),
+				pinnedNode("d", pendingFrom("d1", "d2")),
+			},
+			want: map[string]engine.NodeResult{
+				"h": {State: engine.StateConverging, Held: true},
+				"d": {State: engine.StatePending, Blocked: blocked("h", engine.ReasonAncestorHeld), PendingSince: t0},
 			},
 		},
 		{
@@ -390,6 +415,35 @@ func TestEvaluate(t *testing.T) {
 			name:   "unpinned source with neither artifact nor observation waits",
 			inputs: []engine.NodeInput{pinnedNode("b", unpinned("", ""))},
 			want:   map[string]engine.NodeResult{"b": {State: engine.StateConverging}},
+		},
+		{
+			// Finding 2 regression: initialPin must also refuse a held/suspended
+			// source (DESIGN §3.5.4, §10) even when it has an artifact to pin to.
+			name:   "unpinned source that is suspended never initial-pins",
+			inputs: []engine.NodeInput{pinnedNode("a", unpinned("art", "obs"), suspended())},
+			want:   map[string]engine.NodeResult{"a": {State: engine.StateConverging, Held: true}},
+		},
+		{
+			name:   "unpinned source that is held never initial-pins",
+			inputs: []engine.NodeInput{pinnedNode("b", unpinned("art", "obs"), held())},
+			want:   map[string]engine.NodeResult{"b": {State: engine.StateConverging, Held: true}},
+		},
+		{
+			// Decision D-E: a Ready, quiescent, suspended-unpinned source counts as
+			// settled despite never having been pinned. Since initialPin (fix 1)
+			// refuses it a pin while suspended, requiring AppliedSHA == Pin here too
+			// would leave it permanently unsettled and livelock every descendant.
+			name: "suspended unpinned unobserved ready source is settled and unblocks its descendant",
+			deps: chain("s", "d"),
+			inputs: []engine.NodeInput{
+				pinnedNode("s", suspended()),
+				pinnedNode("d", pendingFrom("d1", "d2")),
+			},
+			want: map[string]engine.NodeResult{
+				"s": {State: engine.StateSettled, Held: true},
+				"d": {State: engine.StateAdmissible, PendingSince: t0},
+			},
+			wantAdmissions: []engine.Admission{adm("d", "d1", "d2")},
 		},
 		{
 			name: "unobserved ancestor cannot prove quiescence",
@@ -472,6 +526,31 @@ func TestEvaluate(t *testing.T) {
 	}
 }
 
+// checkInitialAdmissions asserts the invariants of every initial pin (rule 5):
+// ungated (From == ""), Initial == true, its To matches the node's source,
+// and — Finding 2 / DESIGN §3.5.4, §10 — its source is neither Held nor
+// Suspended.
+func checkInitialAdmissions(t *testing.T, initial []engine.Admission, inputs map[adapter.NodeRef]engine.NodeInput) {
+	t.Helper()
+	for _, a := range initial {
+		if a.From != "" {
+			t.Errorf("initial admission %+v has non-empty From", a)
+		}
+		if !a.Initial {
+			t.Errorf("initial admission %+v has Initial=false", a)
+		}
+		src := inputs[a.Node].Source
+		switch {
+		case src == nil:
+			t.Errorf("initial admission %s which has no source", a.Node)
+		case src.Held || src.Suspended:
+			t.Errorf("initial admission %s whose source is held or suspended", a.Node)
+		case a.To != src.ArtifactSHA && a.To != src.ObservedSHA:
+			t.Errorf("initial admission %+v matches neither artifact %q nor observed %q", a, src.ArtifactSHA, src.ObservedSHA)
+		}
+	}
+}
+
 func equalAdmissions(got, want []engine.Admission) bool {
 	if len(got) != len(want) {
 		return false
@@ -531,6 +610,8 @@ func TestEvaluateProperties(t *testing.T) {
 					}
 				}
 			}
+
+			checkInitialAdmissions(t, got.Initial, inputs)
 
 			for ref, res := range got.Nodes {
 				if (res.Blocked != nil) != (res.State == engine.StatePending) {
@@ -600,7 +681,7 @@ func randomInput(rng *rand.Rand, name string) engine.NodeInput {
 	if rng.Float64() < 0.2 {
 		return gateNode(name, rng.Float64() < 0.6)
 	}
-	switch rng.IntN(8) {
+	switch rng.IntN(11) {
 	case 0:
 		return pinnedNode(name, atPin("s1"))
 	case 1:
@@ -610,11 +691,20 @@ func randomInput(rng *rand.Rand, name string) engine.NodeInput {
 	case 3:
 		return pinnedNode(name, atPin("s1"), failing())
 	case 4:
-		return pinnedNode(name, pendingFrom("s1", "s2"), held("kubectl-edit"))
+		return pinnedNode(name, pendingFrom("s1", "s2"), held())
 	case 5:
 		return pinnedNode(name, pendingFrom("s1", "s2"), suspended())
 	case 6:
 		return pinnedNode(name, unpinned("art", "obs"))
+	case 7:
+		// Finding 2 shape: unpinned + suspended.
+		return pinnedNode(name, unpinned("art", "obs"), suspended())
+	case 8:
+		// Finding 2 shape: unpinned + held.
+		return pinnedNode(name, unpinned("art", "obs"), held())
+	case 9:
+		// Finding 4 shape: held, pin observed, workload not yet applied.
+		return pinnedNode(name, atPin("s2"), appliedAt("s1"), held())
 	default:
 		return pinnedNode(name, pinnedUnobserved("s1"))
 	}
