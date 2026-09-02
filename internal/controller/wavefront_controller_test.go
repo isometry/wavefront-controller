@@ -442,9 +442,9 @@ var _ = Describe("Wavefront reconciler", func() {
 
 			// finding 9 (decision D-H): the engine re-derives the identical
 			// would-be admission every reconcile, so the ShadowAdmission event
-			// and wavefront_admissions_total{result="shadow"} must announce it
-			// exactly once, edge-triggered against status.Shadow — not once
-			// per pass (40+/hour on a pending change).
+			// and wavefront_admissions_total{result="shadow"} are edge-triggered
+			// against status.Shadow rather than fired once per pass (40+/hour
+			// on a pending change).
 			// Events are at-least-once, not exactly-once (DESIGN §4.2): the
 			// next reconcile can read the informer cache before it has
 			// absorbed this pass's status patch (client.MergeFrom carries
