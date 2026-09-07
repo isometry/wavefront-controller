@@ -306,6 +306,126 @@ spec:
                   type: object
                 type: array
                 x-kubernetes-list-type: atomic
+              lastEvaluated:
+                description: |-
+                  LastEvaluated is advanced at most once per spec.poll.interval so that
+                  watch-triggered reconciles do not rewrite status every pass.
+                format: date-time
+                type: string
+              members:
+                description: |-
+                  Members lists every selected node's derived state (sorted by kind/namespace/name),
+                  capped at MembersCap; MembersOmitted counts the rest.
+                items:
+                  description: |-
+                    Member is one selected node's derived state for the last evaluation.
+                    Write-only output: the reconciler never reads it back (DESIGN D9).
+                  properties:
+                    blocked:
+                      description: BlockedRef attributes a blocked node to its nearest
+                        unsettled ancestor.
+                      properties:
+                        ancestor:
+                          description: |-
+                            NodeReference identifies a graph node. Typed {kind, namespace, name} from
+                            day one so HelmRelease nodes are a non-breaking addition (DESIGN D12).
+                          properties:
+                            kind:
+                              enum:
+                              - Kustomization
+                              type: string
+                            name:
+                              type: string
+                            namespace:
+                              type: string
+                          required:
+                          - kind
+                          - name
+                          - namespace
+                          type: object
+                        reason:
+                          description: |-
+                            Reason is the engine's BlockedReason (AncestorUnhealthy, AncestorPending, AncestorHeld,
+                            AncestorUnobserved, SelfHeld, GraphCycle, SharedSourceBlocked).
+                          type: string
+                      required:
+                      - reason
+                      type: object
+                    dependsOn:
+                      items:
+                        description: |-
+                          NodeReference identifies a graph node. Typed {kind, namespace, name} from
+                          day one so HelmRelease nodes are a non-breaking addition (DESIGN D12).
+                        properties:
+                          kind:
+                            enum:
+                            - Kustomization
+                            type: string
+                          name:
+                            type: string
+                          namespace:
+                            type: string
+                        required:
+                        - kind
+                        - name
+                        - namespace
+                        type: object
+                      type: array
+                      x-kubernetes-list-type: atomic
+                    held:
+                      type: boolean
+                    node:
+                      description: |-
+                        NodeReference identifies a graph node. Typed {kind, namespace, name} from
+                        day one so HelmRelease nodes are a non-breaking addition (DESIGN D12).
+                      properties:
+                        kind:
+                          enum:
+                          - Kustomization
+                          type: string
+                        name:
+                          type: string
+                        namespace:
+                          type: string
+                      required:
+                      - kind
+                      - name
+                      - namespace
+                      type: object
+                    observedSHA:
+                      type: string
+                    pendingSince:
+                      format: date-time
+                      type: string
+                    pin:
+                      type: string
+                    ready:
+                      type: boolean
+                    role:
+                      enum:
+                      - Pinned
+                      - Gate
+                      type: string
+                    source:
+                      type: string
+                    state:
+                      enum:
+                      - Settled
+                      - Pending
+                      - Admissible
+                      - Converging
+                      - Unhealthy
+                      type: string
+                  required:
+                  - node
+                  - ready
+                  - role
+                  - state
+                  type: object
+                type: array
+                x-kubernetes-list-type: atomic
+              membersOmitted:
+                type: integer
               nodes:
                 properties:
                   blocked:

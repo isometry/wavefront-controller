@@ -72,15 +72,6 @@ const (
 	reasonUnsupportedRefStyle = "UnsupportedRefStyle"
 )
 
-// Condition reasons.
-const (
-	reasonSucceeded       = "Succeeded"
-	reasonFailed          = "ReconciliationFailed"
-	reasonValid           = "Valid"
-	reasonSelectorOverlap = "SelectorOverlap"
-	reasonCyclesDetected  = "CyclesDetected"
-)
-
 // wavefront_admissions_total result labels (DESIGN §6).
 const (
 	resultAdmitted = "admitted"
@@ -296,7 +287,7 @@ func (r *WavefrontReconciler) evaluate(ctx context.Context, p *pass) error {
 	if overlapping != "" {
 		p.graphChecked = true
 		p.graphValid = false
-		p.graphReason = reasonSelectorOverlap
+		p.graphReason = wavefrontv1alpha1.GraphValidReasonSelectorOverlap
 		p.graphMessage = fmt.Sprintf("node selector overlaps Wavefront %q; admissions suppressed", overlapping)
 		p.skipAdmissions = true
 	}
@@ -660,7 +651,7 @@ func (r *WavefrontReconciler) derive(p *pass) {
 	// the engine excludes only the component itself.
 	if cycles := p.graph.Cycles(); len(cycles) > 0 && p.graphValid {
 		p.graphValid = false
-		p.graphReason = reasonCyclesDetected
+		p.graphReason = wavefrontv1alpha1.GraphValidReasonCyclesDetected
 		p.graphMessage = "dependsOn cycle: " + strings.Join(refStrings(cycles[0]), " -> ")
 	}
 
@@ -937,12 +928,12 @@ func (r *WavefrontReconciler) summarise(p *pass, passErr error) {
 	ready := metav1.Condition{
 		Type:               wavefrontv1alpha1.ConditionReady,
 		Status:             metav1.ConditionTrue,
-		Reason:             reasonSucceeded,
+		Reason:             wavefrontv1alpha1.ReadyReasonSucceeded,
 		Message:            fmt.Sprintf("observed %d nodes", p.wf.Status.Nodes.Observed),
 		ObservedGeneration: p.wf.Generation,
 	}
 	if passErr != nil {
-		ready.Status, ready.Reason, ready.Message = metav1.ConditionFalse, reasonFailed, passErr.Error()
+		ready.Status, ready.Reason, ready.Message = metav1.ConditionFalse, wavefrontv1alpha1.ReadyReasonReconciliationFailed, passErr.Error()
 	}
 	apimeta.SetStatusCondition(&p.wf.Status.Conditions, ready)
 
@@ -956,7 +947,7 @@ func (r *WavefrontReconciler) summarise(p *pass, passErr error) {
 	graphValid := metav1.Condition{
 		Type:               wavefrontv1alpha1.ConditionGraphValid,
 		Status:             metav1.ConditionTrue,
-		Reason:             reasonValid,
+		Reason:             wavefrontv1alpha1.GraphValidReasonValid,
 		Message:            "no dependsOn cycles and no selector overlap",
 		ObservedGeneration: p.wf.Generation,
 	}

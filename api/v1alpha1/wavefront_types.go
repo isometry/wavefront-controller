@@ -45,6 +45,25 @@ const (
 	ConditionGraphValid = "GraphValid"
 )
 
+// Ready condition reasons.
+const (
+	ReadyReasonSucceeded            = "Succeeded"
+	ReadyReasonReconciliationFailed = "ReconciliationFailed"
+)
+
+// GraphValid condition reasons.
+const (
+	GraphValidReasonValid           = "Valid"
+	GraphValidReasonSelectorOverlap = "SelectorOverlap"
+	GraphValidReasonCyclesDetected  = "CyclesDetected"
+)
+
+// Hold reasons; match the enum on HeldNode.Reason.
+const (
+	HoldReasonHandPin = "HandPin"
+	HoldReasonSuspend = "Suspend"
+)
+
 // NodeReference identifies a graph node. Typed {kind, namespace, name} from
 // day one so HelmRelease nodes are a non-breaking addition (DESIGN D12).
 type NodeReference struct {
@@ -126,6 +145,33 @@ type ShadowAdmission struct {
 	To string `json:"to"`
 }
 
+// BlockedRef attributes a blocked node to its nearest unsettled ancestor.
+type BlockedRef struct {
+	// Reason is the engine's BlockedReason (AncestorUnhealthy, AncestorPending, AncestorHeld,
+	// AncestorUnobserved, SelfHeld, GraphCycle, SharedSourceBlocked).
+	Reason   string         `json:"reason"`
+	Ancestor *NodeReference `json:"ancestor,omitempty"`
+}
+
+// Member is one selected node's derived state for the last evaluation.
+// Write-only output: the reconciler never reads it back (DESIGN D9).
+type Member struct {
+	Node NodeReference `json:"node"`
+	// +kubebuilder:validation:Enum=Pinned;Gate
+	Role string `json:"role"`
+	// +kubebuilder:validation:Enum=Settled;Pending;Admissible;Converging;Unhealthy
+	State string `json:"state"`
+	// +listType=atomic
+	DependsOn    []NodeReference `json:"dependsOn,omitempty"` // graph edges, so status is self-contained
+	Source       string          `json:"source,omitempty"`    // "<ns>/<name>" of the GitRepository (pinned nodes)
+	Pin          string          `json:"pin,omitempty"`
+	ObservedSHA  string          `json:"observedSHA,omitempty"` // "" = unobserved this pass
+	PendingSince *metav1.Time    `json:"pendingSince,omitempty"`
+	Ready        bool            `json:"ready"`
+	Held         bool            `json:"held,omitempty"`
+	Blocked      *BlockedRef     `json:"blocked,omitempty"`
+}
+
 // WavefrontStatus defines the observed state of Wavefront.
 type WavefrontStatus struct {
 	Phase Phase      `json:"phase,omitempty"`
@@ -146,10 +192,25 @@ type WavefrontStatus struct {
 	// +listMapKey=type
 	Conditions         []metav1.Condition `json:"conditions,omitempty"`
 	ObservedGeneration int64              `json:"observedGeneration,omitempty"`
+	// Members lists every selected node's derived state (sorted by kind/namespace/name),
+	// capped at MembersCap; MembersOmitted counts the rest.
+	// +listType=atomic
+	// +optional
+	Members []Member `json:"members,omitempty"`
+	// +optional
+	MembersOmitted int `json:"membersOmitted,omitempty"`
+	// LastEvaluated is advanced at most once per spec.poll.interval so that
+	// watch-triggered reconciles do not rewrite status every pass.
+	// +optional
+	LastEvaluated *metav1.Time `json:"lastEvaluated,omitempty"`
 }
 
 // StatusListCap bounds the Blocked and Held status lists (DESIGN §4.1).
 const StatusListCap = 20
+
+// MembersCap bounds status.members; beyond it MembersOmitted counts the
+// rest (DESIGN §4.1).
+const MembersCap = 2000
 
 // +kubebuilder:object:root=true
 // +kubebuilder:resource:scope=Cluster

@@ -139,8 +139,8 @@ func TestSummariseAbortedPassPreservesTheFleetPicture(t *testing.T) {
 	if ready == nil {
 		t.Fatal("Ready condition missing, want the failure surfaced")
 	}
-	if ready.Status != metav1.ConditionFalse || ready.Reason != reasonFailed {
-		t.Errorf("Ready = %s/%s, want False/%s", ready.Status, ready.Reason, reasonFailed)
+	if ready.Status != metav1.ConditionFalse || ready.Reason != wavefrontv1alpha1.ReadyReasonReconciliationFailed {
+		t.Errorf("Ready = %s/%s, want False/%s", ready.Status, ready.Reason, wavefrontv1alpha1.ReadyReasonReconciliationFailed)
 	}
 	if !strings.Contains(ready.Message, "connection refused") {
 		t.Errorf("Ready message = %q, want it to carry the pass error", ready.Message)
@@ -159,7 +159,7 @@ func TestSummariseAbortedPassLeavesGraphValidStanding(t *testing.T) {
 	apimeta.SetStatusCondition(&wf.Status.Conditions, metav1.Condition{
 		Type:               wavefrontv1alpha1.ConditionGraphValid,
 		Status:             metav1.ConditionFalse,
-		Reason:             reasonSelectorOverlap,
+		Reason:             wavefrontv1alpha1.GraphValidReasonSelectorOverlap,
 		Message:            staleOverlap,
 		ObservedGeneration: 6,
 	})
@@ -171,9 +171,9 @@ func TestSummariseAbortedPassLeavesGraphValidStanding(t *testing.T) {
 	if graphValid == nil {
 		t.Fatal("GraphValid condition disappeared")
 	}
-	if graphValid.Status != metav1.ConditionFalse || graphValid.Reason != reasonSelectorOverlap {
+	if graphValid.Status != metav1.ConditionFalse || graphValid.Reason != wavefrontv1alpha1.GraphValidReasonSelectorOverlap {
 		t.Errorf("GraphValid = %s/%s, want the previous False/%s to stand",
-			graphValid.Status, graphValid.Reason, reasonSelectorOverlap)
+			graphValid.Status, graphValid.Reason, wavefrontv1alpha1.GraphValidReasonSelectorOverlap)
 	}
 
 	// A pass that *did* reach a verdict republishes it.
