@@ -20,6 +20,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -32,18 +37,14 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
-
-	sourcev1 "github.com/fluxcd/source-controller/api/v1"
 
 	wavefrontv1alpha1 "github.com/isometry/wavefront-controller/api/v1alpha1"
 	"github.com/isometry/wavefront-controller/internal/adapter"
 	"github.com/isometry/wavefront-controller/internal/engine"
 	"github.com/isometry/wavefront-controller/internal/gitpoll"
+	"github.com/isometry/wavefront-controller/internal/inputs"
 	"github.com/isometry/wavefront-controller/internal/metrics"
-	"github.com/isometry/wavefront-controller/internal/pin"
-	"github.com/isometry/wavefront-controller/internal/selection"
 )
 
 // Unit coverage for the two shared-state hazards the reconciler has to get
@@ -58,9 +59,11 @@ const (
 	alphaSource   = "alpha"
 	betaSource    = "beta"
 
-	teamASource  = fluxNamespace + "/" + teamAName
-	passFailure  = "listing Kustomizations: connection refused"
-	staleOverlap = "node selector overlaps Wavefront \"other\"; admissions suppressed"
+	teamASource = fluxNamespace + "/" + teamAName
+	// otherWavefront is the co-resident Wavefront a selector overlap names.
+	otherWavefront = "other"
+	passFailure    = "listing Kustomizations: connection refused"
+	staleOverlap   = "node selector overlaps Wavefront \"other\"; admissions suppressed"
 )
 
 func teamARef() adapter.NodeRef {
@@ -90,7 +93,7 @@ func settledFleet() *wavefrontv1alpha1.Wavefront {
 				Node:    wavefrontv1alpha1.NodeReference{Kind: kindKustomization, Namespace: fluxNamespace, Name: teamAName},
 				Source:  teamASource,
 				Manager: humanManager,
-				Reason:  string(holdHandPin),
+				Reason:  wavefrontv1alpha1.HoldReasonHandPin,
 			}},
 			ObservedGeneration: 6,
 		},
@@ -118,8 +121,8 @@ func TestSummariseAbortedPassPreservesTheFleetPicture(t *testing.T) {
 	before := wf.Status.DeepCopy()
 
 	r := &WavefrontReconciler{Recorder: events.NewFakeRecorder(16), Clock: time.Now, Metrics: metrics.Nop()}
-	// resolved and graphChecked both false: the pass aborted in discovery.
-	r.summarise(&pass{wf: wf, graphValid: true}, errors.New(passFailure))
+	// Resolved and GraphChecked both false: the pass aborted in discovery.
+	r.summarise(&pass{wf: wf, res: &inputs.Result{}}, errors.New(passFailure))
 
 	if got := wf.Status.Nodes; got != before.Nodes {
 		t.Errorf("counts = %+v, want the previous %+v left untouched", got, before.Nodes)
@@ -165,7 +168,7 @@ func TestSummariseAbortedPassLeavesGraphValidStanding(t *testing.T) {
 	})
 
 	r := &WavefrontReconciler{Recorder: events.NewFakeRecorder(16), Clock: time.Now, Metrics: metrics.Nop()}
-	r.summarise(&pass{wf: wf, graphValid: true}, errors.New(passFailure))
+	r.summarise(&pass{wf: wf, res: &inputs.Result{}}, errors.New(passFailure))
 
 	graphValid := apimeta.FindStatusCondition(wf.Status.Conditions, wavefrontv1alpha1.ConditionGraphValid)
 	if graphValid == nil {
@@ -177,10 +180,43 @@ func TestSummariseAbortedPassLeavesGraphValidStanding(t *testing.T) {
 	}
 
 	// A pass that *did* reach a verdict republishes it.
-	r.summarise(&pass{wf: wf, resolved: true, graphChecked: true, graphValid: true}, nil)
+	r.summarise(&pass{wf: wf, res: &inputs.Result{Resolved: true, GraphChecked: true}}, nil)
 	graphValid = apimeta.FindStatusCondition(wf.Status.Conditions, wavefrontv1alpha1.ConditionGraphValid)
 	if graphValid.Status != metav1.ConditionTrue {
 		t.Errorf("GraphValid = %s, want True once a pass proved it", graphValid.Status)
+	}
+}
+
+// TestSummarisePublishesOverlapDespiteAnAbortedPass: a selector overlap is
+// proven the moment it is detected, before resolution can fail. The verdict
+// must still be published — it is the reason admissions are suppressed — even
+// though the pass went on to abort and can publish no counts.
+func TestSummarisePublishesOverlapDespiteAnAbortedPass(t *testing.T) {
+	wf := settledFleet()
+	before := wf.Status.DeepCopy()
+
+	r := &WavefrontReconciler{Recorder: events.NewFakeRecorder(16), Clock: time.Now, Metrics: metrics.Nop()}
+	// Overlap detected (so GraphChecked), resolution then failed (so not Resolved).
+	r.summarise(&pass{wf: wf, res: &inputs.Result{GraphChecked: true, Overlap: otherWavefront}},
+		errors.New(passFailure))
+
+	graphValid := apimeta.FindStatusCondition(wf.Status.Conditions, wavefrontv1alpha1.ConditionGraphValid)
+	if graphValid == nil {
+		t.Fatal("GraphValid condition missing, want the overlap surfaced")
+	}
+	if graphValid.Status != metav1.ConditionFalse || graphValid.Reason != wavefrontv1alpha1.GraphValidReasonSelectorOverlap {
+		t.Errorf("GraphValid = %s/%s, want False/%s", graphValid.Status, graphValid.Reason,
+			wavefrontv1alpha1.GraphValidReasonSelectorOverlap)
+	}
+	if !strings.Contains(graphValid.Message, `Wavefront "other"`) {
+		t.Errorf("GraphValid message = %q, want it to name the overlapping Wavefront", graphValid.Message)
+	}
+
+	if got := wf.Status.Nodes; got != before.Nodes {
+		t.Errorf("counts = %+v, want the previous %+v: the pass still proved nothing about the fleet", got, before.Nodes)
+	}
+	if wf.Status.LastEvaluated != nil {
+		t.Errorf("lastEvaluated = %v, want unset: an aborted pass evaluated nothing", wf.Status.LastEvaluated)
 	}
 }
 
@@ -193,14 +229,12 @@ func TestHoldLedgerSurvivesAnAbortedPass(t *testing.T) {
 
 	wf := &wavefrontv1alpha1.Wavefront{ObjectMeta: metav1.ObjectMeta{Name: fleetName, Generation: 1}}
 	holding := func() *pass {
-		return &pass{
-			wf:           wf,
-			resolved:     true,
-			graphChecked: true,
-			graphValid:   true,
-			holds:        map[types.NamespacedName]hold{teamAKey(): {manager: humanManager, kind: holdHandPin}},
-			nodeBySource: map[types.NamespacedName][]adapter.NodeRef{teamAKey(): {teamARef()}},
-		}
+		return &pass{wf: wf, res: &inputs.Result{
+			Resolved:     true,
+			GraphChecked: true,
+			Holds:        map[types.NamespacedName]inputs.Hold{teamAKey(): {Manager: humanManager, Kind: inputs.HoldHandPin}},
+			NodeBySource: map[types.NamespacedName][]adapter.NodeRef{teamAKey(): {teamARef()}},
+		}}
 	}
 
 	// Pass 1: the hold appears.
@@ -217,7 +251,7 @@ func TestHoldLedgerSurvivesAnAbortedPass(t *testing.T) {
 	}
 
 	// Pass 2: an abort mid-hold. No events, and the ledger must survive it.
-	aborted := &pass{wf: wf, graphValid: true}
+	aborted := &pass{wf: wf, res: &inputs.Result{}}
 	r.holdEvents(aborted)
 	r.summarise(aborted, errors.New(passFailure))
 
@@ -254,20 +288,21 @@ func TestHoldLedgerSurvivesAnAbortedPass(t *testing.T) {
 func gaugePass(wavefront, node string, pendingSince time.Time) *pass {
 	ref := adapter.NodeRef{Kind: kindKustomization, Namespace: fluxNamespace, Name: node}
 	return &pass{
-		wf:           &wavefrontv1alpha1.Wavefront{ObjectMeta: metav1.ObjectMeta{Name: wavefront}},
-		resolved:     true,
-		graphChecked: true,
-		graphValid:   true,
-		inputs: map[adapter.NodeRef]engine.NodeInput{
-			ref: {Ref: ref, Role: engine.RolePinned, Source: &engine.SourceState{FetchFailing: true}},
-		},
-		eval: engine.Evaluation{Nodes: map[adapter.NodeRef]engine.NodeResult{
-			ref: {
-				State:        engine.StatePending,
-				PendingSince: pendingSince,
-				Blocked:      &engine.Blocked{Reason: engine.ReasonAncestorUnhealthy},
+		wf: &wavefrontv1alpha1.Wavefront{ObjectMeta: metav1.ObjectMeta{Name: wavefront}},
+		res: &inputs.Result{
+			Resolved:     true,
+			GraphChecked: true,
+			Inputs: map[adapter.NodeRef]engine.NodeInput{
+				ref: {Ref: ref, Role: engine.RolePinned, Source: &engine.SourceState{FetchFailing: true}},
 			},
-		}},
+			Eval: engine.Evaluation{Nodes: map[adapter.NodeRef]engine.NodeResult{
+				ref: {
+					State:        engine.StatePending,
+					PendingSince: pendingSince,
+					Blocked:      &engine.Blocked{Reason: engine.ReasonAncestorUnhealthy},
+				},
+			}},
+		},
 	}
 }
 
@@ -343,7 +378,7 @@ func TestSummariseAbortedPassRetiresItsGauges(t *testing.T) {
 
 	wf := settledFleet()
 	before := wf.Status.DeepCopy()
-	r.summarise(&pass{wf: wf, graphValid: true}, errors.New(passFailure))
+	r.summarise(&pass{wf: wf, res: &inputs.Result{}}, errors.New(passFailure))
 
 	if got := wf.Status.Nodes; got != before.Nodes {
 		t.Errorf("counts = %+v, want the previous %+v left untouched", got, before.Nodes)
@@ -365,7 +400,7 @@ func TestSummariseAbortedPassRetiresItsGauges(t *testing.T) {
 }
 
 // TestSummariseNodesOverlapPassSuppressesGauges: findings #8 — a selector
-// overlap (or a cycle) means p.graphValid is false and this pass's counts are
+// overlap (or a cycle) means the graph verdict is invalid and this pass's counts are
 // not authoritative for occupancy, so publishing its gauges alongside the
 // Wavefront it overlaps with would double-count the shared node. status.Nodes
 // stays live (overlap is not an abort — DESIGN's overlap rule), but the gauge
@@ -385,7 +420,7 @@ func TestSummariseNodesOverlapPassSuppressesGauges(t *testing.T) {
 	r.summariseNodes(gaugePass("infra", "team-c", now.Add(-30*time.Second)))
 
 	overlapping := gaugePass(fleetName, teamAName, now.Add(-90*time.Second))
-	overlapping.graphValid = false
+	overlapping.res.Overlap = otherWavefront // a selector overlap: status stays live, gauges do not
 	r.summariseNodes(overlapping)
 
 	if got := testutil.CollectAndCount(instr.PinLagSeconds); got != 1 {
@@ -483,18 +518,16 @@ func pollTarget(name string) gitpoll.Target {
 	}
 }
 
-func pollPass(name string, interval time.Duration, perHost int, targets ...gitpoll.Target) *pass {
-	return &pass{
-		wf: &wavefrontv1alpha1.Wavefront{
-			ObjectMeta: metav1.ObjectMeta{Name: name},
-			Spec: wavefrontv1alpha1.WavefrontSpec{
-				Poll: wavefrontv1alpha1.PollSpec{
-					Interval:           metav1.Duration{Duration: interval},
-					PerHostConcurrency: perHost,
-				},
+// pollWavefront is one Wavefront's poll policy, as updatePollSet reads it.
+func pollWavefront(name string, interval time.Duration, perHost int) *wavefrontv1alpha1.Wavefront {
+	return &wavefrontv1alpha1.Wavefront{
+		ObjectMeta: metav1.ObjectMeta{Name: name},
+		Spec: wavefrontv1alpha1.WavefrontSpec{
+			Poll: wavefrontv1alpha1.PollSpec{
+				Interval:           metav1.Duration{Duration: interval},
+				PerHostConcurrency: perHost,
 			},
 		},
-		targets: targets,
 	}
 }
 
@@ -524,14 +557,16 @@ func targetNames(targets []gitpoll.Target) []string {
 func TestPollSetsMergeCadenceAndTargets(t *testing.T) {
 	r := &WavefrontReconciler{Poller: gitpoll.NewPoller(nil, nil, nil, nil, nil, nil), Metrics: metrics.Nop()}
 
-	r.updatePollSet(pollPass("slow", 90*time.Second, 2, pollTarget(alphaSource)), wavefrontList("slow"))
+	r.updatePollSet(pollWavefront("slow", 90*time.Second, 2),
+		[]gitpoll.Target{pollTarget(alphaSource)}, wavefrontList("slow"))
 
 	interval, perHost := cadenceOf(r.pollSets)
 	if interval != 90*time.Second || perHost != 2 {
 		t.Errorf("cadence with one Wavefront = %v/%d, want 90s/2", interval, perHost)
 	}
 
-	r.updatePollSet(pollPass("fast", 30*time.Second, 4, pollTarget(betaSource)), wavefrontList("slow", "fast"))
+	r.updatePollSet(pollWavefront("fast", 30*time.Second, 4),
+		[]gitpoll.Target{pollTarget(betaSource)}, wavefrontList("slow", "fast"))
 
 	interval, perHost = cadenceOf(r.pollSets)
 	if interval != 30*time.Second {
@@ -545,7 +580,8 @@ func TestPollSetsMergeCadenceAndTargets(t *testing.T) {
 	}
 
 	// The fast Wavefront reconciles again: still merged, not overwritten.
-	r.updatePollSet(pollPass("fast", 30*time.Second, 4, pollTarget(betaSource)), wavefrontList("slow", "fast"))
+	r.updatePollSet(pollWavefront("fast", 30*time.Second, 4),
+		[]gitpoll.Target{pollTarget(betaSource)}, wavefrontList("slow", "fast"))
 	if got := targetNames(unionOf(r.pollSets)); !slices.Equal(got, []string{alphaSource, betaSource}) {
 		t.Errorf("targets after a repeat pass = %v, want [alpha beta]", got)
 	}
@@ -561,7 +597,8 @@ func TestPollSetsPruneRestoresTheSurvivingCadence(t *testing.T) {
 		{
 			name: "deleted Wavefront observed on the next pass",
 			remove: func(r *WavefrontReconciler) {
-				r.updatePollSet(pollPass("slow", 90*time.Second, 2, pollTarget(alphaSource)), wavefrontList("slow"))
+				r.updatePollSet(pollWavefront("slow", 90*time.Second, 2),
+					[]gitpoll.Target{pollTarget(alphaSource)}, wavefrontList("slow"))
 			},
 		},
 		{
@@ -573,8 +610,10 @@ func TestPollSetsPruneRestoresTheSurvivingCadence(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			r := &WavefrontReconciler{Poller: gitpoll.NewPoller(nil, nil, nil, nil, nil, nil), Metrics: metrics.Nop()}
-			r.updatePollSet(pollPass("slow", 90*time.Second, 2, pollTarget(alphaSource)), wavefrontList("slow"))
-			r.updatePollSet(pollPass("fast", 30*time.Second, 4, pollTarget(betaSource)), wavefrontList("slow", "fast"))
+			r.updatePollSet(pollWavefront("slow", 90*time.Second, 2),
+				[]gitpoll.Target{pollTarget(alphaSource)}, wavefrontList("slow"))
+			r.updatePollSet(pollWavefront("fast", 30*time.Second, 4),
+				[]gitpoll.Target{pollTarget(betaSource)}, wavefrontList("slow", "fast"))
 
 			tc.remove(r)
 
@@ -587,515 +626,6 @@ func TestPollSetsPruneRestoresTheSurvivingCadence(t *testing.T) {
 				t.Errorf("targets = %v, want only the survivor's [alpha]", got)
 			}
 		})
-	}
-}
-
-// --- shared-source resolution (WP2) -----------------------------------------
-
-const teamBName = "team-b"
-
-func teamBRef() adapter.NodeRef {
-	return adapter.NodeRef{Kind: kindKustomization, Namespace: fluxNamespace, Name: teamBName}
-}
-
-// TestResolveMemoizesASharedSource is decision D-A's controller-side
-// counterpart to the engine's gateSharedSources: two Kustomizations sharing
-// one GitRepository must see one r.Get, one *engine.SourceState and one poll
-// Target, and nodeBySource must list both referencing nodes rather than
-// silently keeping only the last writer.
-func TestResolveMemoizesASharedSource(t *testing.T) {
-	scheme := runtime.NewScheme()
-	if err := sourcev1.AddToScheme(scheme); err != nil {
-		t.Fatalf("AddToScheme: %v", err)
-	}
-
-	src := types.NamespacedName{Namespace: fluxNamespace, Name: "shared"}
-	repo := &sourcev1.GitRepository{
-		ObjectMeta: metav1.ObjectMeta{
-			Namespace: src.Namespace,
-			Name:      src.Name,
-			Labels:    map[string]string{pin.ManagedLabel: managedLabelValue},
-		},
-		Spec: sourcev1.GitRepositorySpec{
-			URL:       "https://git.example.com/org/shared.git",
-			Reference: &sourcev1.GitRepositoryRef{Name: mainRef},
-		},
-	}
-
-	r := &WavefrontReconciler{
-		Client:   fake.NewClientBuilder().WithScheme(scheme).WithObjects(repo).Build(),
-		Strategy: selection.TrackRef(),
-		Recorder: events.NewFakeRecorder(16),
-	}
-
-	nodeA, nodeB := teamARef(), teamBRef()
-	p := &pass{
-		wf: &wavefrontv1alpha1.Wavefront{ObjectMeta: metav1.ObjectMeta{Name: fleetName}},
-		nodes: map[adapter.NodeRef]adapter.Node{
-			nodeA: {Ref: nodeA, SourceRef: &src, Readiness: adapter.Readiness{Ready: true}},
-			nodeB: {Ref: nodeB, SourceRef: &src, Readiness: adapter.Readiness{Ready: true}},
-		},
-		selected:     map[adapter.NodeRef]bool{nodeA: true, nodeB: true},
-		missing:      map[adapter.NodeRef]bool{},
-		observations: map[types.NamespacedName]gitpoll.Observation{},
-	}
-
-	if err := r.resolve(context.Background(), p); err != nil {
-		t.Fatalf("resolve: %v", err)
-	}
-
-	stateA, stateB := p.inputs[nodeA].Source, p.inputs[nodeB].Source
-	if stateA == nil || stateB == nil {
-		t.Fatalf("both sharers must resolve pinned, got a=%+v b=%+v", p.inputs[nodeA], p.inputs[nodeB])
-	}
-	if stateA != stateB {
-		t.Errorf("sharers got distinct *SourceState pointers (%p, %p), want the memoized one shared", stateA, stateB)
-	}
-
-	if len(p.targets) != 1 {
-		t.Errorf("targets = %d, want exactly 1 for the shared source, not one per referencing node", len(p.targets))
-	}
-
-	if got, want := p.nodeBySource[src], []adapter.NodeRef{nodeA, nodeB}; !slices.Equal(got, want) {
-		t.Errorf("nodeBySource[%s] = %v, want both referencing nodes in compareRefs order %v", src, got, want)
-	}
-}
-
-// TestResolveSkipsASourceReferencedOnlyByNonSelectedNodes is the fix for the
-// WP2 review finding: a source with no selected referencing node must never
-// register a poll Target or fire UnsupportedRefStyle — that would leak a
-// source this Wavefront has zero selected interest in into its pollSet
-// contribution (and misattribute the warning) purely because a
-// dependency-closure gate happens to reference it. The source's ref style is
-// deliberately unsupported (SemVer), the worst case: even that must not
-// resolve or fire an event when nothing selected reaches it.
-func TestResolveSkipsASourceReferencedOnlyByNonSelectedNodes(t *testing.T) {
-	scheme := runtime.NewScheme()
-	if err := sourcev1.AddToScheme(scheme); err != nil {
-		t.Fatalf("AddToScheme: %v", err)
-	}
-
-	src := types.NamespacedName{Namespace: fluxNamespace, Name: "upstream"}
-	repo := &sourcev1.GitRepository{
-		ObjectMeta: metav1.ObjectMeta{
-			Namespace: src.Namespace,
-			Name:      src.Name,
-			Labels:    map[string]string{pin.ManagedLabel: managedLabelValue},
-		},
-		Spec: sourcev1.GitRepositorySpec{
-			URL:       "https://git.example.com/org/upstream.git",
-			Reference: &sourcev1.GitRepositoryRef{SemVer: ">=1.0.0"},
-		},
-	}
-
-	recorder := events.NewFakeRecorder(16)
-	r := &WavefrontReconciler{
-		Client:   fake.NewClientBuilder().WithScheme(scheme).WithObjects(repo).Build(),
-		Strategy: selection.TrackRef(),
-		Recorder: recorder,
-	}
-
-	gateOnly := teamARef()
-	p := &pass{
-		wf: &wavefrontv1alpha1.Wavefront{ObjectMeta: metav1.ObjectMeta{Name: fleetName}},
-		nodes: map[adapter.NodeRef]adapter.Node{
-			gateOnly: {Ref: gateOnly, SourceRef: &src, Readiness: adapter.Readiness{Ready: true}},
-		},
-		selected:     map[adapter.NodeRef]bool{}, // gateOnly is a dependency-closure gate, not selected
-		missing:      map[adapter.NodeRef]bool{},
-		observations: map[types.NamespacedName]gitpoll.Observation{},
-	}
-
-	if err := r.resolve(context.Background(), p); err != nil {
-		t.Fatalf("resolve: %v", err)
-	}
-
-	if got := p.inputs[gateOnly]; got.Role != engine.RoleGate || got.Source != nil {
-		t.Errorf("non-selected referencing node = %+v, want a plain gate with no Source", got)
-	}
-	if len(p.targets) != 0 {
-		t.Errorf("targets = %v, want none: no selected node references this source", p.targets)
-	}
-	if len(p.nodeBySource) != 0 {
-		t.Errorf("nodeBySource = %v, want empty", p.nodeBySource)
-	}
-	if len(p.resolvedSources) != 0 {
-		t.Errorf("resolvedSources = %v, want empty: the source was never resolved", p.resolvedSources)
-	}
-	if recorded := drain(recorder.Events); len(recorded) != 0 {
-		t.Errorf("events = %v, want none: UnsupportedRefStyle must not fire for a source no selected node references", recorded)
-	}
-}
-
-// TestResolveMixedSelectedAndGateSharersOfOneSource covers the mixed
-// topology the mono-repo gate above simplified away: one selected (pinned)
-// node and one non-selected (gate) node referencing the same source. The
-// source still resolves exactly once (one Target), the selected node is
-// pinned to it, and the gate node stays a plain gate — never added to
-// nodeBySource.
-func TestResolveMixedSelectedAndGateSharersOfOneSource(t *testing.T) {
-	scheme := runtime.NewScheme()
-	if err := sourcev1.AddToScheme(scheme); err != nil {
-		t.Fatalf("AddToScheme: %v", err)
-	}
-
-	src := types.NamespacedName{Namespace: fluxNamespace, Name: "shared"}
-	repo := &sourcev1.GitRepository{
-		ObjectMeta: metav1.ObjectMeta{
-			Namespace: src.Namespace,
-			Name:      src.Name,
-			Labels:    map[string]string{pin.ManagedLabel: managedLabelValue},
-		},
-		Spec: sourcev1.GitRepositorySpec{
-			URL:       "https://git.example.com/org/shared.git",
-			Reference: &sourcev1.GitRepositoryRef{Name: mainRef},
-		},
-	}
-
-	r := &WavefrontReconciler{
-		Client:   fake.NewClientBuilder().WithScheme(scheme).WithObjects(repo).Build(),
-		Strategy: selection.TrackRef(),
-		Recorder: events.NewFakeRecorder(16),
-	}
-
-	pinned, gate := teamARef(), teamBRef()
-	p := &pass{
-		wf: &wavefrontv1alpha1.Wavefront{ObjectMeta: metav1.ObjectMeta{Name: fleetName}},
-		nodes: map[adapter.NodeRef]adapter.Node{
-			pinned: {Ref: pinned, SourceRef: &src, Readiness: adapter.Readiness{Ready: true}},
-			gate:   {Ref: gate, SourceRef: &src, Readiness: adapter.Readiness{Ready: true}},
-		},
-		selected:     map[adapter.NodeRef]bool{pinned: true}, // gate deliberately absent
-		missing:      map[adapter.NodeRef]bool{},
-		observations: map[types.NamespacedName]gitpoll.Observation{},
-	}
-
-	if err := r.resolve(context.Background(), p); err != nil {
-		t.Fatalf("resolve: %v", err)
-	}
-
-	if got := p.inputs[pinned]; got.Role != engine.RolePinned || got.Source == nil {
-		t.Errorf("selected node = %+v, want RolePinned with a Source", got)
-	}
-	if got := p.inputs[gate]; got.Role != engine.RoleGate || got.Source != nil {
-		t.Errorf("non-selected node = %+v, want a plain gate with no Source", got)
-	}
-	if len(p.targets) != 1 {
-		t.Errorf("targets = %d, want exactly 1: registered once, by the selected node", len(p.targets))
-	}
-	if got, want := p.nodeBySource[src], []adapter.NodeRef{pinned}; !slices.Equal(got, want) {
-		t.Errorf("nodeBySource[%s] = %v, want only the selected node %v", src, got, want)
-	}
-}
-
-// --- observation plumbing (WP6, DESIGN §3.1) --------------------------------
-//
-// r.Poller.Observations() is snapshotted before updatePollSet/SetTargets
-// prunes stale records for this pass, so an Observation surviving from a
-// GitRepository's old plumbing can still be present in p.observations when
-// resolveSourceOnce runs. resolveSourceOnce must reject it itself rather than
-// rely on the poller having pruned it already.
-
-// TestResolveRejectsObservationFromStaleTrackingRef: an Observation recorded
-// under refs/heads/main while the GitRepository now tracks a tag must not
-// pin the old ref's SHA — ObservedSHA/FirstObserved must stay unset so the
-// engine treats the source as unobserved.
-func TestResolveRejectsObservationFromStaleTrackingRef(t *testing.T) {
-	scheme := runtime.NewScheme()
-	if err := sourcev1.AddToScheme(scheme); err != nil {
-		t.Fatalf("AddToScheme: %v", err)
-	}
-
-	src := types.NamespacedName{Namespace: fluxNamespace, Name: "retagged"}
-	repoURL := "https://git.example.com/org/retagged.git"
-	repo := &sourcev1.GitRepository{
-		ObjectMeta: metav1.ObjectMeta{
-			Namespace: src.Namespace,
-			Name:      src.Name,
-			Labels:    map[string]string{pin.ManagedLabel: managedLabelValue},
-		},
-		Spec: sourcev1.GitRepositorySpec{
-			URL:       repoURL,
-			Reference: &sourcev1.GitRepositoryRef{Tag: "v2"},
-		},
-	}
-
-	r := &WavefrontReconciler{
-		Client:   fake.NewClientBuilder().WithScheme(scheme).WithObjects(repo).Build(),
-		Strategy: selection.TrackRef(),
-		Recorder: events.NewFakeRecorder(16),
-	}
-
-	node := teamARef()
-	p := &pass{
-		wf: &wavefrontv1alpha1.Wavefront{ObjectMeta: metav1.ObjectMeta{Name: fleetName}},
-		nodes: map[adapter.NodeRef]adapter.Node{
-			node: {Ref: node, SourceRef: &src, Readiness: adapter.Readiness{Ready: true}},
-		},
-		selected: map[adapter.NodeRef]bool{node: true},
-		missing:  map[adapter.NodeRef]bool{},
-		observations: map[types.NamespacedName]gitpoll.Observation{
-			src: {SHA: shaA, FirstObserved: time.Unix(1000, 0), ObservedAt: time.Unix(1000, 0), URL: repoURL, TrackingRef: mainRef},
-		},
-	}
-
-	if err := r.resolve(context.Background(), p); err != nil {
-		t.Fatalf("resolve: %v", err)
-	}
-
-	state := p.inputs[node].Source
-	if state == nil {
-		t.Fatal("Source is nil, want a resolved SourceState")
-	}
-	if state.ObservedSHA != "" {
-		t.Errorf("ObservedSHA = %q, want \"\": the observation predates the retag", state.ObservedSHA)
-	}
-	if !state.FirstObserved.IsZero() {
-		t.Errorf("FirstObserved = %v, want zero: the observation predates the retag", state.FirstObserved)
-	}
-}
-
-// TestResolveRejectsObservationFromStaleURL: an Observation recorded against
-// the matching tracking ref but a different URL (the GitRepository was
-// repointed) must be rejected the same way as a ref mismatch.
-func TestResolveRejectsObservationFromStaleURL(t *testing.T) {
-	scheme := runtime.NewScheme()
-	if err := sourcev1.AddToScheme(scheme); err != nil {
-		t.Fatalf("AddToScheme: %v", err)
-	}
-
-	src := types.NamespacedName{Namespace: fluxNamespace, Name: "repointed"}
-	repo := &sourcev1.GitRepository{
-		ObjectMeta: metav1.ObjectMeta{
-			Namespace: src.Namespace,
-			Name:      src.Name,
-			Labels:    map[string]string{pin.ManagedLabel: managedLabelValue},
-		},
-		Spec: sourcev1.GitRepositorySpec{
-			URL:       "https://git.example.com/org/repointed-new.git",
-			Reference: &sourcev1.GitRepositoryRef{Name: mainRef},
-		},
-	}
-
-	r := &WavefrontReconciler{
-		Client:   fake.NewClientBuilder().WithScheme(scheme).WithObjects(repo).Build(),
-		Strategy: selection.TrackRef(),
-		Recorder: events.NewFakeRecorder(16),
-	}
-
-	node := teamARef()
-	p := &pass{
-		wf: &wavefrontv1alpha1.Wavefront{ObjectMeta: metav1.ObjectMeta{Name: fleetName}},
-		nodes: map[adapter.NodeRef]adapter.Node{
-			node: {Ref: node, SourceRef: &src, Readiness: adapter.Readiness{Ready: true}},
-		},
-		selected: map[adapter.NodeRef]bool{node: true},
-		missing:  map[adapter.NodeRef]bool{},
-		observations: map[types.NamespacedName]gitpoll.Observation{
-			src: {
-				SHA: shaA, FirstObserved: time.Unix(1000, 0), ObservedAt: time.Unix(1000, 0),
-				URL: "https://git.example.com/org/repointed-old.git", TrackingRef: mainRef,
-			},
-		},
-	}
-
-	if err := r.resolve(context.Background(), p); err != nil {
-		t.Fatalf("resolve: %v", err)
-	}
-
-	state := p.inputs[node].Source
-	if state == nil {
-		t.Fatal("Source is nil, want a resolved SourceState")
-	}
-	if state.ObservedSHA != "" {
-		t.Errorf("ObservedSHA = %q, want \"\": the observation predates the URL change", state.ObservedSHA)
-	}
-	if !state.FirstObserved.IsZero() {
-		t.Errorf("FirstObserved = %v, want zero: the observation predates the URL change", state.FirstObserved)
-	}
-}
-
-// TestResolveAcceptsObservationMatchingPlumbing: an Observation whose URL and
-// TrackingRef both match the GitRepository's current plumbing flows through
-// unchanged — the baseline the two rejection tests above are contrasted
-// against.
-func TestResolveAcceptsObservationMatchingPlumbing(t *testing.T) {
-	scheme := runtime.NewScheme()
-	if err := sourcev1.AddToScheme(scheme); err != nil {
-		t.Fatalf("AddToScheme: %v", err)
-	}
-
-	src := types.NamespacedName{Namespace: fluxNamespace, Name: "steady"}
-	repoURL := "https://git.example.com/org/steady.git"
-	repo := &sourcev1.GitRepository{
-		ObjectMeta: metav1.ObjectMeta{
-			Namespace: src.Namespace,
-			Name:      src.Name,
-			Labels:    map[string]string{pin.ManagedLabel: managedLabelValue},
-		},
-		Spec: sourcev1.GitRepositorySpec{
-			URL:       repoURL,
-			Reference: &sourcev1.GitRepositoryRef{Name: mainRef},
-		},
-	}
-
-	r := &WavefrontReconciler{
-		Client:   fake.NewClientBuilder().WithScheme(scheme).WithObjects(repo).Build(),
-		Strategy: selection.TrackRef(),
-		Recorder: events.NewFakeRecorder(16),
-	}
-
-	firstObserved := time.Unix(1000, 0)
-	node := teamARef()
-	p := &pass{
-		wf: &wavefrontv1alpha1.Wavefront{ObjectMeta: metav1.ObjectMeta{Name: fleetName}},
-		nodes: map[adapter.NodeRef]adapter.Node{
-			node: {Ref: node, SourceRef: &src, Readiness: adapter.Readiness{Ready: true}},
-		},
-		selected: map[adapter.NodeRef]bool{node: true},
-		missing:  map[adapter.NodeRef]bool{},
-		observations: map[types.NamespacedName]gitpoll.Observation{
-			src: {SHA: shaA, FirstObserved: firstObserved, ObservedAt: time.Unix(2000, 0), URL: repoURL, TrackingRef: mainRef},
-		},
-	}
-
-	if err := r.resolve(context.Background(), p); err != nil {
-		t.Fatalf("resolve: %v", err)
-	}
-
-	state := p.inputs[node].Source
-	if state == nil {
-		t.Fatal("Source is nil, want a resolved SourceState")
-	}
-	if state.ObservedSHA != shaA {
-		t.Errorf("ObservedSHA = %q, want %q", state.ObservedSHA, shaA)
-	}
-	if !state.FirstObserved.Equal(firstObserved) {
-		t.Errorf("FirstObserved = %v, want %v", state.FirstObserved, firstObserved)
-	}
-}
-
-// --- holds (WP3): suspended sources unify with hand-pins -------------------
-
-// TestResolveSuspendedSourceYieldsSuspendHold covers finding 7: a suspended
-// source must land in p.holds (kind Suspend, no manager), not just in the
-// engine's Held/Blocked signal.
-func TestResolveSuspendedSourceYieldsSuspendHold(t *testing.T) {
-	scheme := runtime.NewScheme()
-	if err := sourcev1.AddToScheme(scheme); err != nil {
-		t.Fatalf("AddToScheme: %v", err)
-	}
-
-	src := types.NamespacedName{Namespace: fluxNamespace, Name: "suspended"}
-	repo := &sourcev1.GitRepository{
-		ObjectMeta: metav1.ObjectMeta{
-			Namespace: src.Namespace,
-			Name:      src.Name,
-			Labels:    map[string]string{pin.ManagedLabel: managedLabelValue},
-		},
-		Spec: sourcev1.GitRepositorySpec{
-			URL:       "https://git.example.com/org/suspended.git",
-			Reference: &sourcev1.GitRepositoryRef{Name: mainRef},
-			Suspend:   true,
-		},
-	}
-
-	r := &WavefrontReconciler{
-		Client:   fake.NewClientBuilder().WithScheme(scheme).WithObjects(repo).Build(),
-		Strategy: selection.TrackRef(),
-		Recorder: events.NewFakeRecorder(16),
-	}
-
-	node := teamARef()
-	p := &pass{
-		wf: &wavefrontv1alpha1.Wavefront{ObjectMeta: metav1.ObjectMeta{Name: fleetName}},
-		nodes: map[adapter.NodeRef]adapter.Node{
-			node: {Ref: node, SourceRef: &src, Readiness: adapter.Readiness{Ready: true}},
-		},
-		selected:     map[adapter.NodeRef]bool{node: true},
-		missing:      map[adapter.NodeRef]bool{},
-		observations: map[types.NamespacedName]gitpoll.Observation{},
-	}
-
-	if err := r.resolve(context.Background(), p); err != nil {
-		t.Fatalf("resolve: %v", err)
-	}
-
-	got, ok := p.holds[src]
-	if !ok {
-		t.Fatalf("holds[%s] missing, want a Suspend hold", src)
-	}
-	if got.kind != holdSuspend || got.manager != "" {
-		t.Errorf("hold = %+v, want {manager: \"\", kind: Suspend}", got)
-	}
-}
-
-// TestResolveHandPinAndSuspendYieldsHandPin: a source both hand-pinned and
-// suspended reports HandPin — it names an actor, so it wins over the
-// actor-less Suspend (brief D-B).
-func TestResolveHandPinAndSuspendYieldsHandPin(t *testing.T) {
-	scheme := runtime.NewScheme()
-	if err := sourcev1.AddToScheme(scheme); err != nil {
-		t.Fatalf("AddToScheme: %v", err)
-	}
-
-	src := types.NamespacedName{Namespace: fluxNamespace, Name: "both"}
-	repo := &sourcev1.GitRepository{
-		ObjectMeta: metav1.ObjectMeta{
-			Namespace: src.Namespace,
-			Name:      src.Name,
-			Labels:    map[string]string{pin.ManagedLabel: managedLabelValue},
-		},
-		Spec: sourcev1.GitRepositorySpec{
-			URL:       "https://git.example.com/org/both.git",
-			Reference: &sourcev1.GitRepositoryRef{Name: mainRef},
-			Suspend:   true,
-		},
-	}
-
-	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(repo).WithReturnManagedFields().Build()
-
-	// Hand-pin spec.ref.commit under a foreign field manager, exactly as the
-	// envtest "hand-pin holds" scenario does, so pin.Hold sees a real
-	// managedFields entry rather than a hand-built one.
-	ctx := context.Background()
-	live := &sourcev1.GitRepository{}
-	if err := fakeClient.Get(ctx, src, live); err != nil {
-		t.Fatalf("Get: %v", err)
-	}
-	live.Spec.Reference.Commit = shaHand
-	if err := fakeClient.Update(ctx, live, client.FieldOwner(humanManager)); err != nil {
-		t.Fatalf("Update: %v", err)
-	}
-
-	r := &WavefrontReconciler{
-		Client:   fakeClient,
-		Strategy: selection.TrackRef(),
-		Recorder: events.NewFakeRecorder(16),
-	}
-
-	node := teamARef()
-	p := &pass{
-		wf: &wavefrontv1alpha1.Wavefront{ObjectMeta: metav1.ObjectMeta{Name: fleetName}},
-		nodes: map[adapter.NodeRef]adapter.Node{
-			node: {Ref: node, SourceRef: &src, Readiness: adapter.Readiness{Ready: true}},
-		},
-		selected:     map[adapter.NodeRef]bool{node: true},
-		missing:      map[adapter.NodeRef]bool{},
-		observations: map[types.NamespacedName]gitpoll.Observation{},
-	}
-
-	if err := r.resolve(ctx, p); err != nil {
-		t.Fatalf("resolve: %v", err)
-	}
-
-	got, ok := p.holds[src]
-	if !ok {
-		t.Fatalf("holds[%s] missing, want a HandPin hold", src)
-	}
-	if got.kind != holdHandPin || got.manager != humanManager {
-		t.Errorf("hold = %+v, want {manager: %q, kind: HandPin} even though the source is also suspended",
-			got, humanManager)
 	}
 }
 
@@ -1118,12 +648,11 @@ func TestHoldEventsSuspendMessages(t *testing.T) {
 	r := &WavefrontReconciler{Recorder: recorder, Clock: time.Now, Metrics: metrics.Nop()}
 
 	wf := &wavefrontv1alpha1.Wavefront{ObjectMeta: metav1.ObjectMeta{Name: fleetName}}
-	detect := &pass{
-		wf:           wf,
-		resolved:     true,
-		holds:        map[types.NamespacedName]hold{teamAKey(): {kind: holdSuspend}},
-		nodeBySource: map[types.NamespacedName][]adapter.NodeRef{teamAKey(): {teamARef()}},
-	}
+	detect := &pass{wf: wf, res: &inputs.Result{
+		Resolved:     true,
+		Holds:        map[types.NamespacedName]inputs.Hold{teamAKey(): {Kind: inputs.HoldSuspend}},
+		NodeBySource: map[types.NamespacedName][]adapter.NodeRef{teamAKey(): {teamARef()}},
+	}}
 	r.holdEvents(detect)
 
 	recorded := drain(recorder.Events)
@@ -1133,8 +662,11 @@ func TestHoldEventsSuspendMessages(t *testing.T) {
 	}
 
 	// The ledger now carries the Suspend hold; the next pass releases it.
-	wf.Status.Held = heldStatus("", string(holdSuspend))
-	release := &pass{wf: wf, resolved: true, holds: map[types.NamespacedName]hold{}}
+	wf.Status.Held = heldStatus("", wavefrontv1alpha1.HoldReasonSuspend)
+	release := &pass{wf: wf, res: &inputs.Result{
+		Resolved: true,
+		Holds:    map[types.NamespacedName]inputs.Hold{},
+	}}
 	r.holdEvents(release)
 
 	recorded = drain(recorder.Events)
@@ -1154,14 +686,13 @@ func TestHoldEventsKindFlipFiresReleaseAndDetect(t *testing.T) {
 
 	wf := &wavefrontv1alpha1.Wavefront{
 		ObjectMeta: metav1.ObjectMeta{Name: fleetName},
-		Status:     wavefrontv1alpha1.WavefrontStatus{Held: heldStatus("", string(holdSuspend))},
+		Status:     wavefrontv1alpha1.WavefrontStatus{Held: heldStatus("", wavefrontv1alpha1.HoldReasonSuspend)},
 	}
-	p := &pass{
-		wf:           wf,
-		resolved:     true,
-		holds:        map[types.NamespacedName]hold{teamAKey(): {manager: humanManager, kind: holdHandPin}},
-		nodeBySource: map[types.NamespacedName][]adapter.NodeRef{teamAKey(): {teamARef()}},
-	}
+	p := &pass{wf: wf, res: &inputs.Result{
+		Resolved:     true,
+		Holds:        map[types.NamespacedName]inputs.Hold{teamAKey(): {Manager: humanManager, Kind: inputs.HoldHandPin}},
+		NodeBySource: map[types.NamespacedName][]adapter.NodeRef{teamAKey(): {teamARef()}},
+	}}
 	r.holdEvents(p)
 
 	recorded := drain(recorder.Events)
@@ -1190,14 +721,13 @@ func TestHoldEventsIdenticalLedgerFiresNothing(t *testing.T) {
 
 	wf := &wavefrontv1alpha1.Wavefront{
 		ObjectMeta: metav1.ObjectMeta{Name: fleetName},
-		Status:     wavefrontv1alpha1.WavefrontStatus{Held: heldStatus(humanManager, string(holdHandPin))},
+		Status:     wavefrontv1alpha1.WavefrontStatus{Held: heldStatus(humanManager, wavefrontv1alpha1.HoldReasonHandPin)},
 	}
-	p := &pass{
-		wf:           wf,
-		resolved:     true,
-		holds:        map[types.NamespacedName]hold{teamAKey(): {manager: humanManager, kind: holdHandPin}},
-		nodeBySource: map[types.NamespacedName][]adapter.NodeRef{teamAKey(): {teamARef()}},
-	}
+	p := &pass{wf: wf, res: &inputs.Result{
+		Resolved:     true,
+		Holds:        map[types.NamespacedName]inputs.Hold{teamAKey(): {Manager: humanManager, Kind: inputs.HoldHandPin}},
+		NodeBySource: map[types.NamespacedName][]adapter.NodeRef{teamAKey(): {teamARef()}},
+	}}
 	r.holdEvents(p)
 
 	if recorded := drain(recorder.Events); len(recorded) != 0 {
@@ -1217,12 +747,11 @@ func TestHoldEventsEmptyReasonDefaultsToHandPin(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: fleetName},
 		Status:     wavefrontv1alpha1.WavefrontStatus{Held: heldStatus(humanManager, "")},
 	}
-	p := &pass{
-		wf:           wf,
-		resolved:     true,
-		holds:        map[types.NamespacedName]hold{teamAKey(): {manager: humanManager, kind: holdHandPin}},
-		nodeBySource: map[types.NamespacedName][]adapter.NodeRef{teamAKey(): {teamARef()}},
-	}
+	p := &pass{wf: wf, res: &inputs.Result{
+		Resolved:     true,
+		Holds:        map[types.NamespacedName]inputs.Hold{teamAKey(): {Manager: humanManager, Kind: inputs.HoldHandPin}},
+		NodeBySource: map[types.NamespacedName][]adapter.NodeRef{teamAKey(): {teamARef()}},
+	}}
 	r.holdEvents(p)
 
 	if recorded := drain(recorder.Events); len(recorded) != 0 {
@@ -1241,12 +770,12 @@ func manyHoldSource(i int) types.NamespacedName {
 
 // manyHolds builds n distinct HandPin holds, with their nodeBySource
 // attribution, for the capped-mirror tests below.
-func manyHolds(n int) (map[types.NamespacedName]hold, map[types.NamespacedName][]adapter.NodeRef) {
-	holds := make(map[types.NamespacedName]hold, n)
+func manyHolds(n int) (map[types.NamespacedName]inputs.Hold, map[types.NamespacedName][]adapter.NodeRef) {
+	holds := make(map[types.NamespacedName]inputs.Hold, n)
 	nodeBySource := make(map[types.NamespacedName][]adapter.NodeRef, n)
 	for i := range n {
 		src := manyHoldSource(i)
-		holds[src] = hold{manager: humanManager, kind: holdHandPin}
+		holds[src] = inputs.Hold{Manager: humanManager, Kind: inputs.HoldHandPin}
 		nodeBySource[src] = []adapter.NodeRef{{Kind: kindKustomization, Namespace: fluxNamespace, Name: src.Name}}
 	}
 	return holds, nodeBySource
@@ -1264,7 +793,7 @@ func TestHoldEventsCapMirrorsStatus(t *testing.T) {
 	holds, nodeBySource := manyHolds(25)
 
 	// Pass 1: 25 sources held, only StatusListCap (20) fit the mirrored ledger.
-	first := &pass{wf: wf, resolved: true, holds: holds, nodeBySource: nodeBySource}
+	first := &pass{wf: wf, res: &inputs.Result{Resolved: true, Holds: holds, NodeBySource: nodeBySource}}
 	r.holdEvents(first)
 	r.summarise(first, nil) // writes status.Held, exactly as Reconcile does
 
@@ -1280,7 +809,7 @@ func TestHoldEventsCapMirrorsStatus(t *testing.T) {
 	// Pass 2: identical 25 holds. The bug under test: diffing against the
 	// uncapped p.holds re-reports the truncated tail as newly detected on
 	// every reconcile, forever.
-	second := &pass{wf: wf, resolved: true, holds: holds, nodeBySource: nodeBySource}
+	second := &pass{wf: wf, res: &inputs.Result{Resolved: true, Holds: holds, NodeBySource: nodeBySource}}
 	r.holdEvents(second)
 
 	if recorded := drain(recorder.Events); len(recorded) != 0 {
@@ -1298,7 +827,7 @@ func TestHoldEventsReleasePromotes21st(t *testing.T) {
 	wf := &wavefrontv1alpha1.Wavefront{ObjectMeta: metav1.ObjectMeta{Name: fleetName}}
 	holds, nodeBySource := manyHolds(25)
 
-	first := &pass{wf: wf, resolved: true, holds: holds, nodeBySource: nodeBySource}
+	first := &pass{wf: wf, res: &inputs.Result{Resolved: true, Holds: holds, NodeBySource: nodeBySource}}
 	r.holdEvents(first)
 	r.summarise(first, nil)
 	drain(recorder.Events) // discard pass 1's 20 HoldDetected events
@@ -1307,14 +836,14 @@ func TestHoldEventsReleasePromotes21st(t *testing.T) {
 	// StatusListCap, capped out of pass 1) is promoted into the freed slot.
 	released := manyHoldSource(0)
 	promoted := manyHoldSource(wavefrontv1alpha1.StatusListCap)
-	holds2 := make(map[types.NamespacedName]hold, len(holds)-1)
+	holds2 := make(map[types.NamespacedName]inputs.Hold, len(holds)-1)
 	for src, h := range holds {
 		if src != released {
 			holds2[src] = h
 		}
 	}
 
-	second := &pass{wf: wf, resolved: true, holds: holds2, nodeBySource: nodeBySource}
+	second := &pass{wf: wf, res: &inputs.Result{Resolved: true, Holds: holds2, NodeBySource: nodeBySource}}
 	r.holdEvents(second)
 
 	recorded := drain(recorder.Events)
@@ -1365,7 +894,7 @@ func TestShadowAdmissionsNoRefireOnIdenticalPass(t *testing.T) {
 	wf := &wavefrontv1alpha1.Wavefront{ObjectMeta: metav1.ObjectMeta{Name: fleetName}}
 	admissions := []engine.Admission{admissionFor(teamAKey(), shaA)}
 
-	first := &pass{wf: wf}
+	first := &pass{wf: wf, res: &inputs.Result{}}
 	r.shadowAdmissions(first, admissions)
 
 	recorded := drain(recorder.Events)
@@ -1378,7 +907,7 @@ func TestShadowAdmissionsNoRefireOnIdenticalPass(t *testing.T) {
 
 	// Pass 2: the identical admission, re-derived exactly as the engine
 	// always has, must not re-announce.
-	second := &pass{wf: wf}
+	second := &pass{wf: wf, res: &inputs.Result{}}
 	r.shadowAdmissions(second, admissions)
 
 	if recorded := drain(recorder.Events); len(recorded) != 0 {
@@ -1398,11 +927,11 @@ func TestShadowAdmissionsNewToRefires(t *testing.T) {
 
 	wf := &wavefrontv1alpha1.Wavefront{ObjectMeta: metav1.ObjectMeta{Name: fleetName}}
 
-	first := &pass{wf: wf}
+	first := &pass{wf: wf, res: &inputs.Result{}}
 	r.shadowAdmissions(first, []engine.Admission{admissionFor(teamAKey(), shaA)})
 	drain(recorder.Events)
 
-	second := &pass{wf: wf}
+	second := &pass{wf: wf, res: &inputs.Result{}}
 	r.shadowAdmissions(second, []engine.Admission{admissionFor(teamAKey(), shaB)})
 
 	recorded := drain(recorder.Events)
@@ -1431,7 +960,7 @@ func TestExecuteEnforceClearsStaleShadowLedger(t *testing.T) {
 			Shadow: []wavefrontv1alpha1.ShadowAdmission{{Source: teamASource, To: shaA}},
 		},
 	}
-	p := &pass{wf: wf} // no admissions this pass (p.eval is the zero Evaluation)
+	p := &pass{wf: wf, res: &inputs.Result{}} // no admissions this pass (the zero Evaluation)
 
 	if err := r.execute(context.Background(), p); err != nil {
 		t.Fatalf("execute: %v", err)
@@ -1457,11 +986,11 @@ func TestExecuteSkipAdmissionsLeavesShadowLedgerUntouched(t *testing.T) {
 			Shadow: []wavefrontv1alpha1.ShadowAdmission{{Source: teamASource, To: shaA}},
 		},
 	}
-	p := &pass{
-		wf:             wf,
-		skipAdmissions: true,
-		eval:           engine.Evaluation{Initial: []engine.Admission{admissionFor(teamAKey(), shaB)}},
-	}
+	p := &pass{wf: wf, res: &inputs.Result{
+		// A selector overlap is what suppresses admissions.
+		Overlap: otherWavefront,
+		Eval:    engine.Evaluation{Initial: []engine.Admission{admissionFor(teamAKey(), shaB)}},
+	}}
 
 	if err := r.execute(context.Background(), p); err != nil {
 		t.Fatalf("execute: %v", err)
@@ -1485,10 +1014,9 @@ func TestExecuteSuspendLeavesShadowLedgerUntouched(t *testing.T) {
 			Shadow: []wavefrontv1alpha1.ShadowAdmission{{Source: teamASource, To: shaA}},
 		},
 	}
-	p := &pass{
-		wf:   wf,
-		eval: engine.Evaluation{Initial: []engine.Admission{admissionFor(teamAKey(), shaB)}},
-	}
+	p := &pass{wf: wf, res: &inputs.Result{
+		Eval: engine.Evaluation{Initial: []engine.Admission{admissionFor(teamAKey(), shaB)}},
+	}}
 
 	if err := r.execute(context.Background(), p); err != nil {
 		t.Fatalf("execute: %v", err)
@@ -1514,7 +1042,7 @@ func TestShadowAdmissionsCapMirrorsStatus(t *testing.T) {
 	wf := &wavefrontv1alpha1.Wavefront{ObjectMeta: metav1.ObjectMeta{Name: fleetName}}
 	admissions := manyAdmissions(25)
 
-	first := &pass{wf: wf}
+	first := &pass{wf: wf, res: &inputs.Result{}}
 	r.shadowAdmissions(first, admissions)
 
 	recorded := drain(recorder.Events)
@@ -1532,7 +1060,7 @@ func TestShadowAdmissionsCapMirrorsStatus(t *testing.T) {
 	// Pass 2: the identical 25 admissions. The bug under test: diffing
 	// against an uncapped current set would re-report the truncated tail as
 	// newly would-be on every reconcile, forever.
-	second := &pass{wf: wf}
+	second := &pass{wf: wf, res: &inputs.Result{}}
 	r.shadowAdmissions(second, admissions)
 
 	if recorded := drain(recorder.Events); len(recorded) != 0 {
@@ -1552,11 +1080,128 @@ func TestPollSetsCadenceDefaults(t *testing.T) {
 	}
 
 	r := &WavefrontReconciler{Poller: gitpoll.NewPoller(nil, nil, nil, nil, nil, nil), Metrics: metrics.Nop()}
-	r.updatePollSet(pollPass("zeroes", 0, 0, pollTarget(alphaSource)), wavefrontList("zeroes"))
+	r.updatePollSet(pollWavefront("zeroes", 0, 0),
+		[]gitpoll.Target{pollTarget(alphaSource)}, wavefrontList("zeroes"))
 
 	interval, perHost := cadenceOf(r.pollSets)
 	if interval != gitpoll.DefaultInterval || perHost != gitpoll.DefaultPerHostConcurrency {
 		t.Errorf("cadence from explicit zeros = %v/%d, want the CRD defaults %v/%d",
 			interval, perHost, gitpoll.DefaultInterval, gitpoll.DefaultPerHostConcurrency)
+	}
+}
+
+// --- status.lastEvaluated and the write-only member list ---------------------
+
+// TestSummariseStampsLastEvaluatedAtMostOncePerInterval: every pass re-derives
+// the same picture (DESIGN D9), so stamping a fresh timestamp on each one would
+// rewrite status — and wake every watcher of it — on every watch-triggered
+// reconcile while nothing about the fleet had changed. The poll interval is the
+// freshness the user asked for, so it bounds the rewrite rate too.
+func TestSummariseStampsLastEvaluatedAtMostOncePerInterval(t *testing.T) {
+	now := time.Unix(9000, 0)
+	r := &WavefrontReconciler{
+		Recorder: events.NewFakeRecorder(16),
+		Clock:    func() time.Time { return now },
+		Metrics:  metrics.Nop(),
+	}
+
+	wf := &wavefrontv1alpha1.Wavefront{
+		ObjectMeta: metav1.ObjectMeta{Name: fleetName},
+		Spec: wavefrontv1alpha1.WavefrontSpec{
+			Poll: wavefrontv1alpha1.PollSpec{Interval: metav1.Duration{Duration: 90 * time.Second}},
+		},
+	}
+	resolved := func() *pass { return &pass{wf: wf, res: &inputs.Result{Resolved: true, GraphChecked: true}} }
+
+	r.summarise(resolved(), nil)
+	first := wf.Status.LastEvaluated
+	if first == nil || !first.Time.Equal(now) {
+		t.Fatalf("lastEvaluated after the first pass = %v, want %v", first, now)
+	}
+
+	// Back-to-back reconciles inside the interval: the timestamp stands.
+	now = now.Add(89 * time.Second)
+	r.summarise(resolved(), nil)
+	if got := wf.Status.LastEvaluated; got == nil || !got.Time.Equal(first.Time) {
+		t.Errorf("lastEvaluated after a pass %v later = %v, want the original %v", 89*time.Second, got, first)
+	}
+
+	// A pass a full interval on does advance it.
+	now = now.Add(2 * time.Second)
+	r.summarise(resolved(), nil)
+	if got := wf.Status.LastEvaluated; got == nil || !got.Time.Equal(now) {
+		t.Errorf("lastEvaluated after a full interval = %v, want %v", got, now)
+	}
+
+	// An aborted pass has evaluated nothing, so it stamps nothing.
+	stamped := *wf.Status.LastEvaluated
+	now = now.Add(time.Hour)
+	r.summarise(&pass{wf: wf, res: &inputs.Result{}}, errors.New(passFailure))
+	if got := wf.Status.LastEvaluated; got == nil || !got.Time.Equal(stamped.Time) {
+		t.Errorf("lastEvaluated after an aborted pass = %v, want the last proven %v", got, stamped)
+	}
+}
+
+// TestStatusMembersAreWriteOnly enforces DESIGN D9 structurally: status.members
+// is output for humans and the CLI, never an input the reconciler steers on. A
+// pass that read it back would be carrying orchestration state in status, and a
+// hand-edited (or truncated, past MembersCap) list could then change what the
+// controller does.
+func TestStatusMembersAreWriteOnly(t *testing.T) {
+	writeOnly := []string{"Members", "MembersOmitted"}
+
+	entries, err := os.ReadDir(".")
+	if err != nil {
+		t.Fatalf("reading package directory: %v", err)
+	}
+
+	fset := token.NewFileSet()
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		file, err := parser.ParseFile(fset, filepath.Join(".", name), nil, 0)
+		if err != nil {
+			t.Fatalf("parsing %s: %v", name, err)
+		}
+
+		// Every appearance of one of these fields must be the target of an
+		// assignment; anything else is a read.
+		assigned := map[ast.Expr]bool{}
+		ast.Inspect(file, func(n ast.Node) bool {
+			if assign, ok := n.(*ast.AssignStmt); ok {
+				for _, lhs := range assign.Lhs {
+					assigned[lhs] = true
+				}
+			}
+			return true
+		})
+
+		// Only Wavefront status fields are of interest: inputs.Summary's own
+		// Members is a value the reconciler must read on its way to status.
+		// Both spellings the package uses are recognised — wf.Status.Members
+		// and the local `status := &p.wf.Status` alias.
+		onStatus := func(x ast.Expr) bool {
+			switch recv := x.(type) {
+			case *ast.Ident:
+				return recv.Name == "status"
+			case *ast.SelectorExpr:
+				return recv.Sel.Name == "Status"
+			}
+			return false
+		}
+
+		ast.Inspect(file, func(n ast.Node) bool {
+			sel, ok := n.(*ast.SelectorExpr)
+			if !ok || !slices.Contains(writeOnly, sel.Sel.Name) || !onStatus(sel.X) {
+				return true
+			}
+			if !assigned[ast.Expr(sel)] {
+				t.Errorf("%s:%d: reads status.%s; it is write-only output (DESIGN D9)",
+					name, fset.Position(sel.Pos()).Line, sel.Sel.Name)
+			}
+			return true
+		})
 	}
 }

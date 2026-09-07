@@ -27,19 +27,15 @@ import (
 	"fmt"
 	"maps"
 	"slices"
-	"strings"
 	"sync"
 	"time"
 
 	kustomizev1 "github.com/fluxcd/kustomize-controller/api/v1"
-	"github.com/fluxcd/pkg/git"
-	"github.com/fluxcd/pkg/runtime/conditions"
 	sourcev1 "github.com/fluxcd/source-controller/api/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/events"
@@ -55,7 +51,7 @@ import (
 	"github.com/isometry/wavefront-controller/internal/adapter"
 	"github.com/isometry/wavefront-controller/internal/engine"
 	"github.com/isometry/wavefront-controller/internal/gitpoll"
-	"github.com/isometry/wavefront-controller/internal/graph"
+	"github.com/isometry/wavefront-controller/internal/inputs"
 	"github.com/isometry/wavefront-controller/internal/metrics"
 	"github.com/isometry/wavefront-controller/internal/pin"
 	"github.com/isometry/wavefront-controller/internal/selection"
@@ -84,10 +80,6 @@ const (
 // conflict) but not the owner of.
 const unknownManager = "unknown"
 
-// managedOptIn is the only value of pin.ManagedLabel that opts a
-// GitRepository into pin management (DESIGN §8.2).
-const managedOptIn = "true"
-
 // WavefrontReconciler reconciles a Wavefront object.
 //
 // Every pass is a full recalculation: discovery, source resolution, graph
@@ -95,11 +87,11 @@ const managedOptIn = "true"
 // the poller's observations, never from stored orchestration state
 // (DESIGN D9). The only state status carries forward is edge-trigger
 // ledgers, each diffed against the exact capped, sorted mirror it itself
-// holds (decision D-C): the hold ledger (status.Held, against p.holds) and
-// the shadow-admission ledger (status.Shadow, against this pass's
-// admissions, decision D-H), never against the unbounded live-derived set,
-// so a restart replays at most StatusListCap detections rather than an
-// unbounded backlog.
+// holds (decision D-C): the hold ledger (status.Held, against the pass's
+// derived holds) and the shadow-admission ledger (status.Shadow, against
+// this pass's admissions, decision D-H), never against the unbounded
+// live-derived set, so a restart replays at most StatusListCap detections
+// rather than an unbounded backlog.
 type WavefrontReconciler struct {
 	client.Client
 	Scheme    *runtime.Scheme
@@ -129,91 +121,19 @@ type pollSet struct {
 	targets            []gitpoll.Target
 }
 
-// holdKind distinguishes how a source is held (finding 7, DESIGN §3.5.3,
-// §10): a foreign field manager owning spec.ref.commit, or spec.suspend.
-// Both are reported identically by the engine (NodeResult.Held,
-// engine.go SelfHeld/AncestorHeld) and must be reported identically here.
-type holdKind string
-
-const (
-	holdHandPin holdKind = "HandPin"
-	holdSuspend holdKind = "Suspend"
-)
-
-// hold is one source's entry in the unified hold ledger (decision D-B):
-// manager is "" for a Suspend hold, which names no owning actor.
-type hold struct {
-	manager string
-	kind    holdKind
-}
-
-// resolvedSource is one GitRepository's memoized resolution (decision D-A).
-// state != nil means the source itself is eligible (managed, resolvable ref
-// style) — not that any node was pinned to it: only resolve's caller, gated
-// on p.selected, decides whether a given referencing node becomes
-// RolePinned. state is nil for an absent or unmanaged source, or one whose
-// ref style v1 cannot sequence, in which case target is also nil.
-type resolvedSource struct {
-	state  *engine.SourceState
-	target *gitpoll.Target
-}
-
-// pass is one reconciliation's derived state, threaded through the numbered
-// steps of the flow so that each stays a pure-ish function of what came before.
+// pass is one reconciliation's derived state: the read-only derivation
+// (internal/inputs) plus the object it is published onto. Everything the
+// numbered steps below need is in res; nothing else about the pass is
+// remembered.
 type pass struct {
-	wf *wavefrontv1alpha1.Wavefront
+	wf  *wavefrontv1alpha1.Wavefront
+	res *inputs.Result
+}
 
-	// discovery (step 3)
-	nodes    map[adapter.NodeRef]adapter.Node // selected set plus dependsOn closure
-	selected map[adapter.NodeRef]bool
-	missing  map[adapter.NodeRef]bool // dependsOn targets that do not exist
-
-	// source resolution (step 4)
-	resolved bool
-	inputs   map[adapter.NodeRef]engine.NodeInput
-	repos    map[types.NamespacedName]*sourcev1.GitRepository
-	// resolvedSources memoizes each GitRepository's resolution (decision
-	// D-A): two or more nodes sharing one source (a standard Flux monorepo
-	// topology) see one r.Get, one trackingRef computation and one
-	// *engine.SourceState, rather than a separate — and possibly
-	// disagreeing — read per referencing node.
-	resolvedSources map[types.NamespacedName]*resolvedSource
-	// nodeBySource lists every selected, pinned node referencing a source,
-	// each slice in compareRefs order (decision D-D): a shared source's
-	// events and status attribution need every referencing node, not just
-	// whichever last overwrote a single value.
-	nodeBySource map[types.NamespacedName][]adapter.NodeRef
-	// holds is the unified hold ledger (finding 7, decision D-B): every
-	// source the engine reports Held for, whether a hand-pin (a foreign
-	// field manager owns spec.ref.commit) or a suspend (spec.suspend). It
-	// feeds counts.Held, status.held[], the HoldDetected/HoldReleased
-	// edge-trigger, and the advance() gate alike — matching the engine's
-	// own Held semantics (SelfHeld/AncestorHeld cover both).
-	holds   map[types.NamespacedName]hold
-	targets []gitpoll.Target
-
-	// observations is the pass's single snapshot of the poller. Strict
-	// ordering for co-arriving changes (DESIGN §3.3) is only structural if
-	// every node's observation comes from the same sweep: read one source at a
-	// time, a sweep landing mid-pass presents a fresh descendant against a
-	// stale — and therefore apparently settled — ancestor. Poller.Observations
-	// guarantees the snapshot never mixes sweeps.
-	observations map[types.NamespacedName]gitpoll.Observation
-
-	// graph and evaluation (steps 2, 6)
-	graph *graph.Graph
-	eval  engine.Evaluation
-	// graphChecked records that the pass reached a graph verdict at all; an
-	// abort before that must leave the previous GraphValid condition standing.
-	graphChecked bool
-	graphValid   bool
-	graphReason,
-	graphMessage string
-
-	// skipAdmissions suppresses every write for the pass, without suppressing
-	// status: selector overlap is a configuration error, not a reason to go
-	// blind (DESIGN §4.1).
-	skipAdmissions bool
+// resolved reports whether the pass got far enough to have proven anything
+// about the fleet. A nil res is an abort before Build even ran.
+func (p *pass) resolved() bool {
+	return p.res != nil && p.res.Resolved
 }
 
 // +kubebuilder:rbac:groups=wavefront.as-code.io,resources=wavefronts,verbs=get;list;watch
@@ -252,7 +172,7 @@ func (r *WavefrontReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	}
 
 	before := wf.DeepCopy()
-	p := &pass{wf: wf, graphValid: true}
+	p := &pass{wf: wf}
 
 	passErr := r.evaluate(ctx, p)
 	if passErr == nil {
@@ -275,287 +195,48 @@ func (r *WavefrontReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 
 // evaluate performs steps 2–6: discovery, overlap detection, source and role
 // resolution, poll-set maintenance, and graph/engine derivation.
+//
+// The derivation itself lives in internal/inputs, which is pure and read-only:
+// everything the reconciler adds — events, poll-set maintenance, writes,
+// status, metrics — happens out here, so the same reads produce the same
+// picture for a CLI that has none of them.
 func (r *WavefrontReconciler) evaluate(ctx context.Context, p *pass) error {
-	if err := r.discover(ctx, p); err != nil {
-		return err
+	// One coherent snapshot for the whole pass, taken before updatePollSet's
+	// SetTargets prunes anything: every node is evaluated against the same
+	// sweep, which is what makes co-arrival ordering structural rather than a
+	// race the pass usually wins (DESIGN §3.3).
+	res, err := inputs.Build(ctx, r.Client, inputs.Params{
+		Wavefront:    p.wf,
+		Adapter:      r.Adapter,
+		Strategy:     r.Strategy,
+		Observations: r.Poller.Observations(),
+	})
+	p.res = res
+
+	// Recorded once per source by Build (memoized), announced once here: a
+	// pure derivation cannot emit events, and an aborted pass has still
+	// proven this much about whatever it did resolve.
+	for _, src := range res.UnsupportedSources {
+		r.event(p.wf, corev1.EventTypeWarning, reasonUnsupportedRefStyle,
+			"%s tracks a ref style this version cannot sequence; every referencing node demoted to a gate", src)
 	}
 
-	all, overlapping, err := r.detectOverlap(ctx, p)
 	if err != nil {
 		return err
 	}
-	if overlapping != "" {
-		p.graphChecked = true
-		p.graphValid = false
-		p.graphReason = wavefrontv1alpha1.GraphValidReasonSelectorOverlap
-		p.graphMessage = fmt.Sprintf("node selector overlaps Wavefront %q; admissions suppressed", overlapping)
-		p.skipAdmissions = true
-	}
 
-	// One coherent snapshot for the whole pass: every node is evaluated
-	// against the same sweep, which is what makes co-arrival ordering
-	// structural rather than a race the pass usually wins.
-	p.observations = r.Poller.Observations()
-
-	if err := r.resolve(ctx, p); err != nil {
-		return err
-	}
-
-	r.updatePollSet(p, all)
-	r.derive(p)
+	r.updatePollSet(p.wf, res.Targets, res.Wavefronts)
 	return nil
-}
-
-// discover implements step 3: the selected node set, closed transitively over
-// dependsOn targets that fall outside the selector.
-func (r *WavefrontReconciler) discover(ctx context.Context, p *pass) error {
-	selector, err := metav1.LabelSelectorAsSelector(&p.wf.Spec.Nodes.Selector)
-	if err != nil {
-		return fmt.Errorf("invalid node selector: %w", err)
-	}
-
-	selected, err := r.Adapter.List(ctx, r.Client, selector)
-	if err != nil {
-		return err
-	}
-
-	p.nodes = make(map[adapter.NodeRef]adapter.Node, len(selected))
-	p.selected = make(map[adapter.NodeRef]bool, len(selected))
-	p.missing = map[adapter.NodeRef]bool{}
-
-	queue := make([]adapter.NodeRef, 0, len(selected))
-	for _, node := range selected {
-		p.nodes[node.Ref] = node
-		p.selected[node.Ref] = true
-		queue = append(queue, node.Ref)
-	}
-
-	// Breadth-first until no new refs: an out-of-selector dependency is still
-	// a health gate, and its own dependencies gate it in turn (DESIGN §3.2).
-	for len(queue) > 0 {
-		ref := queue[0]
-		queue = queue[1:]
-
-		for _, dep := range p.nodes[ref].DependsOn {
-			if _, known := p.nodes[dep]; known || p.missing[dep] {
-				continue
-			}
-			node, found, err := r.Adapter.Get(ctx, r.Client, dep)
-			if err != nil {
-				return err
-			}
-			if !found {
-				// A dangling dependency is recorded as a permanently unready
-				// gate, so descendants block exactly as they do under Flux's
-				// own handling of a missing dependsOn target.
-				p.missing[dep] = true
-				continue
-			}
-			p.nodes[dep] = node
-			queue = append(queue, dep)
-		}
-	}
-
-	return nil
-}
-
-// detectOverlap implements step 2 (DESIGN §4.1): another Wavefront whose
-// selector matches any of this one's selected nodes. It returns the full
-// Wavefront list too, which step 5 needs to prune the shared poll set.
-func (r *WavefrontReconciler) detectOverlap(
-	ctx context.Context,
-	p *pass,
-) (*wavefrontv1alpha1.WavefrontList, string, error) {
-	all := &wavefrontv1alpha1.WavefrontList{}
-	if err := r.List(ctx, all); err != nil {
-		return nil, "", fmt.Errorf("listing Wavefronts: %w", err)
-	}
-
-	// Sorted node refs keep the reported overlap stable across passes.
-	refs := slices.SortedFunc(maps.Keys(p.selected), compareRefs)
-
-	for i := range all.Items {
-		other := &all.Items[i]
-		if other.Name == p.wf.Name {
-			continue
-		}
-		selector, err := metav1.LabelSelectorAsSelector(&other.Spec.Nodes.Selector)
-		if err != nil {
-			// Another Wavefront's broken selector is its own problem to report.
-			continue
-		}
-		for _, ref := range refs {
-			if selector.Matches(labels.Set(p.nodes[ref].Labels)) {
-				return all, other.Name, nil
-			}
-		}
-	}
-
-	return all, "", nil
-}
-
-// resolve implements step 4: each node's role and, for pinned nodes, the
-// GitRepository reading the engine evaluates against.
-func (r *WavefrontReconciler) resolve(ctx context.Context, p *pass) error {
-	p.inputs = make(map[adapter.NodeRef]engine.NodeInput, len(p.nodes)+len(p.missing))
-	p.repos = map[types.NamespacedName]*sourcev1.GitRepository{}
-	p.resolvedSources = map[types.NamespacedName]*resolvedSource{}
-	p.nodeBySource = map[types.NamespacedName][]adapter.NodeRef{}
-	p.holds = map[types.NamespacedName]hold{}
-	p.targets = make([]gitpoll.Target, 0, len(p.nodes))
-
-	for _, ref := range slices.SortedFunc(maps.Keys(p.nodes), compareRefs) {
-		node := p.nodes[ref]
-		input := engine.NodeInput{
-			Ref:        ref,
-			Role:       engine.RoleGate,
-			Ready:      node.Readiness.Ready,
-			Failing:    node.Readiness.Failing,
-			AppliedSHA: node.Readiness.AppliedSHA,
-		}
-
-		// Resolution (the read, trackingRef, event and Target registration)
-		// is triggered only by a selected node: a dependency dragged in by
-		// the closure is a health gate even when it shares a source with a
-		// pinned sibling, or when its own source is managed only by another
-		// Wavefront — and must never register a poll Target or fire
-		// UnsupportedRefStyle for a source this Wavefront has no selected
-		// interest in (WP2 review finding).
-		if node.SourceRef != nil && p.selected[ref] {
-			rs, err := r.resolveSource(ctx, p, *node.SourceRef)
-			if err != nil {
-				return err
-			}
-
-			if rs.state != nil {
-				input.Role, input.Source = engine.RolePinned, rs.state
-				// Nodes are walked in compareRefs order above, so each
-				// source's slice accumulates already sorted.
-				p.nodeBySource[*node.SourceRef] = append(p.nodeBySource[*node.SourceRef], ref)
-				// A source can be both hand-pinned and suspended at once;
-				// HandPin wins because it names an actor and Suspend does
-				// not (decision D-B, finding 7).
-				switch {
-				case rs.state.Held:
-					p.holds[*node.SourceRef] = hold{manager: rs.state.HeldBy, kind: holdHandPin}
-				case rs.state.Suspended:
-					p.holds[*node.SourceRef] = hold{kind: holdSuspend}
-				}
-			}
-		}
-
-		p.inputs[ref] = input
-	}
-
-	// A dependency that does not exist can never be Ready, so it evaluates as
-	// an unhealthy gate rather than being silently omitted.
-	for ref := range p.missing {
-		p.inputs[ref] = engine.NodeInput{Ref: ref, Role: engine.RoleGate}
-	}
-
-	p.resolved = true
-	return nil
-}
-
-// resolveSource returns src's memoized resolution (decision D-A, WP2). Only
-// called for a selected node (the caller's guard): the first selected node
-// to reference a GitRepository triggers resolveSourceOnce; every later
-// selected referencing node in this pass reuses the result without a second
-// read, a second trackingRef resolution, or a second UnsupportedRefStyle
-// event. A source referenced only by non-selected (dependency-closure) nodes
-// is never resolved at all, and registers no poll Target.
-func (r *WavefrontReconciler) resolveSource(ctx context.Context, p *pass, src types.NamespacedName) (*resolvedSource, error) {
-	if rs, done := p.resolvedSources[src]; done {
-		return rs, nil
-	}
-
-	rs, err := r.resolveSourceOnce(ctx, p, src)
-	if err != nil {
-		return nil, err
-	}
-	p.resolvedSources[src] = rs
-	return rs, nil
-}
-
-// resolveSourceOnce reads one GitRepository. It returns a zero-value
-// resolvedSource — nil state, nil target — for every gate source: absent,
-// unmanaged, or a ref style v1 cannot sequence (DESIGN D10), which is what
-// the engine requires of a gate.
-func (r *WavefrontReconciler) resolveSourceOnce(ctx context.Context, p *pass, src types.NamespacedName) (*resolvedSource, error) {
-	repo := &sourcev1.GitRepository{}
-	if err := r.Get(ctx, src, repo); err != nil {
-		if apierrors.IsNotFound(err) {
-			return &resolvedSource{}, nil
-		}
-		return nil, fmt.Errorf("getting GitRepository %s: %w", src, err)
-	}
-	p.repos[src] = repo
-
-	// Opted in by the catalog's participation label (DESIGN §8.2); the
-	// per-node selected check is applied by the caller.
-	if repo.Labels[pin.ManagedLabel] != managedOptIn {
-		return &resolvedSource{}, nil
-	}
-
-	trackingRef, err := r.Strategy.TrackingRef(repo.Spec.Reference)
-	if err != nil {
-		if errors.Is(err, selection.ErrUnsupportedRef) {
-			r.event(p.wf, corev1.EventTypeWarning, reasonUnsupportedRefStyle,
-				"%s tracks a ref style this version cannot sequence; every referencing node demoted to a gate", src)
-			return &resolvedSource{}, nil
-		}
-		return nil, fmt.Errorf("resolving tracking ref of %s: %w", src, err)
-	}
-
-	manager, held := pin.Hold(repo)
-	state := &engine.SourceState{
-		Source:       src,
-		TrackingRef:  trackingRef,
-		Pin:          currentPin(repo),
-		Held:         held,
-		HeldBy:       manager,
-		Suspended:    repo.Spec.Suspend,
-		ArtifactSHA:  artifactSHA(repo),
-		FetchFailing: conditions.IsTrue(repo, sourcev1.FetchFailedCondition),
-	}
-	// p.observations was snapshotted before updatePollSet/SetTargets prunes
-	// records whose plumbing no longer matches (evaluate calls
-	// Poller.Observations() ahead of updatePollSet), so a record for the
-	// GitRepository's *previous* URL or tracking ref can still be present
-	// here. Presence alone is not enough: verify it against the plumbing just
-	// resolved, or a one-pass window lets an edit's old SHA get pinned under
-	// the new ref (DESIGN §3.1, "no stale candidate can survive a plumbing
-	// change").
-	if observation, ok := p.observations[src]; ok && observedCurrentPlumbing(observation, repo.Spec.URL, trackingRef) {
-		state.ObservedSHA, state.FirstObserved = observation.SHA, observation.FirstObserved
-	}
-
-	target := &gitpoll.Target{
-		Source:      src,
-		URL:         repo.Spec.URL,
-		TrackingRef: trackingRef,
-	}
-	if repo.Spec.SecretRef != nil {
-		target.SecretRef = &types.NamespacedName{Namespace: repo.Namespace, Name: repo.Spec.SecretRef.Name}
-	}
-	// Once per source (WP2): every other referencing node reuses this same
-	// Target via p.resolvedSources rather than appending a duplicate.
-	p.targets = append(p.targets, *target)
-
-	return &resolvedSource{state: state, target: target}, nil
-}
-
-// observedCurrentPlumbing reports whether obs was observed against exactly
-// the plumbing now in effect: a URL change carries the same one-pass stale
-// window as a tracking-ref change, so both are checked (DESIGN §3.1).
-func observedCurrentPlumbing(obs gitpoll.Observation, url, trackingRef string) bool {
-	return obs.URL == url && obs.TrackingRef == trackingRef
 }
 
 // updatePollSet implements step 5. The Poller is shared fleet-wide, so this
 // Wavefront's contribution is merged with every other live Wavefront's and the
 // sets of deleted Wavefronts are dropped.
-func (r *WavefrontReconciler) updatePollSet(p *pass, all *wavefrontv1alpha1.WavefrontList) {
+func (r *WavefrontReconciler) updatePollSet(
+	wf *wavefrontv1alpha1.Wavefront,
+	targets []gitpoll.Target,
+	all *wavefrontv1alpha1.WavefrontList,
+) {
 	live := make(map[string]bool, len(all.Items))
 	for i := range all.Items {
 		live[all.Items[i].Name] = true
@@ -567,10 +248,10 @@ func (r *WavefrontReconciler) updatePollSet(p *pass, all *wavefrontv1alpha1.Wave
 	if r.pollSets == nil {
 		r.pollSets = map[string]pollSet{}
 	}
-	r.pollSets[p.wf.Name] = pollSet{
-		interval:           pollInterval(p.wf),
-		perHostConcurrency: perHostConcurrency(p.wf),
-		targets:            p.targets,
+	r.pollSets[wf.Name] = pollSet{
+		interval:           pollInterval(wf),
+		perHostConcurrency: perHostConcurrency(wf),
+		targets:            targets,
 	}
 	maps.DeleteFunc(r.pollSets, func(name string, _ pollSet) bool { return !live[name] })
 
@@ -633,37 +314,12 @@ func unionOf(sets map[string]pollSet) []gitpoll.Target {
 	})
 }
 
-// derive implements step 6: the dependsOn DAG and one full evaluation over it.
-func (r *WavefrontReconciler) derive(p *pass) {
-	edges := make(map[adapter.NodeRef][]adapter.NodeRef, len(p.nodes)+len(p.missing))
-	for ref, node := range p.nodes {
-		edges[ref] = node.DependsOn
-	}
-	for ref := range p.missing {
-		edges[ref] = nil
-	}
-
-	p.graph = graph.Build(edges)
-	p.graphChecked = true
-
-	// A cycle would deadlock Flux itself; it is surfaced rather than admitted
-	// into (DESIGN §3.2). Nodes outside the cyclic component keep advancing —
-	// the engine excludes only the component itself.
-	if cycles := p.graph.Cycles(); len(cycles) > 0 && p.graphValid {
-		p.graphValid = false
-		p.graphReason = wavefrontv1alpha1.GraphValidReasonCyclesDetected
-		p.graphMessage = "dependsOn cycle: " + strings.Join(refStrings(cycles[0]), " -> ")
-	}
-
-	p.eval = engine.Evaluate(p.graph, p.inputs)
-}
-
 // execute implements step 7: initial pins first, then ancestor-gated
 // admissions, in the engine's deterministic order. No per-source dedup is
 // needed here: the engine emits at most one admission per Source across
 // Admissions and Initial combined (WP2, gateSharedSources).
 func (r *WavefrontReconciler) execute(ctx context.Context, p *pass) error {
-	admissions := slices.Concat(p.eval.Initial, p.eval.Admissions)
+	admissions := slices.Concat(p.res.Eval.Initial, p.res.Eval.Admissions)
 
 	// item 5: the old len(admissions)==0 shortcut ran before skipAdmissions,
 	// Suspend and the mode switch alike, so it would also have skipped an
@@ -677,7 +333,7 @@ func (r *WavefrontReconciler) execute(ctx context.Context, p *pass) error {
 	// return before either branch, leaving the ledger exactly as they found
 	// it (DESIGN §4.1).
 	switch {
-	case p.skipAdmissions:
+	case p.res.SkipAdmissions():
 		return nil
 	case p.wf.Spec.Suspend:
 		// The gentle fleet-level brake: writes freeze, visibility persists
@@ -732,7 +388,7 @@ func (r *WavefrontReconciler) shadowAdmissions(p *pass, admissions []engine.Admi
 	slices.SortFunc(current, func(a, b wavefrontv1alpha1.ShadowAdmission) int {
 		return cmp.Compare(a.Source, b.Source)
 	})
-	current = capped(current)
+	current = inputs.Capped(current)
 
 	currentMap := make(map[string]string, len(current))
 	for _, sa := range current {
@@ -765,7 +421,7 @@ func (r *WavefrontReconciler) advance(ctx context.Context, p *pass, admission en
 	// suspended source at all (finding 7), so this lookup should never match
 	// in practice. It stays as the controller's own backstop against that
 	// invariant.
-	if _, held := p.holds[admission.Source]; held {
+	if _, held := p.res.Holds[admission.Source]; held {
 		return nil
 	}
 
@@ -776,7 +432,7 @@ func (r *WavefrontReconciler) advance(ctx context.Context, p *pass, admission en
 		r.pinEvent(p, admission)
 		return nil
 	case errors.Is(err, pin.ErrHeld):
-		p.holds[admission.Source] = hold{manager: r.holderOf(ctx, admission.Source), kind: holdHandPin}
+		p.res.Holds[admission.Source] = inputs.Hold{Manager: r.holderOf(ctx, admission.Source), Kind: inputs.HoldHandPin}
 		r.Metrics.Wavefront(p.wf.Name).CountAdmission(resultConflict)
 		return nil
 	default:
@@ -811,7 +467,7 @@ func (r *WavefrontReconciler) pinEvent(p *pass, admission engine.Admission) {
 			admission.Source, admission.To, admission.ObservedRef)
 	}
 
-	if repo, ok := p.repos[admission.Source]; ok {
+	if repo, ok := p.res.Repos[admission.Source]; ok {
 		r.event(repo, corev1.EventTypeNormal, reason, "%s", message)
 	}
 	r.event(p.wf, corev1.EventTypeNormal, reason, "%s", message)
@@ -844,58 +500,59 @@ func diffLedger[V comparable](previous, current map[string]V, onNew, onGone func
 // ledger the hold transitions are edge-triggered against, which keeps the
 // evaluation itself stateless.
 //
-// Events mirror the capped ledger (decision D-C), not the unbounded p.holds:
-// current is built by heldSources, the exact same capped, source-sorted list
-// summariseNodes writes to status.Held. Beyond StatusListCap a hold is
-// counted (status.Nodes.Held, DESIGN §4.1) but not individually announced
-// until a released slot promotes it into the cap — late but exactly once,
-// never on every reconcile.
+// Events mirror the capped ledger (decision D-C), not the unbounded derived
+// hold set: current is built by inputs.HeldSources, the exact same capped,
+// source-sorted list summariseNodes writes to status.Held. Beyond
+// StatusListCap a hold is counted (status.Nodes.Held, DESIGN §4.1) but not
+// individually announced until a released slot promotes it into the cap —
+// late but exactly once, never on every reconcile.
 func (r *WavefrontReconciler) holdEvents(p *pass) {
-	if !p.resolved {
+	if !p.resolved() {
 		// An aborted pass proves nothing about holds; claiming release would
 		// be a lie the next pass has to undo.
 		return
 	}
 
-	previous := make(map[string]hold, len(p.wf.Status.Held))
+	previous := make(map[string]inputs.Hold, len(p.wf.Status.Held))
 	for _, held := range p.wf.Status.Held {
 		// An empty Reason is status written by a pre-upgrade controller
 		// (field-manager holds only, R9): treat it as HandPin rather than
 		// as a spurious kind change against an unchanged hold.
-		kind := holdKind(held.Reason)
+		kind := inputs.HoldKind(held.Reason)
 		if kind == "" {
-			kind = holdHandPin
+			kind = inputs.HoldHandPin
 		}
-		previous[held.Source] = hold{manager: held.Manager, kind: kind}
+		previous[held.Source] = inputs.Hold{Manager: held.Manager, Kind: kind}
 	}
 
-	current := make(map[string]hold, len(p.holds))
-	for _, h := range heldSources(p) {
-		current[h.Source] = hold{manager: h.Manager, kind: holdKind(h.Reason)}
+	held := inputs.HeldSources(p.res)
+	current := make(map[string]inputs.Hold, len(held))
+	for _, h := range held {
+		current[h.Source] = inputs.Hold{Manager: h.Manager, Kind: inputs.HoldKind(h.Reason)}
 	}
 
 	// Diffed on value (kind+manager) equality, not key presence: a kind or
 	// manager change on the same source (e.g. Suspend -> HandPin) is a
 	// release of the old hold and a detect of the new one in the same pass.
 	diffLedger(previous, current,
-		func(src string, h hold) {
-			switch h.kind {
-			case holdSuspend:
+		func(src string, h inputs.Hold) {
+			switch h.Kind {
+			case inputs.HoldSuspend:
 				r.event(p.wf, corev1.EventTypeWarning, reasonHoldDetected,
 					"source %s is suspended; not advancing", src)
 			default:
 				r.event(p.wf, corev1.EventTypeWarning, reasonHoldDetected,
-					"pin of %s is held by field manager %q; not advancing", src, h.manager)
+					"pin of %s is held by field manager %q; not advancing", src, h.Manager)
 			}
 		},
-		func(src string, h hold) {
-			switch h.kind {
-			case holdSuspend:
+		func(src string, h inputs.Hold) {
+			switch h.Kind {
+			case inputs.HoldSuspend:
 				r.event(p.wf, corev1.EventTypeNormal, reasonHoldReleased,
 					"suspension of %s lifted", src)
 			default:
 				r.event(p.wf, corev1.EventTypeNormal, reasonHoldReleased,
-					"hold on %s released by %q", src, h.manager)
+					"hold on %s released by %q", src, h.Manager)
 			}
 		})
 }
@@ -913,8 +570,9 @@ func (r *WavefrontReconciler) holdEvents(p *pass) {
 // unlike status, are live measurements rather than a last-known-good record:
 // they are retired instead, per findings #7/#8 (see summariseNodes).
 func (r *WavefrontReconciler) summarise(p *pass, passErr error) {
-	if p.resolved {
+	if p.resolved() {
 		r.summariseNodes(p)
+		r.stampEvaluated(p.wf)
 	} else {
 		// An aborted pass can prove nothing about the fleet: its gauges are
 		// live measurements, so they go absent rather than freezing at a
@@ -940,38 +598,57 @@ func (r *WavefrontReconciler) summarise(p *pass, passErr error) {
 	// GraphValid is republished only when the pass actually reached a verdict:
 	// an abort before derivation must not overwrite a known SelectorOverlap or
 	// CyclesDetected with an unproven True.
-	if !p.graphChecked {
+	if p.res == nil || !p.res.GraphChecked {
 		return
 	}
 
+	verdict := p.res.GraphVerdict()
 	graphValid := metav1.Condition{
 		Type:               wavefrontv1alpha1.ConditionGraphValid,
 		Status:             metav1.ConditionTrue,
-		Reason:             wavefrontv1alpha1.GraphValidReasonValid,
-		Message:            "no dependsOn cycles and no selector overlap",
+		Reason:             verdict.Reason,
+		Message:            verdict.Message,
 		ObservedGeneration: p.wf.Generation,
 	}
-	if !p.graphValid {
+	if !verdict.Valid {
 		graphValid.Status = metav1.ConditionFalse
-		graphValid.Reason, graphValid.Message = p.graphReason, p.graphMessage
 	}
 	apimeta.SetStatusCondition(&p.wf.Status.Conditions, graphValid)
 }
 
-// summariseNodes derives the fleet counts, exceptional-state lists and phase
-// from a completed evaluation, and recomputes the pin-lag, blocked-nodes and
-// pinned-fetch-failures gauges wholesale (DESIGN §6): retire this Wavefront's
-// series, then set, so a node that dropped out of the fleet since the last
-// pass does not linger.
+// stampEvaluated advances status.lastEvaluated at most once per poll interval.
+//
+// Every pass re-derives the same picture (DESIGN D9), so a per-pass timestamp
+// would rewrite status — and wake every watcher of it — on every
+// watch-triggered reconcile while nothing about the fleet had changed. The
+// interval the user asked to be polled at is exactly the freshness they asked
+// for, so it bounds the rewrite rate too. It is written for readers (a CLI
+// judging whether status is stale, DESIGN §4.1); the reconciler never reads it
+// back for a decision of its own.
+func (r *WavefrontReconciler) stampEvaluated(wf *wavefrontv1alpha1.Wavefront) {
+	now := r.Clock()
+	if last := wf.Status.LastEvaluated; last != nil && now.Sub(last.Time) < pollInterval(wf) {
+		return
+	}
+	stamped := metav1.NewTime(now)
+	wf.Status.LastEvaluated = &stamped
+}
+
+// summariseNodes publishes one resolved pass: the derived counts, lists,
+// members and phase (all of them inputs.Summarise's, so a CLI re-deriving
+// from the same reads reports the same numbers), and the pin-lag,
+// blocked-nodes and pinned-fetch-failures gauges recomputed wholesale
+// (DESIGN §6): retire this Wavefront's series, then set, so a node that
+// dropped out of the fleet since the last pass does not linger.
 //
 // The retirement is DeletePartialMatch on this Wavefront's own label, never
 // Reset(): Wavefronts are cluster-scoped and several may be co-resident, and
 // a Reset would erase a *sibling's* pin-lag series until its next pass — and
 // pin staleness is a D4 safety alarm that must not blink out.
 //
-// The gauges are published only when p.graphValid: a selector overlap or a
-// dependsOn cycle (findings #7/#8) means this pass's counts are not
-// authoritative for occupancy — the very node driving them may be
+// The gauges are published only when the graph verdict is valid: a selector
+// overlap or a dependsOn cycle (findings #7/#8) means this pass's counts are
+// not authoritative for occupancy — the very node driving them may be
 // double-counted against another Wavefront's pass — so publishing them
 // would let the fleet gauges lie even while status.Nodes, below, stays live
 // (overlap is not an abort; the counts are still the best available picture
@@ -981,90 +658,32 @@ func (r *WavefrontReconciler) summariseNodes(p *pass) {
 	status := &p.wf.Status
 	scope := r.Metrics.Wavefront(p.wf.Name)
 	scope.Retire()
-	publish := p.graphValid // overlap/cycles: status stays live, gauges suppressed
+	publish := p.res.GraphVerdict().Valid // overlap/cycles: status stays live, gauges suppressed
 
-	counts := wavefrontv1alpha1.NodeCounts{}
-	fetchFailures := 0
-	for _, input := range p.inputs {
-		counts.Observed++
-		if input.Role != engine.RolePinned {
-			counts.Gates++
-			continue
-		}
-		counts.Pinned++
-		if input.Source != nil && input.Source.FetchFailing {
-			fetchFailures++
-		}
-	}
-	if publish {
-		scope.SetPinnedFetchFailures(fetchFailures)
-	}
+	now := r.Clock()
+	summary := inputs.Summarise(p.res, now)
 
-	blockedByReason := map[engine.BlockedReason]int{}
-	blocked := make([]wavefrontv1alpha1.BlockedNode, 0, len(p.eval.Nodes))
-	stalled := false
-	for ref, result := range p.eval.Nodes {
-		switch result.State {
-		case engine.StatePending, engine.StateAdmissible:
-			counts.Pending++
-		case engine.StateConverging:
-			counts.Converging++
-		}
-		if !result.PendingSince.IsZero() && publish {
-			scope.SetPinLag(ref.Kind, ref.Namespace, ref.Name, r.Clock().Sub(result.PendingSince).Seconds())
-		}
-		if result.Blocked == nil {
-			continue
-		}
-		counts.Blocked++
-		blockedByReason[result.Blocked.Reason]++
-		stalled = stalled || blocking(result.Blocked.Reason)
-		blocked = append(blocked, blockedNode(ref, result, r.Clock))
-	}
 	if publish {
-		for reason, count := range blockedByReason {
+		scope.SetPinnedFetchFailures(summary.FetchFailures)
+		for ref, result := range p.res.Eval.Nodes {
+			if result.PendingSince.IsZero() {
+				continue
+			}
+			scope.SetPinLag(ref.Kind, ref.Namespace, ref.Name, now.Sub(result.PendingSince).Seconds())
+		}
+		// The by-reason tallies are uncapped, unlike status.Blocked: a gauge
+		// counts every blocked node, not just the ones that fit the list.
+		for reason, count := range summary.BlockedByReason {
 			scope.SetBlocked(string(reason), count)
 		}
 	}
-	// p.holds now covers both hand-pins and suspends, so this matches the
-	// engine's own NodeResult.Held semantics (finding 7) rather than
-	// undercounting suspended sources.
-	counts.Held = len(p.holds)
 
-	slices.SortFunc(blocked, func(a, b wavefrontv1alpha1.BlockedNode) int {
-		return cmp.Compare(nodeKey(a.Node), nodeKey(b.Node))
-	})
-
-	status.Nodes = counts
-	status.Blocked = capped(blocked)
-	status.Held = heldSources(p)
-	status.Phase = phaseOf(counts, len(p.eval.Admissions)+len(p.eval.Initial), stalled)
-}
-
-// heldSources builds the capped, source-sorted hold ledger from p.holds
-// (decision D-C). summariseNodes writes this exact list to status.Held and
-// holdEvents diffs the current side of its edge-trigger against it, so the
-// ledger written and the ledger diffed are byte-identical: a source beyond
-// StatusListCap is counted in status.Nodes.Held but neither listed in
-// status.Held nor announced by an event until a freed slot promotes it into
-// the cap.
-func heldSources(p *pass) []wavefrontv1alpha1.HeldNode {
-	held := make([]wavefrontv1alpha1.HeldNode, 0, len(p.holds))
-	for src, h := range p.holds {
-		// A held source shared by more than one node (WP2) is attributed to
-		// the first referencing node in compareRefs order — deterministic,
-		// not an arbitrary map read.
-		held = append(held, wavefrontv1alpha1.HeldNode{
-			Node:    nodeReference(p.nodeBySource[src][0]),
-			Source:  src.String(),
-			Manager: h.manager,
-			Reason:  string(h.kind),
-		})
-	}
-	slices.SortFunc(held, func(a, b wavefrontv1alpha1.HeldNode) int {
-		return cmp.Compare(a.Source, b.Source)
-	})
-	return capped(held)
+	status.Nodes = summary.Counts
+	status.Blocked = summary.Blocked
+	status.Held = summary.Held
+	status.Members = summary.Members
+	status.MembersOmitted = summary.MembersOmitted
+	status.Phase = summary.Phase
 }
 
 // SetupWithManager wires the controller into the manager. The Flux watches
@@ -1096,109 +715,6 @@ func (r *WavefrontReconciler) mapToWavefronts(ctx context.Context, _ client.Obje
 		})
 	}
 	return requests
-}
-
-// phaseOf summarises the fleet (DESIGN §4.1).
-func phaseOf(counts wavefrontv1alpha1.NodeCounts, admissions int, stalled bool) wavefrontv1alpha1.Phase {
-	switch {
-	case stalled:
-		return wavefrontv1alpha1.PhaseBlocked
-	case counts.Pending+counts.Converging+admissions > 0:
-		return wavefrontv1alpha1.PhaseAdvancing
-	default:
-		return wavefrontv1alpha1.PhaseQuiescent
-	}
-}
-
-// blocking reports the reasons that make the fleet Blocked rather than merely
-// Advancing: something is wrong, or someone must act.
-func blocking(reason engine.BlockedReason) bool {
-	switch reason {
-	case engine.ReasonAncestorUnhealthy, engine.ReasonAncestorHeld,
-		engine.ReasonSelfHeld, engine.ReasonGraphCycle:
-		return true
-	case engine.ReasonSharedSourceBlocked:
-		// The blocking sibling already reports the actionable reason;
-		// counting both would double-blame one root cause.
-		return false
-	default:
-		return false
-	}
-}
-
-func blockedNode(
-	ref adapter.NodeRef,
-	result engine.NodeResult,
-	now func() time.Time,
-) wavefrontv1alpha1.BlockedNode {
-	// status.blocked[].since is a required date-time: a zero PendingSince would
-	// serialise as null and have the whole status update rejected. Every
-	// pending node has an observation and therefore a first-observed time, so
-	// this only ever guards against an unforeseen combination.
-	since := result.PendingSince
-	if since.IsZero() {
-		since = now()
-	}
-
-	entry := wavefrontv1alpha1.BlockedNode{
-		Node:   nodeReference(ref),
-		Since:  metav1.NewTime(since),
-		Reason: string(result.Blocked.Reason),
-	}
-	if result.Blocked.Ancestor != (adapter.NodeRef{}) {
-		ancestor := nodeReference(result.Blocked.Ancestor)
-		entry.Ancestor = &ancestor
-	}
-	return entry
-}
-
-func nodeReference(ref adapter.NodeRef) wavefrontv1alpha1.NodeReference {
-	return wavefrontv1alpha1.NodeReference{Kind: ref.Kind, Namespace: ref.Namespace, Name: ref.Name}
-}
-
-func nodeKey(ref wavefrontv1alpha1.NodeReference) string {
-	return fmt.Sprintf("%s/%s/%s", ref.Kind, ref.Namespace, ref.Name)
-}
-
-// capped bounds an exceptional-state list; the counts stay authoritative
-// (DESIGN §4.1).
-func capped[T any](list []T) []T {
-	if len(list) > wavefrontv1alpha1.StatusListCap {
-		return list[:wavefrontv1alpha1.StatusListCap]
-	}
-	if len(list) == 0 {
-		return nil
-	}
-	return list
-}
-
-func compareRefs(a, b adapter.NodeRef) int {
-	return cmp.Compare(a.String(), b.String())
-}
-
-func refStrings(refs []adapter.NodeRef) []string {
-	out := make([]string, 0, len(refs))
-	for _, ref := range refs {
-		out = append(out, ref.String())
-	}
-	return out
-}
-
-// currentPin reads spec.ref.commit, "" when unpinned.
-func currentPin(repo *sourcev1.GitRepository) string {
-	if repo.Spec.Reference == nil {
-		return ""
-	}
-	return repo.Spec.Reference.Commit
-}
-
-// artifactSHA extracts the commit of the last successful reconciliation, which
-// is what an initial pin bootstraps from (DESIGN §3.5.4).
-func artifactSHA(repo *sourcev1.GitRepository) string {
-	if repo.Status.Artifact == nil {
-		return ""
-	}
-	return git.ExtractHashFromRevision(repo.Status.Artifact.Revision).String()
 }
 
 // previousPin renders an admission's outgoing pin for human-readable events.

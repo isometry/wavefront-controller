@@ -54,8 +54,10 @@ const (
 	mainRef    = "refs/heads/main"
 	releaseRef = "refs/heads/release"
 
-	// flotilla is the conventional pinned-node name across scenarios.
+	// flotilla is the conventional pinned-node name across scenarios, gateNode
+	// the conventional health-only one.
 	flotilla = "flotilla"
+	gateNode = "gate"
 
 	shaA    = "1111111111111111111111111111111111111111"
 	shaB    = "2222222222222222222222222222222222222222"
@@ -182,6 +184,13 @@ func setArtifact(repo *sourcev1.GitRepository, revision string) {
 // fast enough for a test to observe advancement.
 func makeWavefront(name, scenario string, mode wavefrontv1alpha1.Mode) {
 	GinkgoHelper()
+	makeWavefrontPolling(name, scenario, mode, testPollInterval)
+}
+
+// makeWavefrontPolling is makeWavefront with an explicit poll interval, for the
+// specs that care about what the interval rate-limits.
+func makeWavefrontPolling(name, scenario string, mode wavefrontv1alpha1.Mode, interval time.Duration) {
+	GinkgoHelper()
 	wf := &wavefrontv1alpha1.Wavefront{
 		ObjectMeta: metav1.ObjectMeta{Name: name},
 		Spec: wavefrontv1alpha1.WavefrontSpec{
@@ -191,7 +200,7 @@ func makeWavefront(name, scenario string, mode wavefrontv1alpha1.Mode) {
 			},
 			Mode: mode,
 			Poll: wavefrontv1alpha1.PollSpec{
-				Interval:           metav1.Duration{Duration: testPollInterval},
+				Interval:           metav1.Duration{Duration: interval},
 				PerHostConcurrency: 4,
 			},
 		},
@@ -224,6 +233,16 @@ func pinOf(ns, name string) string {
 		return ""
 	}
 	return repo.Spec.Reference.Commit
+}
+
+// memberOf returns the named node's entry in status.members, nil when absent.
+func memberOf(wf *wavefrontv1alpha1.Wavefront, name string) *wavefrontv1alpha1.Member {
+	for i := range wf.Status.Members {
+		if wf.Status.Members[i].Node.Name == name {
+			return &wf.Status.Members[i]
+		}
+	}
+	return nil
 }
 
 func conditionOf(wf *wavefrontv1alpha1.Wavefront, conditionType string) *metav1.Condition {
@@ -309,19 +328,19 @@ var _ = Describe("Wavefront reconciler", func() {
 			const ns, scenario = "rolling-gate", "rolling-gate"
 			makeNamespace(ns)
 
-			gateURL := repoURLFor(ns, "gate")
-			makeGitRepo(ns, "gate", gateURL, mainRef, false)
+			gateURL := repoURLFor(ns, gateNode)
+			makeGitRepo(ns, gateNode, gateURL, mainRef, false)
 			// The gate is deliberately unlabelled: it must be discovered by the
 			// dependsOn transitive closure, not by the selector.
-			gate := makeKustomization(ns, "gate",
-				types.NamespacedName{Namespace: ns, Name: "gate"}, nil, nil)
+			gate := makeKustomization(ns, gateNode,
+				types.NamespacedName{Namespace: ns, Name: gateNode}, nil, nil)
 
 			url := repoURLFor(ns, flotilla)
 			lister.advertise(url, mainRef, shaA)
 			repo := makeGitRepo(ns, flotilla, url, mainRef, true)
 			setArtifact(repo, revisionOf(shaA))
 			flotillaKS := makeKustomization(ns, flotilla,
-				types.NamespacedName{Namespace: ns, Name: flotilla}, []string{"gate"},
+				types.NamespacedName{Namespace: ns, Name: flotilla}, []string{gateNode},
 				map[string]string{scenarioLabel: scenario})
 
 			makeWavefront("wf-rolling-gate", scenario, wavefrontv1alpha1.ModeEnforce)
@@ -340,8 +359,41 @@ var _ = Describe("Wavefront reconciler", func() {
 			Expect(wf.Status.Blocked[0].Node.Name).To(Equal(flotilla))
 			Expect(wf.Status.Blocked[0].Reason).To(Equal(string(engine.ReasonAncestorUnhealthy)))
 			Expect(wf.Status.Blocked[0].Ancestor).NotTo(BeNil())
-			Expect(wf.Status.Blocked[0].Ancestor.Name).To(Equal("gate"))
+			Expect(wf.Status.Blocked[0].Ancestor.Name).To(Equal(gateNode))
 			Expect(wf.Status.Phase).To(Equal(wavefrontv1alpha1.PhaseBlocked))
+
+			By("explaining the whole blocked subtree in status.members")
+			// status.members is written in the same patch as status.blocked, so
+			// the fleet picture above is the one being read here.
+			Expect(wf.Status.Members).To(HaveLen(2), "the pinned node and the gate it waits on")
+			Expect(wf.Status.MembersOmitted).To(BeZero())
+
+			member := memberOf(wf, flotilla)
+			Expect(member).NotTo(BeNil())
+			Expect(member.Role).To(Equal(string(engine.RolePinned)))
+			Expect(member.State).To(Equal(string(engine.StatePending)))
+			Expect(member.Source).To(Equal(ns + "/" + flotilla))
+			Expect(member.Pin).To(Equal(shaA))
+			Expect(member.ObservedSHA).To(Equal(shaB))
+			Expect(member.Held).To(BeFalse())
+			Expect(member.PendingSince).NotTo(BeNil())
+			Expect(member.Blocked).NotTo(BeNil())
+			Expect(member.Blocked.Reason).To(Equal(string(engine.ReasonAncestorUnhealthy)))
+			Expect(member.Blocked.Ancestor).NotTo(BeNil())
+			Expect(member.Blocked.Ancestor.Name).To(Equal(gateNode))
+			// The graph edges travel with status, so a reader needs no second
+			// pass over the cluster to explain the block.
+			Expect(member.DependsOn).To(ConsistOf(wavefrontv1alpha1.NodeReference{
+				Kind: kindKustomization, Namespace: ns, Name: gateNode,
+			}))
+
+			gateMember := memberOf(wf, gateNode)
+			Expect(gateMember).NotTo(BeNil())
+			Expect(gateMember.Role).To(Equal(string(engine.RoleGate)))
+			Expect(gateMember.State).To(Equal(string(engine.StateUnhealthy)))
+			Expect(gateMember.Ready).To(BeFalse())
+			Expect(gateMember.Source).To(BeEmpty(), "a gate carries no managed source")
+			Expect(gateMember.Blocked).To(BeNil())
 
 			Consistently(func() string { return pinOf(ns, flotilla) }).Should(Equal(shaA))
 
@@ -546,6 +598,20 @@ var _ = Describe("Wavefront reconciler", func() {
 			Expect(wf.Status.Held[0].Source).To(Equal(ns + "/" + flotilla))
 			Expect(wf.Status.Held[0].Node.Name).To(Equal(flotilla))
 
+			By("reporting the hold on the node's own status.members entry")
+			member := memberOf(wf, flotilla)
+			Expect(member).NotTo(BeNil())
+			Expect(member.Role).To(Equal(string(engine.RolePinned)))
+			Expect(member.State).To(Equal(string(engine.StatePending)))
+			Expect(member.Held).To(BeTrue())
+			Expect(member.Pin).To(Equal(shaHand))
+			Expect(member.ObservedSHA).To(Equal(shaA))
+			Expect(member.Source).To(Equal(ns + "/" + flotilla))
+			Expect(member.DependsOn).To(BeEmpty())
+			Expect(member.Blocked).NotTo(BeNil())
+			Expect(member.Blocked.Reason).To(Equal(string(engine.ReasonSelfHeld)))
+			Expect(member.Blocked.Ancestor).To(BeNil(), "SelfHeld attributes no ancestor")
+
 			By("never advancing past the hand-pin")
 			lister.advertise(url, releaseRef, shaB)
 			Consistently(func() string { return pinOf(ns, flotilla) }).Should(Equal(shaHand))
@@ -615,7 +681,7 @@ var _ = Describe("Wavefront reconciler", func() {
 				return getWavefront("wf-suspend-hold").Status.Held
 			}).Should(HaveLen(1))
 			wf := getWavefront("wf-suspend-hold")
-			Expect(wf.Status.Held[0].Reason).To(Equal("Suspend"))
+			Expect(wf.Status.Held[0].Reason).To(Equal(wavefrontv1alpha1.HoldReasonSuspend))
 			Expect(wf.Status.Held[0].Manager).To(BeEmpty())
 			Expect(wf.Status.Held[0].Source).To(Equal(ns + "/" + flotilla))
 			Expect(wf.Status.Held[0].Node.Name).To(Equal(flotilla))
@@ -654,6 +720,57 @@ var _ = Describe("Wavefront reconciler", func() {
 			Eventually(func() []wavefrontv1alpha1.HeldNode {
 				return getWavefront("wf-suspend-hold").Status.Held
 			}).Should(BeEmpty())
+		})
+	})
+
+	Describe("evaluation timestamp", func() {
+		It("advances status.lastEvaluated at most once per poll interval", func() {
+			const ns, scenario = "last-evaluated", "last-evaluated"
+			// A poll interval far longer than the spec, so every reconcile
+			// below falls inside it.
+			const interval = 10 * time.Minute
+			makeNamespace(ns)
+
+			url := repoURLFor(ns, flotilla)
+			lister.advertise(url, mainRef, shaA)
+			repo := makeGitRepo(ns, flotilla, url, mainRef, true)
+			setArtifact(repo, revisionOf(shaA))
+			makeKustomization(ns, flotilla,
+				types.NamespacedName{Namespace: ns, Name: flotilla}, nil,
+				map[string]string{scenarioLabel: scenario})
+
+			// A gate, so its readiness can be flipped to witness a fresh pass
+			// without disturbing the pinned node.
+			makeGitRepo(ns, gateNode, repoURLFor(ns, gateNode), mainRef, false)
+			gate := makeKustomization(ns, gateNode,
+				types.NamespacedName{Namespace: ns, Name: gateNode}, nil,
+				map[string]string{scenarioLabel: scenario})
+
+			makeWavefrontPolling("wf-last-evaluated", scenario, wavefrontv1alpha1.ModeEnforce, interval)
+			// A co-resident Wavefront selecting nothing, at the suite's fast
+			// cadence: the Poller is shared and takes the tightest interval, and
+			// its post-sweep notify enqueues *every* Wavefront — so the slow one
+			// above reconciles many times a second throughout the window below.
+			makeWavefront("wf-last-evaluated-ticker", "last-evaluated-idle", wavefrontv1alpha1.ModeShadow)
+
+			By("stamping it on the first resolved pass")
+			Eventually(func() *metav1.Time {
+				return getWavefront("wf-last-evaluated").Status.LastEvaluated
+			}).ShouldNot(BeNil())
+			stamped := *getWavefront("wf-last-evaluated").Status.LastEvaluated
+
+			By("holding it steady across many reconciles inside the interval")
+			Consistently(func() metav1.Time {
+				return *getWavefront("wf-last-evaluated").Status.LastEvaluated
+			}).WithTimeout(3 * time.Second).Should(Equal(stamped))
+
+			By("proving those passes were re-deriving status all along")
+			setKustomizationReady(gate, "", true)
+			Eventually(func() bool {
+				member := memberOf(getWavefront("wf-last-evaluated"), gateNode)
+				return member != nil && member.Ready
+			}).Should(BeTrue())
+			Expect(*getWavefront("wf-last-evaluated").Status.LastEvaluated).To(Equal(stamped))
 		})
 	})
 
