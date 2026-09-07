@@ -78,8 +78,8 @@ var commitPath = fieldpath.MakePathOrDie("spec", "ref", "commit")
 
 // Owner is one managedFields entry that owns spec.ref.commit.
 type Owner struct {
-	Manager   string
-	Operation metav1.ManagedFieldsOperationType // Apply | Update
+	Manager   string                            `json:"manager"`
+	Operation metav1.ManagedFieldsOperationType `json:"operation"` // Apply | Update
 }
 
 // Owners lists every managedFields entry owning spec.ref.commit, in

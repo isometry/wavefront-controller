@@ -31,7 +31,11 @@ import (
 )
 
 // NodeRef identifies a node; Kind distinguishes future HelmRelease planes.
-type NodeRef struct{ Kind, Namespace, Name string }
+type NodeRef struct {
+	Kind      string `json:"kind"`
+	Namespace string `json:"namespace"`
+	Name      string `json:"name"`
+}
 
 // String renders the reference as "Kind/ns/name".
 func (r NodeRef) String() string {
