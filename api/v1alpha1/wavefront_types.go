@@ -153,7 +153,8 @@ type BlockedRef struct {
 	Ancestor *NodeReference `json:"ancestor,omitempty"`
 }
 
-// Member is one selected node's derived state for the last evaluation.
+// Member is one evaluated node's derived state for the last evaluation
+// (selected nodes and the gate nodes reached through dependsOn).
 // Write-only output: the reconciler never reads it back (DESIGN D9).
 type Member struct {
 	Node NodeReference `json:"node"`
@@ -192,7 +193,8 @@ type WavefrontStatus struct {
 	// +listMapKey=type
 	Conditions         []metav1.Condition `json:"conditions,omitempty"`
 	ObservedGeneration int64              `json:"observedGeneration,omitempty"`
-	// Members lists every selected node's derived state (sorted by kind/namespace/name),
+	// Members lists every evaluated node's derived state (selected nodes and the
+	// gate nodes reached through dependsOn), sorted by kind/namespace/name,
 	// capped at MembersCap; MembersOmitted counts the rest.
 	// +listType=atomic
 	// +optional

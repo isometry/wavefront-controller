@@ -34,6 +34,7 @@ import (
 
 	sourcev1 "github.com/fluxcd/source-controller/api/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -57,6 +58,14 @@ const (
 	AnnotPreviousPin = "wavefront.as-code.io/previous-pin"
 	// AnnotObservedRef records the tracking ref the admitted SHA came from.
 	AnnotObservedRef = "wavefront.as-code.io/observed-ref"
+
+	// WfctlFieldManager is the SSA field manager wfctl uses for hand-pins, so
+	// the controller reports them as external holds (DESIGN §3.5.3).
+	WfctlFieldManager = "wfctl"
+
+	// AnnotDisplacedPin records, on a wfctl hand-pin, the spec.ref.commit value
+	// the hand-pin displaced, so `wfctl release` can restore provenance.
+	AnnotDisplacedPin = "wavefront.as-code.io/displaced-pin"
 )
 
 // ErrHeld is returned when the SSA patch conflicts with a foreign field
@@ -67,6 +76,41 @@ var ErrHeld = errors.New("spec.ref.commit is held by another field manager")
 // FieldsV1 encoding this is the leaf f:spec.f:ref.f:commit.
 var commitPath = fieldpath.MakePathOrDie("spec", "ref", "commit")
 
+// Owner is one managedFields entry that owns spec.ref.commit.
+type Owner struct {
+	Manager   string
+	Operation metav1.ManagedFieldsOperationType // Apply | Update
+}
+
+// Owners lists every managedFields entry owning spec.ref.commit, in
+// managedFields order, skipping subresource entries and unparseable
+// FieldsV1 (same rules as Hold). Includes the controller's own entry.
+func Owners(repo *sourcev1.GitRepository) []Owner {
+	if repo == nil {
+		return nil
+	}
+
+	var owners []Owner
+	for _, entry := range repo.GetManagedFields() {
+		if entry.Subresource != "" || entry.FieldsV1 == nil {
+			continue
+		}
+
+		set := &fieldpath.Set{}
+		if err := set.FromJSON(entry.FieldsV1.GetRawReader()); err != nil {
+			// An unparseable entry cannot be shown to own the pin; treating
+			// it as an owner would wedge the node on apiserver malformation.
+			continue
+		}
+
+		if set.Has(commitPath) {
+			owners = append(owners, Owner{Manager: entry.Manager, Operation: entry.Operation})
+		}
+	}
+
+	return owners
+}
+
 // Hold inspects managedFields and reports a foreign owner of spec.ref.commit.
 //
 // Ownership by anyone other than FieldManager means the pin was set by hand
@@ -74,24 +118,9 @@ var commitPath = fieldpath.MakePathOrDie("spec", "ref", "commit")
 // than advance it. The first foreign owner encountered wins; entries for
 // subresources (status) cannot own spec and are skipped.
 func Hold(repo *sourcev1.GitRepository) (manager string, held bool) {
-	if repo == nil {
-		return "", false
-	}
-
-	for _, entry := range repo.GetManagedFields() {
-		if entry.Manager == FieldManager || entry.Subresource != "" || entry.FieldsV1 == nil {
-			continue
-		}
-
-		set := &fieldpath.Set{}
-		if err := set.FromJSON(entry.FieldsV1.GetRawReader()); err != nil {
-			// An unparseable entry cannot be shown to hold the pin; treating
-			// it as a hold would wedge the node on apiserver malformation.
-			continue
-		}
-
-		if set.Has(commitPath) {
-			return entry.Manager, true
+	for _, owner := range Owners(repo) {
+		if owner.Manager != FieldManager {
+			return owner.Manager, true
 		}
 	}
 
