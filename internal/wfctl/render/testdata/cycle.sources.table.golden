@@ -1,0 +1,4 @@
+SOURCE      PIN       OBSERVED   PENDING   HOLD   OWNERS                 ARTIFACT   ADMITTED   NODES
+sources/a   aaaa111   aaaa222    15m       -      wavefront-controller   aaaa111    120m       1
+sources/b   bbbb111   bbbb222    15m       -      wavefront-controller   bbbb111    120m       1
+sources/c   cccc111   cccc111    -         -      wavefront-controller   cccc111    120m       1

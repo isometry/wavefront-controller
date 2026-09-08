@@ -1,0 +1,4 @@
+NODE               ROLE     STATE     HELD    BLOCKED   ANCESTOR   SOURCE           PIN       OBSERVED   LAG   WAVE   READY   DEPENDS
+flotillas/infra    Pinned   Settled   false   -         -          sources/infra    aaaa111   aaaa111    -     0      true    -
+flotillas/team-a   Pinned   Settled   false   -         -          sources/team-a   bbbb111   bbbb111    -     1      true    flotillas/infra
+waves/gate         Gate     Settled   false   -         -          -                -         -          -     2      true    flotillas/team-a

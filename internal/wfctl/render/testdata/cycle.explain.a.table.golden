@@ -1,0 +1,5 @@
+flotillas/a is Pending: GraphCycle
+
+root cause: flotillas/a is Pending: GraphCycle
+  source: sources/a
+fix: break the dependsOn cycle. Nothing in a cyclic component is ever admitted (DESIGN §3.2); `wfctl graph` names the cycle.

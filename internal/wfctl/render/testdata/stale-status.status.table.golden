@@ -1,0 +1,23 @@
+NAME:             fleet
+MODE:             Enforce
+SUSPEND:          false
+GENERATION:       4
+ORIGIN:           status (replayed from file)
+CAPTURED:         2026-09-01T11:58:00Z (2m ago)
+LAST EVALUATED:   2026-09-01T11:28:00Z (32m ago)
+CLUSTER:          prod-eu (https://api.prod-eu.example.test)
+
+FIELD        VALUE
+PHASE        Quiescent
+GRAPHVALID   true
+OBSERVED     3
+PINNED       2
+GATES        1
+PENDING      0
+CONVERGING   0
+BLOCKED      0
+HELD         0
+
+DIAGNOSTICS (2)
+  - status may be stale: last evaluated 30m0s ago (budget 4m0s); the controller may be down; use --derive
+  - GitRepository sources/two is not readable: gitrepositories.source.toolkit.fluxcd.io "two" is forbidden; source detail degraded

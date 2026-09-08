@@ -1,0 +1,32 @@
+NAME:             fleet
+MODE:             Enforce
+SUSPEND:          false
+GENERATION:       4
+ORIGIN:           derive (replayed from file)
+CAPTURED:         2026-09-01T11:58:00Z (2m ago)
+LAST EVALUATED:   2026-09-01T11:58:00Z (2m ago)
+CLUSTER:          prod-eu (https://api.prod-eu.example.test)
+
+FIELD        REPORTED   DERIVED
+PHASE        Blocked    Blocked
+GRAPHVALID   true       true
+OBSERVED     3          3
+PINNED       3          3
+GATES        0          0
+PENDING      2          2
+CONVERGING   0          0
+BLOCKED      2          2
+HELD         0          0
+
+BLOCKED (2)
+NODE               REASON                ANCESTOR           SINCE
+flotillas/api      SharedSourceBlocked   flotillas/worker   14m
+flotillas/worker   AncestorUnhealthy     flotillas/db       14m
+
+BLOCKED (derived) (2)
+NODE               REASON                ANCESTOR           SINCE
+flotillas/api      SharedSourceBlocked   flotillas/worker   14m
+flotillas/worker   AncestorUnhealthy     flotillas/db       14m
+
+DIAGNOSTICS (0)
+  (none)

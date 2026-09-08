@@ -1,0 +1,4 @@
+NODE             ROLE     STATE       HELD    BLOCKED             ANCESTOR         SOURCE         PIN       OBSERVED   LAG   WAVE   READY   DEPENDS
+flotillas/leaf   Pinned   Pending     false   AncestorPending     flotillas/mid    sources/leaf   cccc111   cccc222    12m   2      true    flotillas/mid
+flotillas/mid    Pinned   Pending     false   AncestorUnhealthy   flotillas/root   sources/mid    bbbb111   bbbb222    10m   1      true    flotillas/root
+flotillas/root   Pinned   Unhealthy   false   -                   -                sources/root   aaaa111   aaaa111    -     0      false   -

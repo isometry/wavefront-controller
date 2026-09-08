@@ -1,0 +1,272 @@
+{
+  "apiVersion": "wfctl.wavefront.as-code.io/v1alpha1",
+  "kind": "Snapshot",
+  "origin": "derive",
+  "capturedAt": "2026-09-01T11:58:00Z",
+  "evaluated": "2026-09-01T11:58:00Z",
+  "cluster": {
+    "context": "prod-eu",
+    "server": "https://api.prod-eu.example.test",
+    "wfctlVersion": "v0.1.0"
+  },
+  "observed": false,
+  "wavefront": {
+    "name": "fleet",
+    "generation": 4,
+    "spec": {
+      "nodes": {
+        "kinds": [
+          "Kustomization"
+        ],
+        "selector": {
+          "matchLabels": {
+            "wavefront.as-code.io/managed": "true"
+          }
+        }
+      },
+      "mode": "Enforce",
+      "suspend": false,
+      "poll": {
+        "interval": "90s",
+        "perHostConcurrency": 4
+      }
+    },
+    "status": {
+      "phase": "Quiescent",
+      "nodes": {
+        "observed": 3,
+        "pinned": 3,
+        "gates": 0,
+        "pending": 0,
+        "converging": 0,
+        "blocked": 0,
+        "held": 0
+      },
+      "conditions": [
+        {
+          "type": "Ready",
+          "status": "True",
+          "reason": "Succeeded",
+          "message": "evaluated 3 nodes",
+          "lastTransitionTime": "2026-09-01T11:57:30Z",
+          "observedGeneration": 4
+        },
+        {
+          "type": "GraphValid",
+          "status": "True",
+          "reason": "Valid",
+          "message": "3 nodes, 2 edges",
+          "lastTransitionTime": "2026-09-01T11:57:30Z",
+          "observedGeneration": 4
+        }
+      ],
+      "observedGeneration": 4,
+      "lastEvaluated": "2026-09-01T11:57:30Z"
+    }
+  },
+  "nodes": [
+    {
+      "ref": {
+        "kind": "Kustomization",
+        "namespace": "flotillas",
+        "name": "app"
+      },
+      "role": "Pinned",
+      "state": "Converging",
+      "ready": true,
+      "wave": 1,
+      "source": "sources/app",
+      "pin": "bbbb111000000000000000000000000000000000",
+      "observedSHA": "",
+      "appliedSHA": "bbbb111000000000000000000000000000000000",
+      "dependsOn": [
+        {
+          "kind": "Kustomization",
+          "namespace": "flotillas",
+          "name": "infra"
+        },
+        {
+          "kind": "Kustomization",
+          "namespace": "waves",
+          "name": "absent-gate"
+        }
+      ]
+    },
+    {
+      "ref": {
+        "kind": "Kustomization",
+        "namespace": "flotillas",
+        "name": "edge"
+      },
+      "role": "Pinned",
+      "state": "Unhealthy",
+      "ready": false,
+      "wave": 0,
+      "failing": true,
+      "readyMessage": "Kustomization build failed: accumulating resources: missing kustomization.yaml",
+      "source": "sources/edge",
+      "pin": "cccc111000000000000000000000000000000000",
+      "observedSHA": ""
+    },
+    {
+      "ref": {
+        "kind": "Kustomization",
+        "namespace": "flotillas",
+        "name": "infra"
+      },
+      "role": "Pinned",
+      "state": "Converging",
+      "ready": true,
+      "wave": 0,
+      "source": "sources/infra",
+      "pin": "aaaa111000000000000000000000000000000000",
+      "observedSHA": "",
+      "appliedSHA": "aaaa111000000000000000000000000000000000"
+    }
+  ],
+  "sources": [
+    {
+      "name": "sources/app",
+      "url": "https://git.example.test/org/app.git",
+      "secretRefName": "git-credentials",
+      "trackingRef": "refs/heads/main",
+      "pin": "bbbb111000000000000000000000000000000000",
+      "artifactSHA": "bbbb111000000000000000000000000000000000",
+      "commitOwners": [
+        {
+          "manager": "wavefront-controller",
+          "operation": "Apply"
+        }
+      ],
+      "provenance": {
+        "wavefront.as-code.io/admitted-at": "2026-09-01T10:00:00Z",
+        "wavefront.as-code.io/previous-pin": "0000fff000000000000000000000000000000000",
+        "wavefront.as-code.io/observed-ref": "refs/heads/main"
+      },
+      "conditions": [
+        {
+          "type": "Ready",
+          "status": "True",
+          "reason": "Succeeded",
+          "message": "stored artifact for revision 'main@sha1:bbbb111000000000000000000000000000000000'",
+          "lastTransitionTime": "2026-09-01T10:00:02Z",
+          "observedGeneration": 4
+        }
+      ],
+      "observedSHA": "",
+      "firstObserved": null,
+      "nodes": [
+        {
+          "kind": "Kustomization",
+          "namespace": "flotillas",
+          "name": "app"
+        }
+      ]
+    },
+    {
+      "name": "sources/edge",
+      "url": "https://git.example.test/org/edge.git",
+      "secretRefName": "git-credentials",
+      "trackingRef": "refs/heads/main",
+      "pin": "cccc111000000000000000000000000000000000",
+      "artifactSHA": "cccc111000000000000000000000000000000000",
+      "commitOwners": [
+        {
+          "manager": "wavefront-controller",
+          "operation": "Apply"
+        }
+      ],
+      "provenance": {
+        "wavefront.as-code.io/admitted-at": "2026-09-01T10:00:00Z",
+        "wavefront.as-code.io/previous-pin": "0000fff000000000000000000000000000000000",
+        "wavefront.as-code.io/observed-ref": "refs/heads/main"
+      },
+      "conditions": [
+        {
+          "type": "Ready",
+          "status": "True",
+          "reason": "Succeeded",
+          "message": "stored artifact for revision 'main@sha1:cccc111000000000000000000000000000000000'",
+          "lastTransitionTime": "2026-09-01T10:00:02Z",
+          "observedGeneration": 4
+        }
+      ],
+      "observedSHA": "",
+      "firstObserved": null,
+      "nodes": [
+        {
+          "kind": "Kustomization",
+          "namespace": "flotillas",
+          "name": "edge"
+        }
+      ],
+      "fetchFailing": true
+    },
+    {
+      "name": "sources/infra",
+      "url": "https://git.example.test/org/infra.git",
+      "secretRefName": "git-credentials",
+      "trackingRef": "refs/heads/main",
+      "pin": "aaaa111000000000000000000000000000000000",
+      "artifactSHA": "aaaa111000000000000000000000000000000000",
+      "commitOwners": [
+        {
+          "manager": "wavefront-controller",
+          "operation": "Apply"
+        }
+      ],
+      "provenance": {
+        "wavefront.as-code.io/admitted-at": "2026-09-01T10:00:00Z",
+        "wavefront.as-code.io/previous-pin": "0000fff000000000000000000000000000000000",
+        "wavefront.as-code.io/observed-ref": "refs/heads/main"
+      },
+      "conditions": [
+        {
+          "type": "Ready",
+          "status": "True",
+          "reason": "Succeeded",
+          "message": "stored artifact for revision 'main@sha1:aaaa111000000000000000000000000000000000'",
+          "lastTransitionTime": "2026-09-01T10:00:02Z",
+          "observedGeneration": 4
+        }
+      ],
+      "observedSHA": "",
+      "firstObserved": null,
+      "nodes": [
+        {
+          "kind": "Kustomization",
+          "namespace": "flotillas",
+          "name": "infra"
+        }
+      ]
+    }
+  ],
+  "graph": {
+    "missing": [
+      {
+        "kind": "Kustomization",
+        "namespace": "waves",
+        "name": "absent-gate"
+      }
+    ]
+  },
+  "derived": {
+    "phase": "Blocked",
+    "counts": {
+      "observed": 3,
+      "pinned": 3,
+      "gates": 0,
+      "pending": 0,
+      "converging": 2,
+      "blocked": 0,
+      "held": 0
+    },
+    "graphValid": true,
+    "graphReason": "Valid",
+    "graphMessage": "3 nodes, 2 edges"
+  },
+  "diagnostics": [
+    "ref observations are unavailable: re-run with --poll to list advertised refs",
+    "dependsOn target waves/absent-gate does not exist: it gates every node that depends on it"
+  ]
+}

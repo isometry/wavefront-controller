@@ -1,0 +1,7 @@
+NAME:    sources/two
+PIN:     bbbb111000000000000000000000000000000000
+NODES:   1
+! = unproven: the GitRepository could not be read (RBAC or deleted); see the diagnostics.
+
+NODES (1)
+  flotillas/two

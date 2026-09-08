@@ -1,0 +1,5 @@
+NODE              ROLE     STATE        HELD    BLOCKED   ANCESTOR   SOURCE          PIN       OBSERVED   LAG
+flotillas/app     Pinned   Converging   false   -         -          sources/app     bbbb111   ?          ?
+flotillas/edge    Pinned   Unhealthy    false   -         -          sources/edge    cccc111   ?          ?
+flotillas/infra   Pinned   Converging   false   -         -          sources/infra   aaaa111   ?          ?
+? = unknown: this snapshot carries no ref observations; re-run with --derive --poll.

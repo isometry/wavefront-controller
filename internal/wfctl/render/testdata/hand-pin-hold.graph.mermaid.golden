@@ -1,0 +1,13 @@
+graph LR
+  n0["flotillas/child — Pending"]
+  n1["flotillas/grandchild — Pending"]
+  n2["flotillas/held — Pending"]
+  n2 --> n0
+  n0 --> n1
+  n2 -. AncestorHeld .-> n0
+  n0 -. AncestorPending .-> n1
+  style n0 stroke:#b58900,stroke-width:1px
+  style n1 stroke:#b58900,stroke-width:1px
+  style n2 stroke:#b58900,stroke-width:1px,stroke-dasharray:6 3
+  linkStyle 2 stroke:#d1242f,stroke-width:2px,stroke-dasharray:2 3
+  linkStyle 3 stroke:#d1242f,stroke-width:2px,stroke-dasharray:2 3

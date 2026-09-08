@@ -1,0 +1,4 @@
+SOURCE               PIN       OBSERVED   PENDING   HOLD                     OWNERS                               ARTIFACT   ADMITTED   NODES
+sources/child        bbbb111   bbbb222    15m       -                        wavefront-controller                 bbbb111    120m       1
+sources/grandchild   cccc111   cccc222    15m       -                        wavefront-controller                 cccc111    120m       1
+sources/held         aaaa111   aaaa222    20m       HandPin(kubectl-patch)   wavefront-controller,kubectl-patch   aaaa111    120m       1

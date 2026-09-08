@@ -1,0 +1,5 @@
+flotillas/edge                      Pinned   Unhealthy
+flotillas/infra                     Pinned   Converging
+└── flotillas/app                   Pinned   Converging
+waves/absent-gate (missing)         Gate     MissingGate
+└── flotillas/app ↑ (shown above)   Pinned   Converging

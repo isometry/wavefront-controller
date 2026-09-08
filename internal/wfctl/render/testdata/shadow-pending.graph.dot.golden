@@ -1,0 +1,11 @@
+digraph wavefront {
+  rankdir="LR";
+  node [fontname="sans-serif", fontsize=10];
+  edge [fontname="sans-serif", fontsize=9];
+  "Kustomization/flotillas/alpha" [label="flotillas/alpha\nAdmissible", shape="box", style="rounded", color="goldenrod"];
+  "Kustomization/flotillas/beta" [label="flotillas/beta\nPending", shape="box", style="rounded", color="goldenrod"];
+  "Kustomization/waves/gate" [label="waves/gate\nSettled", shape="hexagon", style="rounded", color="forestgreen"];
+  "Kustomization/flotillas/alpha" -> "Kustomization/flotillas/beta";
+  "Kustomization/flotillas/beta" -> "Kustomization/waves/gate";
+  "Kustomization/flotillas/alpha" -> "Kustomization/flotillas/beta" [style="dashed", color="firebrick", constraint=false, label="AncestorPending"];
+}

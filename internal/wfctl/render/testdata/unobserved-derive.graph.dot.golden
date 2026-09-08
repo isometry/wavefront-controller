@@ -1,0 +1,11 @@
+digraph wavefront {
+  rankdir="LR";
+  node [fontname="sans-serif", fontsize=10];
+  edge [fontname="sans-serif", fontsize=9];
+  "Kustomization/flotillas/app" [label="flotillas/app\nConverging", shape="box", style="rounded", color="steelblue"];
+  "Kustomization/flotillas/edge" [label="flotillas/edge\nUnhealthy", shape="box", style="rounded", color="firebrick"];
+  "Kustomization/flotillas/infra" [label="flotillas/infra\nConverging", shape="box", style="rounded", color="steelblue"];
+  "Kustomization/waves/absent-gate" [label="waves/absent-gate\nMissingGate", shape="hexagon", style="rounded,dotted", color="gray60"];
+  "Kustomization/flotillas/infra" -> "Kustomization/flotillas/app";
+  "Kustomization/waves/absent-gate" -> "Kustomization/flotillas/app";
+}

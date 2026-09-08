@@ -1,0 +1,4 @@
+SOURCE        PIN       OBSERVED   PENDING   HOLD   OWNERS                 ARTIFACT   ADMITTED   NODES   PREVIOUS-PIN   OBSERVED-REF      FETCH   URL
+sources/one   aaaa111   aaaa111    -         -      wavefront-controller   aaaa111    120m       1       0000fff        refs/heads/main   ok      https://git.example.test/org/one.git
+sources/two   bbbb111   !          !         !      !                      !          !          1       !              !                 !       !
+! = unproven: the GitRepository could not be read (RBAC or deleted); see the diagnostics.

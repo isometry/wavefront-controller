@@ -1,0 +1,12 @@
+graph LR
+  n0["flotillas/api — Pending"]
+  n1["flotillas/db — Unhealthy"]
+  n2["flotillas/worker — Pending"]
+  n1 --> n2
+  n2 -. SharedSourceBlocked .-> n0
+  n1 -. AncestorUnhealthy .-> n2
+  style n0 stroke:#b58900,stroke-width:1px
+  style n1 stroke:#d1242f,stroke-width:1px
+  style n2 stroke:#b58900,stroke-width:1px
+  linkStyle 1 stroke:#d1242f,stroke-width:2px,stroke-dasharray:2 3
+  linkStyle 2 stroke:#d1242f,stroke-width:2px,stroke-dasharray:2 3

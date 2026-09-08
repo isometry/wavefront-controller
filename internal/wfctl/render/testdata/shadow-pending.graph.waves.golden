@@ -1,0 +1,8 @@
+wave 0 (1)
+  flotillas/alpha   Pinned   Admissible
+
+wave 1 (1)
+  flotillas/beta   Pinned   Pending
+
+wave 2 (1)
+  waves/gate   Gate   Settled

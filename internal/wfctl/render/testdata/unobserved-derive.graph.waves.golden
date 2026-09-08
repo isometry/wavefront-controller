@@ -1,0 +1,7 @@
+wave 0 (3)
+  flotillas/edge      Pinned   Unhealthy
+  flotillas/infra     Pinned   Converging
+  waves/absent-gate   Gate     MissingGate
+
+wave 1 (1)
+  flotillas/app   Pinned   Converging

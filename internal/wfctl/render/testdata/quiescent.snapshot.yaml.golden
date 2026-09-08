@@ -1,0 +1,154 @@
+apiVersion: wfctl.wavefront.as-code.io/v1alpha1
+capturedAt: "2026-09-01T11:58:00Z"
+cluster:
+  context: prod-eu
+  server: https://api.prod-eu.example.test
+  wfctlVersion: v0.1.0
+derived:
+  counts:
+    blocked: 0
+    converging: 0
+    gates: 0
+    held: 0
+    observed: 0
+    pending: 0
+    pinned: 0
+  graphValid: false
+diagnostics: []
+evaluated: "2026-09-01T11:57:30Z"
+graph: {}
+kind: Snapshot
+nodes:
+- observedSHA: aaaa111000000000000000000000000000000000
+  pin: aaaa111000000000000000000000000000000000
+  ready: true
+  ref:
+    kind: Kustomization
+    name: infra
+    namespace: flotillas
+  role: Pinned
+  source: sources/infra
+  state: Settled
+  wave: 0
+- dependsOn:
+  - kind: Kustomization
+    name: infra
+    namespace: flotillas
+  observedSHA: bbbb111000000000000000000000000000000000
+  pin: bbbb111000000000000000000000000000000000
+  ready: true
+  ref:
+    kind: Kustomization
+    name: team-a
+    namespace: flotillas
+  role: Pinned
+  source: sources/team-a
+  state: Settled
+  wave: 1
+- dependsOn:
+  - kind: Kustomization
+    name: team-a
+    namespace: flotillas
+  ready: true
+  ref:
+    kind: Kustomization
+    name: gate
+    namespace: waves
+  role: Gate
+  state: Settled
+  wave: 2
+observed: true
+origin: status
+replayed: true
+sources:
+- artifactSHA: aaaa111000000000000000000000000000000000
+  commitOwners:
+  - manager: wavefront-controller
+    operation: Apply
+  conditions:
+  - lastTransitionTime: "2026-09-01T10:00:02Z"
+    message: stored artifact for revision 'main@sha1:aaaa111000000000000000000000000000000000'
+    observedGeneration: 4
+    reason: Succeeded
+    status: "True"
+    type: Ready
+  firstObserved: "2026-09-01T09:58:00Z"
+  name: sources/infra
+  nodes:
+  - kind: Kustomization
+    name: infra
+    namespace: flotillas
+  observedSHA: aaaa111000000000000000000000000000000000
+  pin: aaaa111000000000000000000000000000000000
+  provenance:
+    wavefront.as-code.io/admitted-at: "2026-09-01T10:00:00Z"
+    wavefront.as-code.io/observed-ref: refs/heads/main
+    wavefront.as-code.io/previous-pin: 0000fff000000000000000000000000000000000
+  secretRefName: git-credentials
+  trackingRef: refs/heads/main
+  url: https://git.example.test/org/infra.git
+- artifactSHA: bbbb111000000000000000000000000000000000
+  commitOwners:
+  - manager: wavefront-controller
+    operation: Apply
+  conditions:
+  - lastTransitionTime: "2026-09-01T10:00:02Z"
+    message: stored artifact for revision 'main@sha1:bbbb111000000000000000000000000000000000'
+    observedGeneration: 4
+    reason: Succeeded
+    status: "True"
+    type: Ready
+  firstObserved: "2026-09-01T09:58:00Z"
+  name: sources/team-a
+  nodes:
+  - kind: Kustomization
+    name: team-a
+    namespace: flotillas
+  observedSHA: bbbb111000000000000000000000000000000000
+  pin: bbbb111000000000000000000000000000000000
+  provenance:
+    wavefront.as-code.io/admitted-at: "2026-09-01T10:00:00Z"
+    wavefront.as-code.io/observed-ref: refs/heads/main
+    wavefront.as-code.io/previous-pin: 0000fff000000000000000000000000000000000
+  secretRefName: git-credentials
+  trackingRef: refs/heads/main
+  url: https://git.example.test/org/team-a.git
+wavefront:
+  generation: 4
+  name: fleet
+  spec:
+    mode: Enforce
+    nodes:
+      kinds:
+      - Kustomization
+      selector:
+        matchLabels:
+          wavefront.as-code.io/managed: "true"
+    poll:
+      interval: 1m30s
+      perHostConcurrency: 4
+  status:
+    conditions:
+    - lastTransitionTime: "2026-09-01T11:57:30Z"
+      message: evaluated 3 nodes
+      observedGeneration: 4
+      reason: Succeeded
+      status: "True"
+      type: Ready
+    - lastTransitionTime: "2026-09-01T11:57:30Z"
+      message: 3 nodes, 2 edges
+      observedGeneration: 4
+      reason: Valid
+      status: "True"
+      type: GraphValid
+    lastEvaluated: "2026-09-01T11:57:30Z"
+    nodes:
+      blocked: 0
+      converging: 0
+      gates: 1
+      held: 0
+      observed: 3
+      pending: 0
+      pinned: 2
+    observedGeneration: 4
+    phase: Quiescent

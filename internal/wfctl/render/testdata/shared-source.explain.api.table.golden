@@ -1,0 +1,8 @@
+flotillas/api is Pending: SharedSourceBlocked → sibling flotillas/worker
+  flotillas/worker is Pending: AncestorUnhealthy → ancestor flotillas/db
+    flotillas/db is Unhealthy
+
+root cause: flotillas/db is Unhealthy
+  source: sources/db
+  ready: Health check failed after 30s: deployment/db not ready
+fix: fix flotillas/db and push to its tracking ref. A fix is not a special case (DESIGN §3.3): it is that node's next admission and sits at the front of its own subtree, so its descendants unblock as it converges.

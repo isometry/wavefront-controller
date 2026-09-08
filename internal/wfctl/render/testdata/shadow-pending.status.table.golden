@@ -1,0 +1,30 @@
+NAME:             fleet
+MODE:             Shadow
+SUSPEND:          false
+GENERATION:       4
+ORIGIN:           status (replayed from file)
+CAPTURED:         2026-09-01T11:58:00Z (2m ago)
+LAST EVALUATED:   2026-09-01T11:57:30Z (2m30s ago)
+CLUSTER:          prod-eu (https://api.prod-eu.example.test)
+
+FIELD        VALUE
+PHASE        Advancing
+GRAPHVALID   true
+OBSERVED     3
+PINNED       2
+GATES        1
+PENDING      2
+CONVERGING   0
+BLOCKED      1
+HELD         0
+
+BLOCKED (1)
+NODE             REASON            ANCESTOR          SINCE
+flotillas/beta   AncestorPending   flotillas/alpha   8m
+
+SHADOW (1)
+SOURCE          WOULD-PIN
+sources/alpha   aaaa222
+
+DIAGNOSTICS (0)
+  (none)

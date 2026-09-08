@@ -1,0 +1,30 @@
+NAME:           sources/mono
+URL:            https://git.example.test/org/mono.git
+SECRET:         git-credentials
+TRACKING REF:   refs/heads/main
+PIN:            aaaa111000000000000000000000000000000000
+OBSERVED:       aaaa222000000000000000000000000000000000
+PENDING:        yes (≥14m)
+ARTIFACT:       aaaa111000000000000000000000000000000000
+SUSPENDED:      false
+FETCH:          ok
+HOLD:           -
+NODES:          2
+
+OWNERS (1)
+MANAGER                OPERATION
+wavefront-controller   Apply
+
+PROVENANCE (3)
+ANNOTATION                          VALUE
+wavefront.as-code.io/admitted-at    2026-09-01T10:00:00Z
+wavefront.as-code.io/observed-ref   refs/heads/main
+wavefront.as-code.io/previous-pin   0000fff000000000000000000000000000000000
+
+CONDITIONS (1)
+TYPE    STATUS   REASON      AGE    MESSAGE
+Ready   True     Succeeded   119m   stored artifact for revision 'main@sha1:aaaa111000000000000000000000000000000000'
+
+NODES (2)
+  flotillas/api
+  flotillas/worker

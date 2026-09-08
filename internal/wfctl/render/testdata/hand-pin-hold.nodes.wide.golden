@@ -1,0 +1,4 @@
+NODE                   ROLE     STATE     HELD    BLOCKED           ANCESTOR          SOURCE               PIN       OBSERVED   LAG   WAVE   READY   DEPENDS
+flotillas/child        Pinned   Pending   false   AncestorHeld      flotillas/held    sources/child        bbbb111   bbbb222    15m   1      true    flotillas/held
+flotillas/grandchild   Pinned   Pending   false   AncestorPending   flotillas/child   sources/grandchild   cccc111   cccc222    15m   2      true    flotillas/child
+flotillas/held         Pinned   Pending   true    SelfHeld          -                 sources/held         aaaa111   aaaa222    20m   0      true    -

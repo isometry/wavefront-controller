@@ -1,0 +1,4 @@
+NODE          ROLE     STATE     HELD    BLOCKED      ANCESTOR   SOURCE      PIN       OBSERVED   LAG   WAVE    READY   DEPENDS
+flotillas/a   Pinned   Pending   false   GraphCycle   -          sources/a   aaaa111   aaaa222    15m   cycle   true    flotillas/b
+flotillas/b   Pinned   Pending   false   GraphCycle   -          sources/b   bbbb111   bbbb222    15m   cycle   true    flotillas/a
+flotillas/c   Pinned   Settled   false   -            -          sources/c   cccc111   cccc111    -     0       true    -

@@ -1,0 +1,10 @@
+digraph wavefront {
+  rankdir="LR";
+  node [fontname="sans-serif", fontsize=10];
+  edge [fontname="sans-serif", fontsize=9];
+  "Kustomization/flotillas/a" [label="flotillas/a\nPending", shape="box", style="rounded", color="goldenrod", peripheries=2];
+  "Kustomization/flotillas/b" [label="flotillas/b\nPending", shape="box", style="rounded", color="goldenrod", peripheries=2];
+  "Kustomization/flotillas/c" [label="flotillas/c\nSettled", shape="box", style="rounded", color="forestgreen"];
+  "Kustomization/flotillas/b" -> "Kustomization/flotillas/a";
+  "Kustomization/flotillas/a" -> "Kustomization/flotillas/b";
+}
