@@ -84,39 +84,46 @@ var (
 	specSuspendPath = fieldpath.MakePathOrDie("spec", "suspend")
 )
 
+// The SpecOwners keys — the two Wavefront spec fields wfctl writes.
+const (
+	FieldMode    = "spec.mode"
+	FieldSuspend = "spec.suspend"
+)
+
 // specOwnerFields names the SpecOwners keys, alongside the path each is read
 // from.
 var specOwnerFields = []struct {
 	name string
 	path fieldpath.Path
 }{
-	{"spec.mode", specModePath},
-	{"spec.suspend", specSuspendPath},
+	{FieldMode, specModePath},
+	{FieldSuspend, specSuspendPath},
 }
 
 // wavefrontView renders the Wavefront itself, including who owns the two
 // spec fields the write commands patch. The raw managedFields never leave
-// specOwners: only the manager names do.
+// SpecOwners: only the manager names do.
 func wavefrontView(wf *wavefrontv1alpha1.Wavefront) WavefrontView {
 	return WavefrontView{
 		Name:       wf.Name,
 		Generation: wf.Generation,
 		Spec:       wf.Spec,
 		Status:     wf.Status,
-		SpecOwners: specOwners(wf),
+		SpecOwners: SpecOwners(wf),
 	}
 }
 
-// specOwners maps "spec.mode" and "spec.suspend" to their owning field
+// SpecOwners maps "spec.mode" and "spec.suspend" to their owning field
 // manager, so a write command can warn that a GitOps applier owns the field
-// and will revert the change (plan B4).
+// and will revert the change (plan B4). It is exported because that warning
+// is built by internal/wfctl/actions, from a Wavefront it read itself.
 //
 // The first entry to claim a field wins: managedFields is returned in a
 // stable order by the apiserver, and co-ownership of a scalar is rare enough
 // that reporting one manager beats inventing a list the schema has no room
 // for. Subresource entries cannot own spec and are skipped, as are entries
 // whose FieldsV1 will not parse — an unparseable entry proves no ownership.
-func specOwners(wf *wavefrontv1alpha1.Wavefront) map[string]string {
+func SpecOwners(wf *wavefrontv1alpha1.Wavefront) map[string]string {
 	owners := map[string]string{}
 	for _, entry := range wf.GetManagedFields() {
 		if entry.Subresource != "" || entry.FieldsV1 == nil {

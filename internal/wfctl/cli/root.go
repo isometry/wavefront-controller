@@ -51,6 +51,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	wavefrontv1alpha1 "github.com/isometry/wavefront-controller/api/v1alpha1"
+	"github.com/isometry/wavefront-controller/internal/gitpoll"
 	"github.com/isometry/wavefront-controller/internal/wfctl/render"
 	"github.com/isometry/wavefront-controller/internal/wfctl/snapshot"
 )
@@ -151,10 +152,12 @@ type Options struct {
 	Output string
 	// NoColor suppresses colour even on a terminal.
 	NoColor bool
-	// Yes skips the confirmation prompt of the write commands (Task 7). It is
-	// declared here because it is a persistent flag of the tree, not of any
-	// one command.
+	// Yes skips the confirmation prompt of the write commands. It is declared
+	// here because it is a persistent flag of the tree, not of any one command.
 	Yes bool
+	// DryRun prints a write command's plan and stops. Unlike Yes it is a local
+	// flag of each write command, because a read command has no plan to print.
+	DryRun bool
 	// Derive re-derives the picture live instead of reading published status.
 	Derive bool
 	// Poll adds a ref-advertisement sweep to a derivation.
@@ -175,6 +178,21 @@ type Options struct {
 	// ConfigFlags. Tests substitute a fake so the command tree can be driven
 	// without an apiserver.
 	NewReader func() (client.Reader, error)
+	// NewClient builds the read-write client the write commands operate
+	// through; nil means the real one, built from ConfigFlags. It is separate
+	// from NewReader so that the read commands stay unable to write even by
+	// accident.
+	NewClient func() (client.Client, error)
+	// Lister lists a source's advertised refs for `pin --poll` and
+	// `force-admit`; nil means the production go-git lister.
+	Lister gitpoll.Lister
+	// StdinTTY reports whether stdin is an interactive terminal, i.e. whether
+	// there is anybody to answer a confirmation prompt; nil means "ask
+	// os.Stdin".
+	StdinTTY func() bool
+	// Identity names who is running the command, for the audit note; nil means
+	// the kubeconfig-derived one.
+	Identity func() string
 	// ColorTTY reports whether the output is an interactive terminal; nil
 	// means "ask os.Stdout".
 	ColorTTY func() bool
@@ -191,12 +209,23 @@ type Options struct {
 // a kubectl plugin and must describe itself as `kubectl wavefront` in every
 // usage line, because that is what the user has to type.
 func NewRootCommand(argv0 string) *cobra.Command {
-	opts := &Options{
+	return newRootCommand(argv0, NewOptions())
+}
+
+// NewOptions is the tree's default state: the real kubeconfig flags and every
+// seam left at its production value.
+func NewOptions() *Options {
+	return &Options{
 		ConfigFlags: genericclioptions.NewConfigFlags(true),
 		Output:      outputTable,
 		PollTimeout: snapshot.DefaultPollTimeout,
 	}
+}
 
+// newRootCommand builds the tree around a given Options, so that a test can
+// drive the real command tree — flags, argument parsing, exit codes and all —
+// with the cluster, the terminal and the kubeconfig replaced.
+func newRootCommand(argv0 string, opts *Options) *cobra.Command {
 	root := &cobra.Command{
 		Use:   binaryName,
 		Short: "Inspect and operate a Wavefront progressive-delivery fleet",
@@ -250,6 +279,7 @@ Exit codes: 0 success, 1 error, 2 status found the fleet Blocked.
 		"Replay a snapshot captured by the snapshot command instead of reading a cluster")
 
 	addReadCommands(root, opts)
+	addWriteCommands(root, opts)
 
 	return root
 }
