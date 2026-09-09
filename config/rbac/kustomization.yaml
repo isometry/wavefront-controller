@@ -25,4 +25,7 @@ resources:
 - wavefront_admin_role.yaml
 - wavefront_editor_role.yaml
 - wavefront_viewer_role.yaml
+# Hand-written (not scaffolded): the wfctl "viewer" tier — read on wavefronts
+# plus the events wfctl history lists. See README, "Access tiers".
+- wfctl_viewer_role.yaml
 

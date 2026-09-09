@@ -242,9 +242,11 @@ at all.
 
 Three tiers of access, each a superset of the last:
 
-  viewer    get/list wavefronts — the default, status-backed commands.
-  derive    + list kustomizations and gitrepositories cluster-wide; --poll
-            also reads the sources' credential secrets.
+  viewer    get/list wavefronts, and get/list events — the default,
+            status-backed commands, and history.
+  derive    + get/list kustomizations and gitrepositories cluster-wide
+            (deriving reads individual objects as well as listing them);
+            --poll also reads the sources' credential secrets.
   operator  + patch gitrepositories and wavefronts, and create events.
 
 Wavefronts are cluster-scoped and every node and source is named as

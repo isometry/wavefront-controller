@@ -34,12 +34,15 @@ api/v1alpha1/                  wavefront_types.go, groupversion_info.go, zz_gene
 cmd/main.go                    manager wiring (scaffolded; extended in Task 9)
 internal/adapter/              NodeRef, Node, Adapter interface, KustomizationAdapter
 internal/graph/                DAG build, cycle detection, transitive ancestors
+internal/inputs/               discover/resolve/derive/summarise, shared by the controller and wfctl
 internal/engine/               settledness, admissibility, state derivation (pure)
 internal/selection/            Strategy interface, TrackRef
 internal/gitpoll/              auth glue, ref lister, poller + observation store
 internal/pin/                  SSA pin writer, provenance, hold detection
 internal/controller/           wavefront_controller.go, suite_test.go (envtest)
 internal/metrics/              prometheus instruments
+cmd/wfctl/main.go              wfctl entry (cobra root only; renames itself as kubectl-wavefront)
+internal/wfctl/                snapshot providers, renderers, write actions, CLI wiring
 config/                        CRD, RBAC, manager, samples (kubebuilder-generated)
 test/crds/flux/                vendored Flux CRDs for envtest (make update-flux-crds)
 test/e2e/                      kind+Flux e2e suite; test/e2e/gitserver/ (git server image)
@@ -842,6 +845,38 @@ This is the acceptance test for DESIGN §9 Phase 1's exercises, run against real
 - [ ] **Step 1: README** — what/why (three paragraphs distilled from DESIGN §1–2, linking DESIGN.md); install (`make deploy` / installer manifest); prerequisites checklist (DESIGN §8, with `wavefront.as-code.io` labels: catalog renders `ref.name` only + omits `ref.commit`, participation label on Kustomizations **and** flotilla GitRepositories, `wait: true` on Milestone-owning Kustomizations, chart-source colocation policy, RBAC/secrets note); `Wavefront` spec reference (every field + defaults); status/conditions/events/metrics tables (§6); Shadow→Enforce rollout summary (§9); link to `docs/runbook.md`.
 - [ ] **Step 2: Final sweep** — `make manifests generate fmt vet lint test`; `go test ./... -race`; coverage sanity: `go test ./internal/... -cover` (expect engine/graph/selection near-total; adapter/gitpoll/pin high; controller covered by envtest scenarios). Fix anything found.
 - [ ] **Step 3: Commit** — `docs: README with spec reference and rollout guide`.
+
+---
+
+## `wfctl` (shipped after Task 13)
+
+The CLI companion: reports what a `Wavefront` is doing and why, and operates it when it is stuck. Built as `bin/wfctl` (`make build-wfctl`), installed with `make install-wfctl` into `GOBIN` alongside a `kubectl-wavefront` symlink, and deliberately **absent from the manager image** — the manager's ServiceAccount is exactly the RBAC an exec into that pod should not reach. Delivered on the same branch as the controller.
+
+**Packages**
+
+| Package | Role |
+|---|---|
+| `cmd/wfctl` | cobra root only; `Use` becomes `kubectl wavefront` when invoked through the symlink |
+| `internal/inputs` | discover → resolve → derive → summarise, extracted from `internal/controller` so the controller and `--derive` run *the same* pipeline rather than two that agree by inspection |
+| `internal/wfctl/snapshot` | the truth model: `Source` providers, the `Snapshot` schema, node/source ref parsing, ref polling, event listing |
+| `internal/wfctl/render` | pure `Snapshot` → text; tables, colour, waves, tree, DOT, Mermaid, JSON/YAML encoding |
+| `internal/wfctl/actions` | write commands as `Plan{Summary, Before, After, Warnings}` + `Apply`, with the confirmation gate and best-effort audit events |
+| `internal/wfctl/cli` | flag wiring only (cli-runtime `genericclioptions` + the wfctl flags); no logic |
+
+**Providers (the truth model).** Status-first, with a seam for a future `--live` controller API:
+
+- *default* — `StatusSource`: reads `status.members` (added to the API for this; §4.1). Needs only `get`/`list` on `wavefronts`, which is what makes a viewer tier meaningful.
+- `--derive` — `DeriveSource`: re-derives live via `inputs.Build` + `engine.Evaluate`. Answers while the controller is down; cross-checks it while it is up. Needs cluster-wide `get` **and** `list` on `Kustomization`s and `GitRepository`s — `inputs.Build` lists the selected nodes but also `Get`s individual objects (closure gates outside the selector, and every resolved source), and `list` does not imply `get`.
+- `--derive --poll` — adds a ref-advertisement sweep (`gitpoll` lister + `AuthFromSecret`, per-host concurrency from the Wavefront's own spec), so observed SHAs are real rather than `?`. Reads the sources' credential `Secret`s; per-source failures become diagnostics, never fatal.
+- `--from FILE` — `FileSource`: replays a `wfctl snapshot` document with no cluster at all. Snapshots never carry secret data, credentials, kubeconfig or URL userinfo.
+
+Staleness is explicit: under the status provider wfctl warns when `status.lastEvaluated` is older than `2 × (poll.interval + 30s)` or `Ready` is `False`, and points at `--derive`.
+
+**Commands.** Read — `status` (exits 2 on `Blocked`; `--derive` prints reported vs derived side by side), `nodes`, `sources`, `source ns/name`, `explain ns/name` (walks the blocked chain to the root cause and names the fix), `graph` (waves, `--tree`, `-o dot|mermaid`), `snapshot`, `history` (events with the retention caveat). Write — `suspend`, `resume`, `mode`, `pin`, `release` (`--float`), `pin-strip` (`--include-held`, `--suspend`), `force-admit`; each plans, prints its effect, confirms unless `--yes` (never prompting off a TTY), supports `--dry-run`, and records an audit event on the `Wavefront`. Hand-pins go under the `wfctl` SSA field manager, which the controller reads as an external hold like any other.
+
+**Tests.** Golden renderer tests over eight snapshot fixtures (`internal/wfctl/render/testdata/`, `-update` regenerates); envtest suites for status/derive parity and for every write command's `managedFields` effect; the existing controller suites guard the `internal/inputs` extraction unchanged.
+
+**RBAC.** Three tiers documented in the README; `config/rbac/wfctl_viewer_role.yaml` is a hand-written `ClusterRole` for the viewer tier (read on `wavefronts` plus `get`/`list` on `events.events.k8s.io`, which `history` lists in namespace `default`).
 
 ---
 

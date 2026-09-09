@@ -160,6 +160,18 @@ status:
     - node: { kind: Kustomization, namespace: flotillas, name: team-y }
       source: flotillas/team-y-repo
       manager: kubectl-edit
+  members:                                # every evaluated node (MembersCap = 2000)
+    - node: { kind: Kustomization, namespace: flotillas, name: team-x }
+      role: Pinned                        # Pinned | Gate
+      state: Pending                      # Settled | Pending | Admissible | Converging | Unhealthy
+      dependsOn: [{ kind: Kustomization, namespace: waves, name: wave-2-gate }]
+      source: flotillas/team-x-repo
+      pin: "ab12…"
+      observedSHA: "cd34…"                # "" = unobserved this pass
+      pendingSince: "2026-08-27T09:14:03Z"
+      ready: true
+      blocked: { reason: AncestorUnhealthy, ancestor: { kind: Kustomization, namespace: waves, name: wave-2-gate } }
+  lastEvaluated: "2026-08-27T09:15:11Z"   # advanced at most once per spec.poll.interval
   conditions:
     - type: Ready
     - type: GraphValid                    # False on dependsOn cycles or selector overlap
@@ -167,8 +179,15 @@ status:
 ```
 
 `status.nodes` gives fleet-wide counts; `status.blocked` and `status.held`
-are capped, attributed lists — per-node detail beyond the cap lives in
-metrics and events, not status.
+are capped, attributed lists of exceptional states. `status.members` is the
+full per-node picture — every evaluated node, flotilla and gate alike, with
+its state, pin, observed SHA and blocking attribution — bounded only by
+`MembersCap` = 2000, past which `status.membersOmitted` counts the rest. It
+is what [`wfctl`](#wfctl) reads by default, and it is **write-only** output:
+the reconciler never reads it back, so admission never depends on it
+(DESIGN D9). `status.lastEvaluated` stamps when the picture was derived, and
+advances at most once per `spec.poll.interval` so watch-triggered reconciles
+do not rewrite status on every pass — budget for that when judging staleness.
 
 ### Events
 
@@ -238,6 +257,124 @@ once:
 
 Full step-by-step flip procedure, safety-alarm wiring, hand-pin etiquette,
 and the break-glass pin-strip: see **[`docs/runbook.md`](docs/runbook.md)**.
+
+## `wfctl`
+
+`wfctl` reports what a `Wavefront` is doing and why, and operates it when it
+is stuck — the CLI half of the observability surface (DESIGN §6). It is a
+separate binary; it is deliberately **not** shipped in the manager image,
+whose ServiceAccount is precisely the RBAC an exec into that pod should not
+reach.
+
+### Install
+
+```sh
+make build-wfctl                          # bin/wfctl only
+make install-wfctl                        # into GOBIN, + kubectl-wavefront symlink
+```
+
+`install-wfctl` installs into `GOBIN` (`go env GOBIN`, falling back to
+`$(go env GOPATH)/bin`) and symlinks `kubectl-wavefront` beside it, so every
+command is equally reachable as a kubectl plugin — the binary renames its own
+usage line when invoked that way:
+
+```sh
+wfctl status
+kubectl wavefront status
+```
+
+`Wavefront`s are cluster-scoped and every node and source is named
+`namespace/name`, so `-n`/`--namespace` is accepted for kubectl's sake but has
+no effect on what wfctl reports. `--wavefront` is only required when the
+cluster holds more than one. Exit codes: `0` success, `1` error, `2`
+`wfctl status` found the fleet `Blocked`.
+
+### Where the picture comes from
+
+| Mode | Reads | Use it when |
+|---|---|---|
+| *(default)* | `status.members` — the per-node picture the controller published | Always, unless the controller is down or suspect |
+| `--derive` | Re-derives live through the controller's own pipeline (`internal/inputs` → `internal/engine`) | The controller is down, or you want the reported and derived pictures compared (`wfctl status --derive` prints them side by side and marks disagreement) |
+| `--derive --poll` | …plus a ref-advertisement sweep, so observed SHAs are real | You need observed SHAs and pin lag, not `?` |
+| `--from FILE` | Replays a snapshot captured by `wfctl snapshot` — no cluster at all | Triage from a ticket attachment |
+
+`--poll` requires `--derive` on the read commands (on `pin` it instead
+verifies the given `--sha` against the remote's advertisement; `force-admit`
+always lists its own source's refs). Without an observation sweep, observed
+SHAs render as an explicit `?` rather than as blank, with a footnote naming
+the fix. Poll failures per source become diagnostics, never a fatal error.
+
+**Staleness.** `status.lastEvaluated` is advanced at most once per
+`spec.poll.interval`, so a fresh-looking fleet is normal; wfctl warns when it
+is older than `2 × (poll.interval + 30s)`, or when the Wavefront's `Ready`
+condition is `False` — status may be stale, the controller may be down, use
+`--derive`.
+
+**What the default provider sees.** `status.members` carries every evaluated
+node — flotilla and gate alike, including the closure gates reached through
+`dependsOn` — rather than being a capped exceptional-state list like
+`status.blocked`/`status.held`; its only bound is `MembersCap` = 2000, past
+which `status.membersOmitted` counts the rest and wfctl says so. It is
+*write-only* output: the controller never reads it back, so a hand-edited or
+truncated list cannot change what the controller does (DESIGN D9) — it can
+only mislead a reader, which is what `--derive` is for.
+
+### Access tiers
+
+Each tier is a superset of the last. Only the operator tier writes anything.
+
+| Tier | Grants | Unlocks |
+|---|---|---|
+| **viewer** | `get`/`list` on `wavefronts.wavefront.as-code.io`; `get`/`list` on `events.events.k8s.io` (namespace `default`, where events regarding a cluster-scoped `Wavefront` land) | Every read command on the default status-backed provider, plus `history` |
+| **derive** | + `get`, `list` on `kustomizations.kustomize.toolkit.fluxcd.io` and `gitrepositories.source.toolkit.fluxcd.io` **cluster-wide** — deriving lists the selected nodes but reads individual objects too (closure gates outside the selector, and every source it resolves), and `list` does not imply `get`; for `--poll`, `get` on the sources' credential `secrets` | `--derive`, `--derive --poll` |
+| **operator** | + `patch` on `gitrepositories.source.toolkit.fluxcd.io` and `wavefronts.wavefront.as-code.io`; `create` on `events.events.k8s.io` | `suspend`, `resume`, `mode`, `pin`, `release`, `pin-strip`, `force-admit` and their audit events |
+
+[`config/rbac/wfctl_viewer_role.yaml`](config/rbac/wfctl_viewer_role.yaml) is
+a ready-made `ClusterRole` (`wfctl-viewer-role`) for the viewer tier — read on
+`wavefronts` plus the events `wfctl history` lists — and ships in the
+installer bundle. If you only need the CR reads and not the event history, the
+kubebuilder-scaffolded
+[`config/rbac/wavefront_viewer_role.yaml`](config/rbac/wavefront_viewer_role.yaml)
+(`wavefront-viewer-role`) covers that half on its own. Bind either with a
+`ClusterRoleBinding` — note that `dist/install.yaml` applies the project's name
+prefix, so the installed roles are `wavefront-controller-wfctl-viewer-role` and
+`wavefront-controller-wavefront-viewer-role`. The derive and operator tiers are
+not scaffolded: their extra verbs are on Flux's own resources and belong to
+whatever policy regime already governs those.
+
+### Commands
+
+Read commands honour `--derive`, `--poll` and `--from` and take
+`-o table|wide|json|yaml`; `graph` additionally accepts `-o dot|mermaid`.
+
+| Command | Shows |
+|---|---|
+| `status` | Wavefront name, mode, suspend, generation, `lastEvaluated`; phase, node counts, `GraphValid`; the blocked/held/shadow lists and diagnostics. Exits `2` when the fleet is `Blocked`. |
+| `nodes` | Every evaluated node with role, state, held flag, blocking attribution, source, pin, observed SHA and lag; `-o wide` adds wave, readiness and `dependsOn`. |
+| `sources` | Every managed `GitRepository` with pin, observed SHA, pending flag, hold, field-manager owners, artifact, admitted-at and referencing nodes; `-o wide` adds previous pin, observed ref, fetch health and URL. |
+| `source ns/name` | One source in full: pin, provenance annotations, owners, conditions, referencing nodes. |
+| `explain ns/name` | Walks a node's blocked chain to its root cause and names the fix (DESIGN §3.3). Accepts `Kind/ns/name`; `Kustomization` is the default kind. |
+| `graph` | Dependency graph as waves (default), or `--tree` for a rooted tree; anything in or behind a cycle is listed unlayered. |
+| `snapshot` | Writes the whole snapshot as JSON (or `-o yaml`) to stdout or `-f FILE`, for replay with `--from`. Never contains secret data, credentials, kubeconfig or URL userinfo — it is meant to be attached to a ticket. |
+| `history` | The controller's and wfctl's own events for this Wavefront, filterable with `--source`, `--node`, `--reason`, `--since`, `--warnings`. Events are at-least-once and retained only for the API server's `--event-ttl` (1h by default); the durable ledger is the provenance annotations (`wfctl sources -o wide`) and log aggregation. |
+
+Write commands read, build a plan, print its effect (objects, fields, field
+managers, before/after, warnings), then confirm — unless `--yes`, and they
+refuse to prompt when stdin is not a TTY. `--dry-run` prints the plan and
+stops. Each records a best-effort audit event on the `Wavefront`; a failure to
+record one is a warning, never a failed command.
+
+| Command | Effect |
+|---|---|
+| `suspend` / `resume` | `spec.suspend` on the `Wavefront`, by merge patch so a GitOps applier keeps owning the spec — wfctl warns when it sees one, because Flux will revert the change. |
+| `mode Shadow\|Enforce` | `spec.mode`, same merge-patch rule. |
+| `pin ns/name --sha SHA` | Hand-pins one source under the `wfctl` field manager, which the controller reads as an external hold (`HoldDetected`, descendants `AncestorHeld`). The SHA must be checked (`--poll`) or explicitly not (`--unverified`); `--force` displaces a third-party owner of `spec.ref.commit`. |
+| `release ns/name` | Ends a hold on one source, **keeping the pinned value**: the controller re-applies the same SHA under its own field manager with provenance restored, then the holder's claim is relinquished. `--float` removes the pin instead, so the source floats until the controller initial-pins it (DESIGN §3.5.4). |
+| `pin-strip` | Break-glass: removes `spec.ref.commit` from every managed source. Sources the controller already treats as held — a hand-pin, or the source's own `spec.suspend` — are skipped unless `--include-held`; `--suspend` suspends the fleet first, in the same command, so the controller does not simply re-pin. |
+| `force-admit ns/name` | Admits one source past its gate, once: lists that one source's refs, takes the tracking ref's SHA (or `--sha`, verified unless `--unverified`), and writes it under the controller's own field manager with provenance. Refused when the source is held or suspended. |
+
+Every command's `--help` is the authoritative reference; `docs/runbook.md`
+gives the operational procedures each one belongs to.
 
 ## Limitations
 

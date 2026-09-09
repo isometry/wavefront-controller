@@ -139,7 +139,7 @@ e2e-gitserver: ## Deploy the e2e git server on an empty repository store.
 	$(KUBECTL) -n wavefront-e2e rollout status deployment/gitserver --timeout=3m
 
 .PHONY: test-e2e
-test-e2e: setup-test-e2e manifests generate fmt vet kustomize e2e-images e2e-flux e2e-gitserver ## Run the e2e tests. Expected an isolated environment using Kind.
+test-e2e: setup-test-e2e manifests generate fmt vet kustomize build-wfctl e2e-images e2e-flux e2e-gitserver ## Run the e2e tests. Expected an isolated environment using Kind.
 	@status=0; \
 	CERT_MANAGER_INSTALL_SKIP=true KIND=$(KIND) KIND_CLUSTER=$(KIND_CLUSTER) E2E_IMG=$(E2E_IMG) \
 	  go test -tags=e2e ./test/e2e/ -v -ginkgo.v -timeout $(E2E_TIMEOUT) || status=$$?; \
@@ -166,8 +166,21 @@ lint-config: golangci-lint ## Verify golangci-lint linter configuration
 ##@ Build
 
 .PHONY: build
-build: manifests generate fmt vet ## Build manager binary.
+build: manifests generate fmt vet build-wfctl ## Build manager and wfctl binaries.
 	go build -o bin/manager cmd/main.go
+
+.PHONY: build-wfctl
+build-wfctl: ## Build wfctl binary.
+	go build -o bin/wfctl ./cmd/wfctl
+
+# wfctl is deliberately absent from the manager image (see README, "wfctl"):
+# the manager's ServiceAccount is exactly the RBAC an exec into that pod
+# should not reach.
+.PHONY: install-wfctl
+install-wfctl: build-wfctl ## Install wfctl into GOBIN, with the kubectl-wavefront plugin symlink.
+	mkdir -p "$(GOBIN)"
+	install -m 0755 bin/wfctl "$(GOBIN)/wfctl"
+	ln -sf wfctl "$(GOBIN)/kubectl-wavefront"
 
 .PHONY: run
 run: manifests generate fmt vet ## Run a controller from your host.

@@ -1,0 +1,43 @@
+# This rule is not used by the project wavefront-controller itself.
+# It is hand-written (kubebuilder only generates config/rbac/role.yaml) and is
+# provided so a cluster admin can grant the wfctl "viewer" tier described in
+# the README: everything the status-backed default provider reads, and nothing
+# more.
+#
+# wfctl's default truth is the picture the controller published in
+# status.members, so read access to wavefronts is the whole of it — plus
+# events.events.k8s.io in the namespace where events regarding a
+# cluster-scoped Wavefront land (default), which is what `wfctl history`
+# lists. It grants no access to Kustomizations, GitRepositories or Secrets:
+# --derive and --poll need the wider "derive" tier, and the write commands the
+# "operator" tier (README, "Access tiers").
+
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/name: wavefront-controller
+    app.kubernetes.io/managed-by: kustomize
+  name: wfctl-viewer-role
+rules:
+- apiGroups:
+  - wavefront.as-code.io
+  resources:
+  - wavefronts
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - wavefront.as-code.io
+  resources:
+  - wavefronts/status
+  verbs:
+  - get
+- apiGroups:
+  - events.k8s.io
+  resources:
+  - events
+  verbs:
+  - get
+  - list
