@@ -279,6 +279,7 @@ Exit codes: 0 success, 1 error, 2 status found the fleet Blocked.
 		"Replay a snapshot captured by the snapshot command instead of reading a cluster")
 
 	addReadCommands(root, opts)
+	addHistoryCommand(root, opts)
 	addWriteCommands(root, opts)
 
 	return root
