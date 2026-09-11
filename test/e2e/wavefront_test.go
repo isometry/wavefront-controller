@@ -20,10 +20,14 @@ limitations under the License.
 package e2e
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -39,6 +43,7 @@ import (
 
 	wavefrontv1alpha1 "github.com/isometry/wavefront-controller/api/v1alpha1"
 	"github.com/isometry/wavefront-controller/internal/pin"
+	"github.com/isometry/wavefront-controller/internal/wfctl/snapshot"
 	"github.com/isometry/wavefront-controller/test/utils"
 )
 
@@ -121,6 +126,12 @@ var (
 	// revision makes every push change file content, and therefore produce a
 	// new commit SHA.
 	revision int
+
+	// kubeContext is the kubeconfig context the suite's own client resolved to
+	// — the kind cluster `make test-e2e` prepared. The wfctl scenario passes it
+	// explicitly rather than letting the binary inherit whatever the ambient
+	// default happens to be.
+	kubeContext string
 )
 
 var _ = Describe("Wavefront fleet", Ordered, func() {
@@ -358,6 +369,141 @@ var _ = Describe("Wavefront fleet", Ordered, func() {
 		Eventually(func(g Gomega) {
 			g.Expect(getFleet(g).Status.Held).To(BeEmpty())
 			g.Expect(pinOf(g, teamNode)).To(Equal(held))
+		}, waitConverge, pollFast).Should(Succeed())
+
+		expectQuiescent()
+	})
+
+	// The CLI is the operator's half of the same contract the scenarios above
+	// prove from the cluster side, so it is exercised the same way: against the
+	// live fleet, with the controller's own reaction as the assertion. Nothing
+	// here re-tests rendering — the golden suite owns that — only that a real
+	// `wfctl` run against a real fleet moves the fleet, and reads back what the
+	// controller published about it.
+	It("drives the live fleet through wfctl: pin, nodes, release, status and explain", func() {
+		By("pointing wfctl at the cluster the suite itself reads")
+		out, err := utils.Run(exec.Command("kubectl", "config", "current-context"))
+		Expect(err).NotTo(HaveOccurred(), "failed to read the current kubeconfig context")
+		kubeContext = strings.TrimSpace(out)
+		Expect(kubeContext).NotTo(BeEmpty())
+
+		// Two references that happen to spell the same thing in this fixture:
+		// the GitRepository the write commands address, and the Kustomization
+		// `explain` walks from. Keeping them apart keeps the calls readable.
+		teamSource := fleetNamespace + "/" + teamNode
+		teamNodeRef := fleetNamespace + "/" + teamNode
+		pinned := pinOf(Default, teamNode)
+		Expect(pinned).To(Equal(repos[teamNode].Head()))
+
+		// Pinning the value that is already there is deliberate: it isolates
+		// the ownership transfer, which is the whole of what makes a hand-pin
+		// a hold, from any change of commit.
+		By("hand-pinning team-a's source with `wfctl pin`")
+		wfctlOK("pin", teamSource, "--sha", pinned, "--yes", "--unverified")
+
+		By("checking the controller detects the hold and attributes it to wfctl")
+		Eventually(func(g Gomega) {
+			fleet := getFleet(g)
+			g.Expect(fleet.Status.Held).To(HaveLen(1))
+			g.Expect(fleet.Status.Held[0].Manager).To(Equal(pin.WfctlFieldManager))
+			g.Expect(fleet.Status.Held[0].Node.Name).To(Equal(teamNode))
+		}, waitShort, pollFast).Should(Succeed())
+
+		// The note has to name the manager. The hand-pin scenario above fired
+		// HoldDetected for this very node under a different one, and matching
+		// on the node alone would be satisfied by that stale event.
+		expectEvent(fleetEventNamespace, "Wavefront", fleetName, "HoldDetected",
+			fmt.Sprintf("field manager %q", pin.WfctlFieldManager))
+
+		By("checking `wfctl nodes` reports the hold in the state the controller published")
+		Eventually(func(g Gomega) {
+			node := nodeViewOf(wfctlNodes(g), teamNode)
+			g.Expect(node).NotTo(BeNil(), "team-a is missing from `wfctl nodes`")
+			g.Expect(node.Held).To(BeTrue())
+			g.Expect(node.Pin).To(Equal(pinned))
+
+			// The status origin must render status, not a second opinion:
+			// what wfctl prints has to be what status.members says.
+			member := memberOf(getFleet(g), teamNode)
+			g.Expect(member).NotTo(BeNil(), "team-a is missing from status.members")
+			g.Expect(node.State).To(Equal(member.State))
+			g.Expect(node.Held).To(Equal(member.Held))
+		}, waitShort, pollFast).Should(Succeed())
+
+		By("handing the pin back with `wfctl release`")
+		wfctlOK("release", teamSource, "--yes")
+
+		expectEvent(fleetEventNamespace, "Wavefront", fleetName, "HoldReleased",
+			fmt.Sprintf("released by %q", pin.WfctlFieldManager))
+		Eventually(func(g Gomega) {
+			g.Expect(getFleet(g).Status.Held).To(BeEmpty())
+		}, waitShort, pollFast).Should(Succeed())
+
+		// A release is a transfer, not an unpin: the fleet carries on running
+		// exactly the commit the hold held it at.
+		By("checking the commit is unchanged and the controller is its sole owner")
+		Expect(pinOf(Default, teamNode)).To(Equal(pinned))
+		owners := pin.Owners(getRepo(Default, teamNode))
+		Expect(owners).To(HaveLen(1), "spec.ref.commit still has a foreign owner: %+v", owners)
+		Expect(owners[0].Manager).To(Equal(pin.FieldManager))
+
+		expectQuiescent()
+
+		// `status --derive` prints the controller's picture beside a live
+		// re-derivation of it. The two agree on everything the derivation can
+		// see — and on a quiescent fleet that is the whole graph — but they
+		// cannot agree on the *phase*, and it would be wrong to assert that
+		// they do: without --poll a derivation has no ref observations at all,
+		// and DESIGN §3.3 rule 2 makes an unobserved pinned node conservatively
+		// unsettled rather than let it pass for quiescent. --poll is no help
+		// from here either: the fixture sources are addressed by the git
+		// server's in-cluster Service name, which the host running wfctl
+		// cannot resolve. So the assertion is the honest one — same graph,
+		// same counts, nothing blocked, nothing held, and the blind
+		// derivation declining to claim a quiescence it cannot prove.
+		By("checking `wfctl status --derive` re-derives the controller's picture")
+		var report wfctlStatusPayload
+		Eventually(func(g Gomega) {
+			report = wfctlStatusDerive(g)
+			g.Expect(report.Wavefront.Status.Phase).To(Equal(wavefrontv1alpha1.PhaseQuiescent))
+		}, waitShort, time.Second).Should(Succeed())
+
+		reported := report.Wavefront.Status
+		Expect(report.Diagnostics).To(BeEmpty(), "the derivation reported a degraded picture")
+		Expect(report.Derived.GraphValid).To(BeTrue())
+		Expect(report.Derived.Counts.Observed).To(Equal(reported.Nodes.Observed))
+		Expect(report.Derived.Counts.Pinned).To(Equal(reported.Nodes.Pinned))
+		Expect(report.Derived.Counts.Gates).To(Equal(reported.Nodes.Gates))
+		Expect(report.Derived.Blocked).To(BeEmpty())
+		Expect(report.Derived.Held).To(BeEmpty())
+		Expect(report.Derived.Counts.Converging).To(Equal(reported.Nodes.Pinned),
+			"a blind derivation should hold every pinned node unsettled: %+v", report.Derived)
+		Expect(report.Derived.Phase).To(Equal(wavefrontv1alpha1.PhaseAdvancing),
+			"derived picture: %+v", report.Derived)
+
+		By("reproducing the blocked subtree so `wfctl explain` has a chain to walk")
+		shaT := blockTeamBehindInfra()
+
+		By("checking `wfctl explain` names the reason and the unhealthy ancestor")
+		Eventually(func(g Gomega) {
+			explained, stderr, code := runWfctl("explain", teamNodeRef)
+			g.Expect(code).To(BeZero(), "wfctl explain exited %d: %s", code, stderr)
+			g.Expect(explained).To(ContainSubstring(teamNodeRef))
+			g.Expect(explained).To(ContainSubstring("AncestorUnhealthy"))
+			// Attribution is the nearest unsettled ancestor, so which of the
+			// two it names is Flux's reconcile timing (see the blocked-subtree
+			// scenario above); naming neither is the failure.
+			g.Expect(explained).To(SatisfyAny(
+				ContainSubstring(fleetNamespace+"/"+infraNode),
+				ContainSubstring(fleetNamespace+"/"+gateNode)))
+			g.Expect(explained).To(ContainSubstring("root cause:"))
+		}, waitShort, time.Second).Should(Succeed())
+
+		By("handing the fleet back as it was found: infra fixed, the subtree drained")
+		shaFix := pushRevision(repos[infraNode])
+		Eventually(func(g Gomega) {
+			g.Expect(pinOf(g, infraNode)).To(Equal(shaFix))
+			g.Expect(pinOf(g, teamNode)).To(Equal(shaT))
 		}, waitConverge, pollFast).Should(Succeed())
 
 		expectQuiescent()
@@ -702,6 +848,151 @@ func pruneServerHistory(repo string) {
 	if out, err := utils.Run(cmd); err != nil {
 		_, _ = fmt.Fprintf(GinkgoWriter, "history prune (best effort) failed: %v\n%s", err, out)
 	}
+}
+
+// --- wfctl -----------------------------------------------------------------
+
+// wfctlBin is the binary the `test-e2e` target builds before the suite starts
+// (Makefile, build-wfctl). Running the built artefact rather than the package
+// is the point: the scenario is about the command an operator actually types.
+func wfctlBin() string {
+	GinkgoHelper()
+	dir, err := utils.GetProjectDir()
+	Expect(err).NotTo(HaveOccurred())
+	return filepath.Join(dir, "bin", "wfctl")
+}
+
+// wfctlFlags are the connection flags every invocation carries: the same
+// cluster the assertions read, and the fixture Wavefront named outright so no
+// command has to auto-select one.
+func wfctlFlags() []string {
+	flags := []string{"--wavefront", fleetName, "--no-color"}
+	if kubeconfig := os.Getenv("KUBECONFIG"); kubeconfig != "" {
+		flags = append(flags, "--kubeconfig", kubeconfig)
+	}
+	if kubeContext != "" {
+		flags = append(flags, "--context", kubeContext)
+	}
+	return flags
+}
+
+// runWfctl runs wfctl and returns its streams separately with the exit status.
+//
+// The status is returned rather than failed on, because a non-zero one is part
+// of the contract: `status` exits 2 on a Blocked fleet, which is precisely the
+// state `explain` is read in. stdout is kept clean of stderr so that `-o json`
+// stays machine-readable even when the command also warns.
+func runWfctl(args ...string) (stdout, stderr string, code int) {
+	GinkgoHelper()
+	full := append(wfctlFlags(), args...)
+	cmd := exec.Command(wfctlBin(), full...)
+
+	var outBuf, errBuf bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &outBuf, &errBuf
+	_, _ = fmt.Fprintf(GinkgoWriter, "running: wfctl %s\n", strings.Join(full, " "))
+
+	err := cmd.Run()
+	var exit *exec.ExitError
+	switch {
+	case err == nil:
+	case errors.As(err, &exit):
+		code = exit.ExitCode()
+	default:
+		// Not a command failure: the binary is missing or unrunnable.
+		Expect(err).NotTo(HaveOccurred(), "failed to execute %s", wfctlBin())
+	}
+
+	if errBuf.Len() > 0 {
+		_, _ = fmt.Fprintf(GinkgoWriter, "wfctl stderr:\n%s", errBuf.String())
+	}
+	return outBuf.String(), errBuf.String(), code
+}
+
+// wfctlOK runs a write command and requires a clean exit.
+func wfctlOK(args ...string) string {
+	GinkgoHelper()
+	out, stderr, code := runWfctl(args...)
+	Expect(code).To(BeZero(), "wfctl %s exited %d:\n%s%s",
+		strings.Join(args, " "), code, out, stderr)
+	return out
+}
+
+// wfctlNodes decodes `wfctl nodes -o json`: the snapshot's node views, read
+// from the status the controller published rather than re-derived.
+func wfctlNodes(g Gomega) []snapshot.NodeView {
+	out, stderr, code := runWfctl("nodes", "-o", "json")
+	g.Expect(code).To(BeZero(), "wfctl nodes exited %d: %s", code, stderr)
+
+	var nodes []snapshot.NodeView
+	g.Expect(json.Unmarshal([]byte(out), &nodes)).To(Succeed(), "unparseable `wfctl nodes` output: %s", out)
+	return nodes
+}
+
+// wfctlStatusPayload is the document `wfctl status -o json` prints. cli's own
+// type is unexported, and restating the shape here is the honest test: what is
+// asserted is the JSON contract a script sees, not an internal struct.
+type wfctlStatusPayload struct {
+	Wavefront   snapshot.WavefrontView `json:"wavefront"`
+	Derived     snapshot.DerivedStatus `json:"derived"`
+	Diagnostics []string               `json:"diagnostics,omitempty"`
+}
+
+// wfctlStatusDerive decodes `wfctl status --derive -o json`: what the
+// controller reported beside what a live derivation just proved.
+func wfctlStatusDerive(g Gomega) wfctlStatusPayload {
+	out, stderr, code := runWfctl("status", "--derive", "-o", "json")
+	// 2 is "the fleet is Blocked", which is a verdict, not a failure.
+	g.Expect(code).To(BeElementOf(0, 2), "wfctl status exited %d: %s", code, stderr)
+
+	var payload wfctlStatusPayload
+	g.Expect(json.Unmarshal([]byte(out), &payload)).To(Succeed(), "unparseable `wfctl status` output: %s", out)
+	return payload
+}
+
+// nodeViewOf finds one fixture node in a decoded `wfctl nodes` listing.
+func nodeViewOf(nodes []snapshot.NodeView, name string) *snapshot.NodeView {
+	for i := range nodes {
+		if nodes[i].Ref.Namespace == fleetNamespace && nodes[i].Ref.Name == name {
+			return &nodes[i]
+		}
+	}
+	return nil
+}
+
+// memberOf reads one node's published state out of status.members — the record
+// the status origin renders, and so the thing `wfctl nodes` has to agree with.
+func memberOf(fleet *wavefrontv1alpha1.Wavefront, name string) *wavefrontv1alpha1.Member {
+	for i := range fleet.Status.Members {
+		if fleet.Status.Members[i].Node.Name == name {
+			return &fleet.Status.Members[i]
+		}
+	}
+	return nil
+}
+
+// blockTeamBehindInfra reproduces the blocked subtree: infra unhealthy, team-a
+// with an advance it cannot have. It returns the SHA team-a is waiting on, so
+// the caller can wait for the subtree to drain once infra is fixed.
+func blockTeamBehindInfra() string {
+	GinkgoHelper()
+	shaBroken, err := repos[infraNode].PushFile(configMapPath, brokenManifest, "break infra for explain")
+	Expect(err).NotTo(HaveOccurred())
+
+	Eventually(func(g Gomega) {
+		g.Expect(pinOf(g, infraNode)).To(Equal(shaBroken))
+		g.Expect(readyStatus(g, infraNode)).To(Equal("False"))
+	}, waitConverge, pollFast).Should(Succeed())
+
+	pending := pushRevision(repos[teamNode])
+	Eventually(func(g Gomega) {
+		fleet := getFleet(g)
+		g.Expect(fleet.Status.Phase).To(Equal(wavefrontv1alpha1.PhaseBlocked))
+		entry := blockedEntry(fleet, teamNode)
+		g.Expect(entry).NotTo(BeNil())
+		g.Expect(entry.Reason).To(Equal("AncestorUnhealthy"))
+	}, waitShort, pollFast).Should(Succeed())
+
+	return pending
 }
 
 // --- diagnostics -----------------------------------------------------------
