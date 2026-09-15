@@ -135,11 +135,7 @@ func IsCertManagerCRDsInstalled() bool {
 
 // LoadImageToKindClusterWithName loads a local docker image to the kind cluster
 func LoadImageToKindClusterWithName(name string) error {
-	cluster := defaultKindCluster
-	if v, ok := os.LookupEnv("KIND_CLUSTER"); ok {
-		cluster = v
-	}
-	kindOptions := []string{"load", "docker-image", name, "--name", cluster}
+	kindOptions := []string{"load", "docker-image", name, "--name", KindClusterName()}
 	kindBinary := defaultKindBinary
 	if v, ok := os.LookupEnv("KIND"); ok {
 		kindBinary = v
@@ -147,6 +143,15 @@ func LoadImageToKindClusterWithName(name string) error {
 	cmd := exec.Command(kindBinary, kindOptions...)
 	_, err := Run(cmd)
 	return err
+}
+
+// KindClusterName is the kind cluster the suite is allowed to touch: KIND_CLUSTER
+// as `make test-e2e` sets it, or kind's own default.
+func KindClusterName() string {
+	if v, ok := os.LookupEnv("KIND_CLUSTER"); ok {
+		return v
+	}
+	return defaultKindCluster
 }
 
 // GetNonEmptyLines converts given command output string into individual objects

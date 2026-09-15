@@ -21,8 +21,10 @@ package e2e
 
 import (
 	"fmt"
+	"net/url"
 	"os"
 	"os/exec"
+	"strings"
 	"testing"
 	"time"
 
@@ -79,6 +81,10 @@ var _ = BeforeSuite(func() {
 	}
 
 	configureKubectlKubeRC()
+
+	By("refusing any target other than the e2e kind cluster")
+	verifyTargetIsKind()
+
 	setupCertManager()
 
 	By("verifying the cluster was prepared by `make test-e2e`")
@@ -166,6 +172,34 @@ func verifyClusterPrepared() {
 	_, err := utils.Run(cmd)
 	Expect(err).NotTo(HaveOccurred(),
 		"git server missing — run `make test-e2e` rather than `go test -tags=e2e` directly")
+}
+
+// verifyTargetIsKind aborts the suite unless the client it is about to use
+// resolves to the kind cluster `make test-e2e` provisioned, on loopback.
+//
+// The suite installs CRDs, deploys the manager, and creates and deletes
+// namespaces. Whichever context ~/.kube/config happens to name is not an
+// acceptable target for that — least of all when another kind cluster being
+// created or deleted on the same machine has just rewritten it — so this is
+// checked before the first mutating step, and independently of the Makefile's
+// own guard, to cover a hand-run `go test -tags=e2e`.
+func verifyTargetIsKind() {
+	cfg, err := ctrl.GetConfig()
+	Expect(err).NotTo(HaveOccurred(), "Failed to load kubeconfig")
+
+	host, err := url.Parse(cfg.Host)
+	Expect(err).NotTo(HaveOccurred(), "unparseable API server address %q", cfg.Host)
+
+	out, err := utils.Run(exec.Command("kubectl", "config", "current-context"))
+	Expect(err).NotTo(HaveOccurred(), "failed to read the current kubeconfig context")
+	ctx := strings.TrimSpace(out)
+
+	want := "kind-" + utils.KindClusterName()
+	refusal := fmt.Sprintf("refusing to run e2e against context %q at %q (expected %s on loopback) — "+
+		"the suite installs CRDs, deploys the manager and deletes namespaces; "+
+		"run `make test-e2e`, which provisions and pins its own kind cluster", ctx, cfg.Host, want)
+	Expect(ctx).To(Equal(want), refusal)
+	Expect(host.Hostname()).To(BeElementOf("127.0.0.1", "localhost", "::1"), refusal)
 }
 
 // Disable kubectl kuberc by default for test isolation.

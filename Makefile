@@ -92,6 +92,14 @@ E2E_IMG ?= example.com/wavefront-controller:v0.0.1
 GITSERVER_IMG ?= example.com/wavefront-gitserver:v0.0.1
 E2E_TIMEOUT ?= 90m
 
+# Every e2e step addresses the kind cluster through this file and nothing else,
+# so a context switch in ~/.kube/config — or another kind cluster being created
+# or deleted on the same machine, which rewrites the current context — cannot
+# redirect the run at a cluster it must never touch. kind honours $KUBECONFIG
+# for create, export and delete, so ~/.kube/config is never read or written.
+E2E_KUBECONFIG ?= $(LOCALBIN)/e2e.kubeconfig
+E2E_ENV = KUBECONFIG=$(E2E_KUBECONFIG)
+
 # The git server binary is cross-compiled on the host so its image needs no Go
 # toolchain and no module download; it must therefore target the daemon's
 # architecture, not the host's.
@@ -103,12 +111,25 @@ setup-test-e2e: ## Set up a Kind cluster for e2e tests if it does not exist
 		echo "Kind is not installed. Please install Kind manually."; \
 		exit 1; \
 	}
+	@mkdir -p "$(dir $(E2E_KUBECONFIG))"
 	@case "$$($(KIND) get clusters)" in \
 		*"$(KIND_CLUSTER)"*) \
-			echo "Kind cluster '$(KIND_CLUSTER)' already exists. Skipping creation." ;; \
+			echo "Kind cluster '$(KIND_CLUSTER)' already exists. Skipping creation."; \
+			$(E2E_ENV) $(KIND) export kubeconfig --name $(KIND_CLUSTER) ;; \
 		*) \
 			echo "Creating Kind cluster '$(KIND_CLUSTER)'..."; \
-			$(KIND) create cluster --name $(KIND_CLUSTER) ;; \
+			$(E2E_ENV) $(KIND) create cluster --name $(KIND_CLUSTER) ;; \
+	esac
+
+.PHONY: e2e-guard
+e2e-guard: ## Refuse to run e2e against anything but the kind cluster on loopback.
+	@ctx="$$($(E2E_ENV) $(KUBECTL) config current-context 2>/dev/null)"; \
+	server="$$($(E2E_ENV) $(KUBECTL) config view --minify -o jsonpath='{.clusters[0].cluster.server}' 2>/dev/null)"; \
+	case "$$ctx|$$server" in \
+		"kind-$(KIND_CLUSTER)|https://127.0.0.1:"*) ;; \
+		*) echo "refusing to run e2e against context '$$ctx' at '$$server'" \
+		        "(expected kind-$(KIND_CLUSTER) on 127.0.0.1 via $(E2E_KUBECONFIG))"; \
+		   exit 1 ;; \
 	esac
 
 .PHONY: gitserver-build
@@ -124,24 +145,24 @@ e2e-images: gitserver-build ## Build the manager and git server images and load 
 	$(KIND) load docker-image $(GITSERVER_IMG) --name $(KIND_CLUSTER)
 
 .PHONY: e2e-flux
-e2e-flux: ## Install the vendored Flux release into the e2e cluster.
-	$(KUBECTL) apply --server-side --force-conflicts -f $(FLUX_INSTALL)
-	$(KUBECTL) -n flux-system wait --for=condition=Available --timeout=5m \
+e2e-flux: e2e-guard ## Install the vendored Flux release into the e2e cluster.
+	$(E2E_ENV) $(KUBECTL) apply --server-side --force-conflicts -f $(FLUX_INSTALL)
+	$(E2E_ENV) $(KUBECTL) -n flux-system wait --for=condition=Available --timeout=5m \
 	  deployment/source-controller deployment/kustomize-controller
 
 .PHONY: e2e-gitserver
-e2e-gitserver: ## Deploy the e2e git server on an empty repository store.
+e2e-gitserver: e2e-guard ## Deploy the e2e git server on an empty repository store.
 	# On a reused cluster, fixtures pinned to commits the restarted (and hence
 	# empty) git server no longer serves would poison the run.
-	-$(KUBECTL) delete -f test/e2e/fixtures.yaml --ignore-not-found --timeout=3m
-	$(KUBECTL) apply -f test/e2e/gitserver/manifests.yaml
-	$(KUBECTL) -n wavefront-e2e rollout restart deployment/gitserver
-	$(KUBECTL) -n wavefront-e2e rollout status deployment/gitserver --timeout=3m
+	-$(E2E_ENV) $(KUBECTL) delete -f test/e2e/fixtures.yaml --ignore-not-found --timeout=3m
+	$(E2E_ENV) $(KUBECTL) apply -f test/e2e/gitserver/manifests.yaml
+	$(E2E_ENV) $(KUBECTL) -n wavefront-e2e rollout restart deployment/gitserver
+	$(E2E_ENV) $(KUBECTL) -n wavefront-e2e rollout status deployment/gitserver --timeout=3m
 
 .PHONY: test-e2e
-test-e2e: setup-test-e2e manifests generate fmt vet kustomize build-wfctl e2e-images e2e-flux e2e-gitserver ## Run the e2e tests. Expected an isolated environment using Kind.
+test-e2e: setup-test-e2e e2e-guard manifests generate fmt vet kustomize build-wfctl e2e-images e2e-flux e2e-gitserver ## Run the e2e tests. Expected an isolated environment using Kind.
 	@status=0; \
-	CERT_MANAGER_INSTALL_SKIP=true KIND=$(KIND) KIND_CLUSTER=$(KIND_CLUSTER) E2E_IMG=$(E2E_IMG) \
+	CERT_MANAGER_INSTALL_SKIP=true $(E2E_ENV) KIND=$(KIND) KIND_CLUSTER=$(KIND_CLUSTER) E2E_IMG=$(E2E_IMG) \
 	  go test -tags=e2e ./test/e2e/ -v -ginkgo.v -timeout $(E2E_TIMEOUT) || status=$$?; \
 	( cd config/manager && "$(KUSTOMIZE)" edit set image controller=controller:latest ); \
 	exit $$status
@@ -149,7 +170,8 @@ test-e2e: setup-test-e2e manifests generate fmt vet kustomize build-wfctl e2e-im
 
 .PHONY: cleanup-test-e2e
 cleanup-test-e2e: ## Tear down the Kind cluster used for e2e tests
-	@$(KIND) delete cluster --name $(KIND_CLUSTER)
+	@$(E2E_ENV) $(KIND) delete cluster --name $(KIND_CLUSTER)
+	@rm -f "$(E2E_KUBECONFIG)"
 
 .PHONY: lint
 lint: golangci-lint ## Run golangci-lint linter
