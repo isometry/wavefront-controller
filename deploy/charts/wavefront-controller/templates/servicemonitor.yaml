@@ -1,0 +1,31 @@
+{{- if and .Values.metrics.enabled .Values.metrics.serviceMonitor.enabled }}
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "chart.fullname" . }}-metrics-monitor
+  namespace: {{ include "chart.namespace" . }}
+  {{- with (deepCopy (default dict .Values.commonAnnotations)) }}
+  annotations:
+    {{- range $key, $value := . }}
+    {{ $key }}: {{ tpl (toString $value) $ | quote }}
+    {{- end }}
+  {{- end }}
+  labels:
+    component: metrics
+    {{- include "labels" . | nindent 4 }}
+spec:
+  endpoints:
+    - path: /metrics
+      port: metrics
+      scheme: {{ ternary "https" "http" .Values.metrics.secure }}
+      {{- if .Values.metrics.secure }}
+      # The ServiceAccount token is only ever sent over TLS.
+      bearerTokenFile: /var/run/secrets/kubernetes.io/serviceaccount/token
+      tlsConfig:
+        insecureSkipVerify: true
+      {{- end }}
+  selector:
+    matchLabels:
+      {{- include "selectorLabels" . | nindent 6 }}
+{{- end }}

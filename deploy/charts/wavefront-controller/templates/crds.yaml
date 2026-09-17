@@ -1,0 +1,504 @@
+{{ if .Values.crds.install -}}
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: wavefronts.wavefront.as-code.io
+  {{- with mergeOverwrite (deepCopy (default dict .Values.commonAnnotations)) (ternary (dict "helm.sh/resource-policy" "keep") (dict) .Values.crds.keep) }}
+  annotations:
+    {{- range $key, $value := . }}
+    {{ $key }}: {{ tpl (toString $value) $ | quote }}
+    {{- end }}
+  {{- end }}
+  labels:
+    component: crd
+    {{- include "labels" . | nindent 4 }}
+spec:
+  group: wavefront.as-code.io
+  names:
+    kind: Wavefront
+    listKind: WavefrontList
+    plural: wavefronts
+    singular: wavefront
+  scope: Cluster
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.mode
+      name: Mode
+      type: string
+    - jsonPath: .status.phase
+      name: Phase
+      type: string
+    - jsonPath: .status.nodes.pending
+      name: Pending
+      type: integer
+    - jsonPath: .status.conditions[?(@.type=="Ready")].status
+      name: Ready
+      type: string
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: Wavefront is the Schema for the wavefronts API
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: spec defines the desired state of Wavefront
+            properties:
+              mode:
+                default: Shadow
+                description: Mode controls whether admissions are executed or only
+                  reported.
+                enum:
+                - Shadow
+                - Enforce
+                type: string
+              nodes:
+                properties:
+                  kinds:
+                    description: Kinds of node resources to graph. v1alpha1 supports
+                      only Kustomization.
+                    items:
+                      type: string
+                    maxItems: 1
+                    minItems: 1
+                    type: array
+                    x-kubernetes-validations:
+                    - message: only Kustomization nodes are supported
+                      rule: self.all(k, k == 'Kustomization')
+                  selector:
+                    description: Selector matches graph-member node resources across
+                      all namespaces.
+                    properties:
+                      matchExpressions:
+                        description: matchExpressions is a list of label selector
+                          requirements. The requirements are ANDed.
+                        items:
+                          description: |-
+                            A label selector requirement is a selector that contains values, a key, and an operator that
+                            relates the key and values.
+                          properties:
+                            key:
+                              description: key is the label key that the selector
+                                applies to.
+                              type: string
+                            operator:
+                              description: |-
+                                operator represents a key's relationship to a set of values.
+                                Valid operators are In, NotIn, Exists and DoesNotExist.
+                              type: string
+                            values:
+                              description: |-
+                                values is an array of string values. If the operator is In or NotIn,
+                                the values array must be non-empty. If the operator is Exists or DoesNotExist,
+                                the values array must be empty. This array is replaced during a strategic
+                                merge patch.
+                              items:
+                                type: string
+                              type: array
+                              x-kubernetes-list-type: atomic
+                          required:
+                          - key
+                          - operator
+                          type: object
+                        type: array
+                        x-kubernetes-list-type: atomic
+                      matchLabels:
+                        additionalProperties:
+                          type: string
+                        description: |-
+                          matchLabels is a map of {key,value} pairs. A single {key,value} in the matchLabels
+                          map is equivalent to an element of matchExpressions, whose key field is "key", the
+                          operator is "In", and the values array contains only "value". The requirements are ANDed.
+                        type: object
+                    type: object
+                    x-kubernetes-map-type: atomic
+                required:
+                - kinds
+                - selector
+                type: object
+              poll:
+                default: {}
+                properties:
+                  interval:
+                    default: 90s
+                    description: Interval between ref-advertisement polling sweeps.
+                    type: string
+                    x-kubernetes-validations:
+                    - message: interval must be a valid Go duration (e.g. "90s", "1h30m")
+                      rule: self.matches('^([0-9]+([.][0-9]+)?(ms|s|m|h))+$')
+                  perHostConcurrency:
+                    default: 4
+                    description: PerHostConcurrency bounds concurrent ref listings
+                      per git host.
+                    minimum: 1
+                    type: integer
+                type: object
+              suspend:
+                description: Suspend freezes all pin writes; detection and status
+                  continue.
+                type: boolean
+            required:
+            - nodes
+            type: object
+          status:
+            description: status defines the observed state of Wavefront
+            properties:
+              blocked:
+                description: |-
+                  Blocked and Held are capped exceptional-state lists (see StatusListCap);
+                  the counts in Nodes are authoritative.
+                items:
+                  properties:
+                    ancestor:
+                      description: |-
+                        NodeReference identifies a graph node. Typed {kind, namespace, name} from
+                        day one so HelmRelease nodes are a non-breaking addition (DESIGN D12).
+                      properties:
+                        kind:
+                          enum:
+                          - Kustomization
+                          type: string
+                        name:
+                          type: string
+                        namespace:
+                          type: string
+                      required:
+                      - kind
+                      - name
+                      - namespace
+                      type: object
+                    node:
+                      description: |-
+                        NodeReference identifies a graph node. Typed {kind, namespace, name} from
+                        day one so HelmRelease nodes are a non-breaking addition (DESIGN D12).
+                      properties:
+                        kind:
+                          enum:
+                          - Kustomization
+                          type: string
+                        name:
+                          type: string
+                        namespace:
+                          type: string
+                      required:
+                      - kind
+                      - name
+                      - namespace
+                      type: object
+                    reason:
+                      type: string
+                    since:
+                      format: date-time
+                      type: string
+                  required:
+                  - node
+                  - reason
+                  - since
+                  type: object
+                type: array
+                x-kubernetes-list-type: atomic
+              conditions:
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              held:
+                items:
+                  properties:
+                    manager:
+                      description: |-
+                        Manager names the foreign field manager owning spec.ref.commit; empty
+                        for a Suspend hold, which has no owning actor.
+                      type: string
+                    node:
+                      description: |-
+                        NodeReference identifies a graph node. Typed {kind, namespace, name} from
+                        day one so HelmRelease nodes are a non-breaking addition (DESIGN D12).
+                      properties:
+                        kind:
+                          enum:
+                          - Kustomization
+                          type: string
+                        name:
+                          type: string
+                        namespace:
+                          type: string
+                      required:
+                      - kind
+                      - name
+                      - namespace
+                      type: object
+                    reason:
+                      description: |-
+                        Reason distinguishes how the source is held: a foreign field manager
+                        owning spec.ref.commit (HandPin) or spec.suspend (Suspend).
+                      enum:
+                      - HandPin
+                      - Suspend
+                      type: string
+                    source:
+                      type: string
+                  required:
+                  - node
+                  - source
+                  type: object
+                type: array
+                x-kubernetes-list-type: atomic
+              lastEvaluated:
+                description: |-
+                  LastEvaluated is advanced at most once per spec.poll.interval so that
+                  watch-triggered reconciles do not rewrite status every pass.
+                format: date-time
+                type: string
+              members:
+                description: |-
+                  Members lists every evaluated node's derived state (selected nodes and the
+                  gate nodes reached through dependsOn), sorted by kind/namespace/name,
+                  capped at MembersCap; MembersOmitted counts the rest.
+                items:
+                  description: |-
+                    Member is one evaluated node's derived state for the last evaluation
+                    (selected nodes and the gate nodes reached through dependsOn).
+                    Write-only output: the reconciler never reads it back (DESIGN D9).
+                  properties:
+                    blocked:
+                      description: BlockedRef attributes a blocked node to its nearest
+                        unsettled ancestor.
+                      properties:
+                        ancestor:
+                          description: |-
+                            NodeReference identifies a graph node. Typed {kind, namespace, name} from
+                            day one so HelmRelease nodes are a non-breaking addition (DESIGN D12).
+                          properties:
+                            kind:
+                              enum:
+                              - Kustomization
+                              type: string
+                            name:
+                              type: string
+                            namespace:
+                              type: string
+                          required:
+                          - kind
+                          - name
+                          - namespace
+                          type: object
+                        reason:
+                          description: |-
+                            Reason is the engine's BlockedReason (AncestorUnhealthy, AncestorPending, AncestorHeld,
+                            AncestorUnobserved, SelfHeld, GraphCycle, SharedSourceBlocked).
+                          type: string
+                      required:
+                      - reason
+                      type: object
+                    dependsOn:
+                      items:
+                        description: |-
+                          NodeReference identifies a graph node. Typed {kind, namespace, name} from
+                          day one so HelmRelease nodes are a non-breaking addition (DESIGN D12).
+                        properties:
+                          kind:
+                            enum:
+                            - Kustomization
+                            type: string
+                          name:
+                            type: string
+                          namespace:
+                            type: string
+                        required:
+                        - kind
+                        - name
+                        - namespace
+                        type: object
+                      type: array
+                      x-kubernetes-list-type: atomic
+                    held:
+                      type: boolean
+                    node:
+                      description: |-
+                        NodeReference identifies a graph node. Typed {kind, namespace, name} from
+                        day one so HelmRelease nodes are a non-breaking addition (DESIGN D12).
+                      properties:
+                        kind:
+                          enum:
+                          - Kustomization
+                          type: string
+                        name:
+                          type: string
+                        namespace:
+                          type: string
+                      required:
+                      - kind
+                      - name
+                      - namespace
+                      type: object
+                    observedSHA:
+                      type: string
+                    pendingSince:
+                      format: date-time
+                      type: string
+                    pin:
+                      type: string
+                    ready:
+                      type: boolean
+                    role:
+                      enum:
+                      - Pinned
+                      - Gate
+                      type: string
+                    source:
+                      type: string
+                    state:
+                      enum:
+                      - Settled
+                      - Pending
+                      - Admissible
+                      - Converging
+                      - Unhealthy
+                      type: string
+                  required:
+                  - node
+                  - ready
+                  - role
+                  - state
+                  type: object
+                type: array
+                x-kubernetes-list-type: atomic
+              membersOmitted:
+                type: integer
+              nodes:
+                properties:
+                  blocked:
+                    type: integer
+                  converging:
+                    type: integer
+                  gates:
+                    type: integer
+                  held:
+                    type: integer
+                  observed:
+                    type: integer
+                  pending:
+                    type: integer
+                  pinned:
+                    type: integer
+                required:
+                - blocked
+                - converging
+                - gates
+                - held
+                - observed
+                - pending
+                - pinned
+                type: object
+              observedGeneration:
+                format: int64
+                type: integer
+              phase:
+                description: Phase summarises fleet admission state.
+                enum:
+                - Quiescent
+                - Advancing
+                - Blocked
+                type: string
+              shadow:
+                description: |-
+                  Shadow lists would-be admissions already announced in Shadow mode
+                  (capped at StatusListCap); the edge-trigger ledger for ShadowAdmission
+                  events and the shadow admissions counter.
+                items:
+                  description: |-
+                    ShadowAdmission records a would-be admission announced in Shadow mode:
+                    the pin write the controller would have performed in Enforce.
+                  properties:
+                    source:
+                      description: Source is the "<namespace>/<name>" of the GitRepository.
+                      type: string
+                    to:
+                      description: To is the SHA that would be pinned.
+                      type: string
+                  required:
+                  - source
+                  - to
+                  type: object
+                type: array
+                x-kubernetes-list-type: atomic
+            type: object
+        required:
+        - spec
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
+{{- end }}

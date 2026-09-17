@@ -1,0 +1,117 @@
+---
+{{- $manager := .Values.manager }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "chart.fullname" . }}
+  namespace: {{ include "chart.namespace" . }}
+  {{- with mergeOverwrite (deepCopy (default dict .Values.commonAnnotations)) (default dict $manager.annotations) }}
+  annotations:
+    {{- range $key, $value := . }}
+    {{ $key }}: {{ tpl (toString $value) $ | quote }}
+    {{- end }}
+  {{- end }}
+  labels:
+    component: manager
+    {{- include "labels" . | nindent 4 }}
+    {{- with $manager.extraLabels -}}{{ toYaml . | nindent 4 }}{{- end }}
+spec:
+  replicas: {{ $manager.replicas }}
+  selector:
+    matchLabels:
+      {{- include "selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        {{- range $key, $value := mergeOverwrite (dict "kubectl.kubernetes.io/default-container" "manager") (deepCopy (default dict $manager.podAnnotations)) }}
+        {{ $key }}: {{ tpl (toString $value) $ | quote }}
+        {{- end }}
+      labels:
+        {{- include "selectorLabels" . | nindent 8 }}
+    spec:
+      {{- /*
+      No `command:` on the container: the image is built by ko, whose own
+      entrypoint (/ko-app/cmd) is the manager binary.
+      */}}
+      containers:
+        - args:
+            - --health-probe-bind-address=:8081
+            - --leader-elect={{ .Values.leaderElection.enabled }}
+          {{- if .Values.metrics.enabled }}
+            - --metrics-bind-address=:{{ .Values.metrics.listen.port }}
+            - --metrics-secure={{ .Values.metrics.secure }}
+          {{- else }}
+            - --metrics-bind-address=0
+          {{- end }}
+          {{- range $key, $value := $manager.extraArgs }}
+          {{- if kindIs "invalid" $value }}
+            - --{{ $key }}
+          {{- else }}
+            - --{{ $key }}={{ $value }}
+          {{- end }}
+          {{- end }}
+          {{- with $manager.env }}
+          env:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          image: {{ if (hasPrefix "sha256:" (default "" $manager.tag)) -}}
+              {{- printf "%s@%s" (tpl $manager.repository .) $manager.tag -}}
+            {{- else -}}
+              {{- printf "%s:%s" (tpl $manager.repository .) (or $manager.tag $.Chart.AppVersion "latest") -}}
+            {{- end }}
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8081
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          name: manager
+          ports:
+            - name: health
+              containerPort: 8081
+              protocol: TCP
+          {{- if .Values.metrics.enabled }}
+            - name: metrics
+              containerPort: {{ .Values.metrics.listen.port }}
+              protocol: TCP
+          {{- end }}
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 8081
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            {{- toYaml $manager.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+            seccompProfile:
+              type: RuntimeDefault
+      {{- with $manager.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $manager.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $manager.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      serviceAccountName: {{ include "chart.serviceAccountName" . }}
+      terminationGracePeriodSeconds: 10
+      {{- with $manager.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
