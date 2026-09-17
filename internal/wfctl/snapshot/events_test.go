@@ -33,11 +33,11 @@ import (
 // produce one.
 func testEvent(name, reason, eventType, note string, at time.Time, seriesCount int32) eventsv1.Event {
 	e := eventsv1.Event{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: EventNamespace},
-		EventTime:  metav1.NewMicroTime(at),
-		Reason:     reason,
-		Type:       eventType,
-		Note:       note,
+		Name: name, Namespace: EventNamespace,
+		EventTime: metav1.NewMicroTime(at),
+		Reason:    reason,
+		Type:      eventType,
+		Note:      note,
 		Regarding: corev1.ObjectReference{
 			Kind: regardingKindWavefront,
 			Name: wfName,
@@ -182,7 +182,11 @@ func TestListEventsFiltersBySource(t *testing.T) {
 // TestListEventsFiltersBySince proves the lower time bound is inclusive and
 // applied client-side (events.k8s.io/v1 has no selectable time field).
 func TestListEventsFiltersBySince(t *testing.T) {
-	base := time.Now()
+	// eventTime is a metav1.MicroTime, so anything an apiserver (or the fake
+	// client's JSON round trip) hands back is truncated to microseconds; a
+	// nanosecond-precision base (Linux time.Now()) would put the boundary
+	// event just before Since and break the inclusive-bound assertion.
+	base := time.Now().Truncate(time.Microsecond)
 	reader := eventsReader(
 		testEvent("old", "PinAdvanced", corev1.EventTypeNormal, "old", base, 0),
 		testEvent("boundary", "PinAdvanced", corev1.EventTypeNormal, "boundary", base.Add(time.Hour), 0),

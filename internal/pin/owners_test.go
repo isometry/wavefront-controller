@@ -43,7 +43,7 @@ func commitFieldsV1(t *testing.T) *metav1.FieldsV1 {
 	if err != nil {
 		t.Fatalf("encoding FieldsV1: %v", err)
 	}
-	return &metav1.FieldsV1{Raw: raw}
+	return metav1.NewFieldsV1(string(raw))
 }
 
 // TestOwners_and_Hold exercises Owners and Hold together against hand-built
@@ -139,7 +139,7 @@ func TestOwners_and_Hold(t *testing.T) {
 					{
 						Manager:   kubectlPatchManager,
 						Operation: metav1.ManagedFieldsOperationUpdate,
-						FieldsV1:  &metav1.FieldsV1{Raw: []byte("not valid json")},
+						FieldsV1:  metav1.NewFieldsV1("not valid json"),
 					},
 				}
 			},

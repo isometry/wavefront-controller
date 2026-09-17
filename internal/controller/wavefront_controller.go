@@ -711,7 +711,7 @@ func (r *WavefrontReconciler) mapToWavefronts(ctx context.Context, _ client.Obje
 	requests := make([]reconcile.Request, 0, len(list.Items))
 	for i := range list.Items {
 		requests = append(requests, reconcile.Request{
-			NamespacedName: types.NamespacedName{Name: list.Items[i].Name},
+			Name: list.Items[i].Name,
 		})
 	}
 	return requests

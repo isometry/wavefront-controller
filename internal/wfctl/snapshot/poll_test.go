@@ -26,7 +26,6 @@ import (
 
 	"github.com/go-git/go-git/v5/plumbing/transport"
 	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/scheme"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -66,8 +65,8 @@ func target(name, host, ref string, secret bool) gitpoll.Target {
 func TestObserve(t *testing.T) {
 	now := time.Date(2026, 9, 7, 12, 0, 0, 0, time.UTC)
 	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Namespace: nsFlux, Name: secretName},
-		Data:       map[string][]byte{"username": []byte("bot"), "password": []byte("hunter2")},
+		Namespace: nsFlux, Name: secretName,
+		Data: map[string][]byte{"username": []byte("bot"), "password": []byte("hunter2")},
 	}
 	reader := fake.NewClientBuilder().WithScheme(scheme.Scheme).WithObjects(secret).Build()
 
@@ -149,8 +148,8 @@ func TestObserveWithoutTargets(t *testing.T) {
 
 func TestSecretCacheReadsOncePerSecret(t *testing.T) {
 	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Namespace: nsFlux, Name: secretName},
-		Data:       map[string][]byte{"username": []byte("bot"), "password": []byte("hunter2")},
+		Namespace: nsFlux, Name: secretName,
+		Data: map[string][]byte{"username": []byte("bot"), "password": []byte("hunter2")},
 	}
 	reader := &countingReader{Reader: fake.NewClientBuilder().WithScheme(scheme.Scheme).WithObjects(secret).Build()}
 

@@ -177,7 +177,7 @@ func (r *Repo) init() error {
 	}
 
 	repo, err := gogit.PlainInitWithOptions(r.dir, &gogit.PlainInitOptions{
-		InitOptions: gogit.InitOptions{DefaultBranch: plumbing.NewBranchReferenceName(GitBranch)},
+		DefaultBranch: plumbing.NewBranchReferenceName(GitBranch),
 	})
 	if err != nil {
 		return fmt.Errorf("initialising %s: %w", r.dir, err)

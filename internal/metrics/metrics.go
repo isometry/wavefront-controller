@@ -250,8 +250,7 @@ func register[C prometheus.Collector](reg prometheus.Registerer, c C) (C, error)
 		return c, nil
 	}
 
-	var already prometheus.AlreadyRegisteredError
-	if errors.As(err, &already) {
+	if already, ok := errors.AsType[prometheus.AlreadyRegisteredError](err); ok {
 		if existing, ok := already.ExistingCollector.(C); ok {
 			return existing, nil
 		}

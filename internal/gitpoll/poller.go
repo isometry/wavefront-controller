@@ -436,8 +436,7 @@ func (p *Poller) poll(ctx context.Context, host string, t Target, creds *sweepSe
 		return
 	}
 	if err != nil {
-		var credErr *credentialError
-		if !errors.As(err, &credErr) {
+		if _, ok := errors.AsType[*credentialError](err); !ok {
 			p.countFailure(host)
 		}
 	}

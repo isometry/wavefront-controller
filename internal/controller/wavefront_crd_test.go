@@ -38,9 +38,7 @@ const (
 // validWavefront returns a minimally valid Wavefront CR for the given name.
 func validWavefront(name string) *wavefrontv1alpha1.Wavefront {
 	return &wavefrontv1alpha1.Wavefront{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: name,
-		},
+		Name: name,
 		Spec: wavefrontv1alpha1.WavefrontSpec{
 			Nodes: wavefrontv1alpha1.NodesSpec{
 				Kinds: []string{kindKustomization},
@@ -148,9 +146,7 @@ var _ = Describe("Wavefront CRD validation", func() {
 	It("accepts a fully specified Wavefront", func() {
 		// DESIGN §4.1 example; this is the real API group, not a stand-in.
 		wf := &wavefrontv1alpha1.Wavefront{
-			ObjectMeta: metav1.ObjectMeta{
-				Name: "fleet",
-			},
+			Name: "fleet",
 			Spec: wavefrontv1alpha1.WavefrontSpec{
 				Nodes: wavefrontv1alpha1.NodesSpec{
 					Kinds: []string{kindKustomization},

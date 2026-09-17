@@ -86,25 +86,19 @@ func TestKustomizationAdapter_Kind(t *testing.T) {
 
 func TestKustomizationAdapter_List_LabelSelection(t *testing.T) {
 	matchA := &kustomizev1.Kustomization{
-		ObjectMeta: metav1.ObjectMeta{
-			Namespace: "team-a",
-			Name:      appName,
-			Labels:    map[string]string{managedLabelKey: managedLabelValue},
-		},
+		Namespace: "team-a",
+		Name:      appName,
+		Labels:    map[string]string{managedLabelKey: managedLabelValue},
 	}
 	matchB := &kustomizev1.Kustomization{
-		ObjectMeta: metav1.ObjectMeta{
-			Namespace: "team-b",
-			Name:      appName,
-			Labels:    map[string]string{managedLabelKey: managedLabelValue},
-		},
+		Namespace: "team-b",
+		Name:      appName,
+		Labels:    map[string]string{managedLabelKey: managedLabelValue},
 	}
 	noMatch := &kustomizev1.Kustomization{
-		ObjectMeta: metav1.ObjectMeta{
-			Namespace: "team-c",
-			Name:      appName,
-			Labels:    map[string]string{"other": "label"},
-		},
+		Namespace: "team-c",
+		Name:      appName,
+		Labels:    map[string]string{"other": "label"},
 	}
 
 	c := newFakeClient(t, matchA, matchB, noMatch)
@@ -138,7 +132,7 @@ func TestKustomizationAdapter_DependsOn(t *testing.T) {
 		{
 			name: "namespace defaulting",
 			ks: &kustomizev1.Kustomization{
-				ObjectMeta: metav1.ObjectMeta{Namespace: nsA, Name: "child"},
+				Namespace: nsA, Name: "child",
 				Spec: kustomizev1.KustomizationSpec{
 					DependsOn: []kustomizev1.DependencyReference{
 						{Name: "parent", ReadyExpr: "self.status.foo == 'bar'"},
@@ -152,7 +146,7 @@ func TestKustomizationAdapter_DependsOn(t *testing.T) {
 		{
 			name: "cross-namespace dependsOn preserved",
 			ks: &kustomizev1.Kustomization{
-				ObjectMeta: metav1.ObjectMeta{Namespace: nsA, Name: "child"},
+				Namespace: nsA, Name: "child",
 				Spec: kustomizev1.KustomizationSpec{
 					DependsOn: []kustomizev1.DependencyReference{
 						{Name: "same-ns-parent"},
@@ -168,7 +162,7 @@ func TestKustomizationAdapter_DependsOn(t *testing.T) {
 		{
 			name: "no dependsOn",
 			ks: &kustomizev1.Kustomization{
-				ObjectMeta: metav1.ObjectMeta{Namespace: nsA, Name: "root"},
+				Namespace: nsA, Name: "root",
 			},
 			want: []adapter.NodeRef{},
 		},
@@ -204,7 +198,7 @@ func TestKustomizationAdapter_SourceRef(t *testing.T) {
 		{
 			name: "GitRepository sourceRef, namespace defaulted",
 			ks: &kustomizev1.Kustomization{
-				ObjectMeta: metav1.ObjectMeta{Namespace: nsA, Name: appName},
+				Namespace: nsA, Name: appName,
 				Spec: kustomizev1.KustomizationSpec{
 					SourceRef: kustomizev1.CrossNamespaceSourceReference{
 						Kind: "GitRepository",
@@ -217,7 +211,7 @@ func TestKustomizationAdapter_SourceRef(t *testing.T) {
 		{
 			name: "GitRepository sourceRef, explicit namespace",
 			ks: &kustomizev1.Kustomization{
-				ObjectMeta: metav1.ObjectMeta{Namespace: nsA, Name: appName},
+				Namespace: nsA, Name: appName,
 				Spec: kustomizev1.KustomizationSpec{
 					SourceRef: kustomizev1.CrossNamespaceSourceReference{
 						Kind:      "GitRepository",
@@ -231,7 +225,7 @@ func TestKustomizationAdapter_SourceRef(t *testing.T) {
 		{
 			name: "non-GitRepository sourceRef yields nil",
 			ks: &kustomizev1.Kustomization{
-				ObjectMeta: metav1.ObjectMeta{Namespace: nsA, Name: appName},
+				Namespace: nsA, Name: appName,
 				Spec: kustomizev1.KustomizationSpec{
 					SourceRef: kustomizev1.CrossNamespaceSourceReference{
 						Kind: "OCIRepository",
@@ -316,11 +310,9 @@ func TestKustomizationAdapter_Readiness(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			ks := &kustomizev1.Kustomization{
-				ObjectMeta: metav1.ObjectMeta{
-					Namespace:  nsA,
-					Name:       appName,
-					Generation: tt.generation,
-				},
+				Namespace:  nsA,
+				Name:       appName,
+				Generation: tt.generation,
 				Status: kustomizev1.KustomizationStatus{
 					ObservedGeneration: tt.observedGen,
 					Conditions:         tt.conditions,
@@ -379,7 +371,7 @@ func TestKustomizationAdapter_AppliedSHA(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			ks := &kustomizev1.Kustomization{
-				ObjectMeta: metav1.ObjectMeta{Namespace: nsA, Name: appName},
+				Namespace: nsA, Name: appName,
 				Status: kustomizev1.KustomizationStatus{
 					LastAppliedRevision: tt.revision,
 				},

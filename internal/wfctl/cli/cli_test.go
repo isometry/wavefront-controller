@@ -27,7 +27,6 @@ import (
 	"testing"
 
 	"github.com/spf13/cobra"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
@@ -299,7 +298,7 @@ func TestCaptureStampsTheCluster(t *testing.T) {
 	reader := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithObjects(&wavefrontv1alpha1.Wavefront{
-			ObjectMeta: metav1.ObjectMeta{Name: "fleet"},
+			Name: "fleet",
 		}).
 		Build()
 

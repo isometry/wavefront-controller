@@ -122,7 +122,7 @@ var _ = Describe("ListEvents", func() {
 // the shape both the controller's recorder and actions.Audit produce.
 func newTestEvent(name, reason, eventType string, regarding corev1.ObjectReference, at time.Time) *eventsv1.Event {
 	return &eventsv1.Event{
-		ObjectMeta:          metav1.ObjectMeta{Name: name, Namespace: snapshot.EventNamespace},
+		Name: name, Namespace: snapshot.EventNamespace,
 		EventTime:           metav1.NewMicroTime(at),
 		ReportingController: "wavefront-controller",
 		ReportingInstance:   "wavefront-controller",

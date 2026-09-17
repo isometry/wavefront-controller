@@ -478,11 +478,9 @@ const credentialURL = "https://bot:hunter2@git.example.com/org/apps.git"
 
 func managedRepo(commit string) *sourcev1.GitRepository {
 	return &sourcev1.GitRepository{
-		ObjectMeta: metav1.ObjectMeta{
-			Namespace: nsFlux,
-			Name:      nsApps,
-			Labels:    map[string]string{pin.ManagedLabel: "true"},
-		},
+		Namespace: nsFlux,
+		Name:      nsApps,
+		Labels:    map[string]string{pin.ManagedLabel: "true"},
 		Spec: sourcev1.GitRepositorySpec{
 			URL:       credentialURL,
 			Interval:  metav1.Duration{Duration: time.Minute},
@@ -571,7 +569,7 @@ func statusReader(t *testing.T, memberPin, livePin string) client.Reader {
 
 	evaluated := metav1.NewTime(time.Now())
 	wf := &wavefrontv1alpha1.Wavefront{
-		ObjectMeta: metav1.ObjectMeta{Name: wfName},
+		Name: wfName,
 		Spec: wavefrontv1alpha1.WavefrontSpec{
 			Nodes: wavefrontv1alpha1.NodesSpec{Kinds: []string{kustomizev1.KustomizationKind}},
 			Poll:  wavefrontv1alpha1.PollSpec{Interval: metav1.Duration{Duration: time.Hour}},

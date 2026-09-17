@@ -107,7 +107,7 @@ var _ = Describe("Snapshot provider parity", Ordered, func() {
 
 	AfterAll(func() {
 		Expect(client.IgnoreNotFound(k8sClient.Delete(ctx,
-			&wavefrontv1alpha1.Wavefront{ObjectMeta: metav1.ObjectMeta{Name: parityWavefront}}))).To(Succeed())
+			&wavefrontv1alpha1.Wavefront{Name: parityWavefront}))).To(Succeed())
 	})
 
 	It("publishes the status a controller would", func() {
@@ -298,7 +298,7 @@ var _ = Describe("Snapshot provider parity", Ordered, func() {
 	It("degrades to a partial source when the GitRepository cannot be read", func() {
 		By("deleting one source out from under the published status")
 		Expect(k8sClient.Delete(ctx, &sourcev1.GitRepository{
-			ObjectMeta: metav1.ObjectMeta{Namespace: repoB.Namespace, Name: repoB.Name},
+			Namespace: repoB.Namespace, Name: repoB.Name,
 		})).To(Succeed())
 		DeferCleanup(func() {
 			makeGitRepo(repoB, refMain, shaB)
@@ -501,7 +501,7 @@ func revisionOf(sha string) string { return "main@sha1:" + sha }
 
 func makeNamespace(name string) {
 	GinkgoHelper()
-	err := k8sClient.Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: name}})
+	err := k8sClient.Create(ctx, &corev1.Namespace{Name: name})
 	if err != nil && !apierrors.IsAlreadyExists(err) {
 		Expect(err).NotTo(HaveOccurred())
 	}
@@ -517,11 +517,9 @@ func makeNamespace(name string) {
 func makeGitRepo(src types.NamespacedName, refName, commit string) {
 	GinkgoHelper()
 	repo := &sourcev1.GitRepository{
-		ObjectMeta: metav1.ObjectMeta{
-			Namespace: src.Namespace,
-			Name:      src.Name,
-			Labels:    map[string]string{pin.ManagedLabel: "true"},
-		},
+		Namespace: src.Namespace,
+		Name:      src.Name,
+		Labels:    map[string]string{pin.ManagedLabel: "true"},
 		Spec: sourcev1.GitRepositorySpec{
 			URL:       fmt.Sprintf("https://bot:hunter2@git.example.com/%s/%s.git", src.Namespace, src.Name),
 			Interval:  metav1.Duration{Duration: time.Minute},
@@ -547,7 +545,7 @@ func makeKustomization(
 	}
 
 	ks := &kustomizev1.Kustomization{
-		ObjectMeta: metav1.ObjectMeta{Namespace: ref.Namespace, Name: ref.Name, Labels: labels},
+		Namespace: ref.Namespace, Name: ref.Name, Labels: labels,
 		Spec: kustomizev1.KustomizationSpec{
 			Interval:  metav1.Duration{Duration: time.Minute},
 			DependsOn: deps,
@@ -589,7 +587,7 @@ func setKustomizationReady(obj *kustomizev1.Kustomization, revision string) {
 func makeWavefront(name, scenario string) {
 	GinkgoHelper()
 	wf := &wavefrontv1alpha1.Wavefront{
-		ObjectMeta: metav1.ObjectMeta{Name: name},
+		Name: name,
 		Spec: wavefrontv1alpha1.WavefrontSpec{
 			Nodes: wavefrontv1alpha1.NodesSpec{
 				Kinds:    []string{kustomizev1.KustomizationKind},
@@ -605,5 +603,5 @@ func makeWavefront(name, scenario string) {
 func deleteWavefront(name string) {
 	GinkgoHelper()
 	Expect(client.IgnoreNotFound(k8sClient.Delete(ctx,
-		&wavefrontv1alpha1.Wavefront{ObjectMeta: metav1.ObjectMeta{Name: name}}))).To(Succeed())
+		&wavefrontv1alpha1.Wavefront{Name: name}))).To(Succeed())
 }

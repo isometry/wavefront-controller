@@ -78,7 +78,7 @@ func seedRepo(t *testing.T, repoURL string, auth transport.AuthMethod) (commitSH
 
 	dir := t.TempDir()
 	repo, err := gogit.PlainInitWithOptions(dir, &gogit.PlainInitOptions{
-		InitOptions: gogit.InitOptions{DefaultBranch: plumbing.NewBranchReferenceName("main")},
+		DefaultBranch: plumbing.NewBranchReferenceName("main"),
 	})
 	if err != nil {
 		t.Fatalf("PlainInitWithOptions: %v", err)

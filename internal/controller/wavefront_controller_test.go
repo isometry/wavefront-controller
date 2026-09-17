@@ -76,7 +76,7 @@ func repoURLFor(ns, name string) string {
 // makeNamespace creates (idempotently) the scenario's namespace.
 func makeNamespace(name string) {
 	GinkgoHelper()
-	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: name}}
+	ns := &corev1.Namespace{Name: name}
 	err := k8sClient.Create(ctx, ns)
 	if err != nil && !apierrors.IsAlreadyExists(err) {
 		Expect(err).NotTo(HaveOccurred())
@@ -89,7 +89,7 @@ func makeNamespace(name string) {
 func makeGitRepo(ns, name, url, refName string, managed bool) *sourcev1.GitRepository {
 	GinkgoHelper()
 	repo := &sourcev1.GitRepository{
-		ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: name},
+		Namespace: ns, Name: name,
 		Spec: sourcev1.GitRepositorySpec{
 			URL:       url,
 			Interval:  metav1.Duration{Duration: time.Minute},
@@ -118,7 +118,7 @@ func makeKustomization(
 	}
 
 	ks := &kustomizev1.Kustomization{
-		ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: name, Labels: labels},
+		Namespace: ns, Name: name, Labels: labels,
 		Spec: kustomizev1.KustomizationSpec{
 			Interval:  metav1.Duration{Duration: time.Minute},
 			Prune:     false,
@@ -192,7 +192,7 @@ func makeWavefront(name, scenario string, mode wavefrontv1alpha1.Mode) {
 func makeWavefrontPolling(name, scenario string, mode wavefrontv1alpha1.Mode, interval time.Duration) {
 	GinkgoHelper()
 	wf := &wavefrontv1alpha1.Wavefront{
-		ObjectMeta: metav1.ObjectMeta{Name: name},
+		Name: name,
 		Spec: wavefrontv1alpha1.WavefrontSpec{
 			Nodes: wavefrontv1alpha1.NodesSpec{
 				Kinds:    []string{kindKustomization},

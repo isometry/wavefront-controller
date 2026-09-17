@@ -28,7 +28,6 @@ import (
 	"time"
 
 	sourcev1 "github.com/fluxcd/source-controller/api/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -130,18 +129,16 @@ func testScheme(t *testing.T) *runtime.Scheme {
 }
 
 func testWavefront() *wavefrontv1alpha1.Wavefront {
-	return &wavefrontv1alpha1.Wavefront{ObjectMeta: metav1.ObjectMeta{Name: fleetName}}
+	return &wavefrontv1alpha1.Wavefront{Name: fleetName}
 }
 
 // managedRepo is a GitRepository opted into pin management.
 func managedRepo(name, url string, ref *sourcev1.GitRepositoryRef) *sourcev1.GitRepository {
 	return &sourcev1.GitRepository{
-		ObjectMeta: metav1.ObjectMeta{
-			Namespace: fluxNamespace,
-			Name:      name,
-			Labels:    map[string]string{pin.ManagedLabel: managedLabelValue},
-		},
-		Spec: sourcev1.GitRepositorySpec{URL: url, Reference: ref},
+		Namespace: fluxNamespace,
+		Name:      name,
+		Labels:    map[string]string{pin.ManagedLabel: managedLabelValue},
+		Spec:      sourcev1.GitRepositorySpec{URL: url, Reference: ref},
 	}
 }
 

@@ -50,11 +50,11 @@ const (
 // produce.
 func historyEvent(name, reason, eventType, note string, at time.Time) eventsv1.Event {
 	return eventsv1.Event{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: snapshot.EventNamespace},
-		EventTime:  metav1.NewMicroTime(at),
-		Reason:     reason,
-		Type:       eventType,
-		Note:       note,
+		Name: name, Namespace: snapshot.EventNamespace,
+		EventTime: metav1.NewMicroTime(at),
+		Reason:    reason,
+		Type:      eventType,
+		Note:      note,
 		Regarding: corev1.ObjectReference{
 			Kind: "Wavefront",
 			Name: testWavefront,
@@ -81,7 +81,7 @@ func historyIndexes(b *fake.ClientBuilder) *fake.ClientBuilder {
 // (so --node has something to resolve), seeded with events.
 func historyCluster(events ...eventsv1.Event) client.Client {
 	wf := &wavefrontv1alpha1.Wavefront{
-		ObjectMeta: metav1.ObjectMeta{Name: testWavefront},
+		Name: testWavefront,
 		Status: wavefrontv1alpha1.WavefrontStatus{
 			Members: []wavefrontv1alpha1.Member{
 				{

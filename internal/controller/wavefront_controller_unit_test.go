@@ -78,7 +78,7 @@ func teamAKey() types.NamespacedName {
 // real counts, a blocked entry and a hold ledger.
 func settledFleet() *wavefrontv1alpha1.Wavefront {
 	return &wavefrontv1alpha1.Wavefront{
-		ObjectMeta: metav1.ObjectMeta{Name: fleetName, Generation: 7},
+		Name: fleetName, Generation: 7,
 		Status: wavefrontv1alpha1.WavefrontStatus{
 			Phase: wavefrontv1alpha1.PhaseBlocked,
 			Nodes: wavefrontv1alpha1.NodeCounts{
@@ -227,7 +227,7 @@ func TestHoldLedgerSurvivesAnAbortedPass(t *testing.T) {
 	recorder := events.NewFakeRecorder(32)
 	r := &WavefrontReconciler{Recorder: recorder, Clock: time.Now, Metrics: metrics.Nop()}
 
-	wf := &wavefrontv1alpha1.Wavefront{ObjectMeta: metav1.ObjectMeta{Name: fleetName, Generation: 1}}
+	wf := &wavefrontv1alpha1.Wavefront{Name: fleetName, Generation: 1}
 	holding := func() *pass {
 		return &pass{wf: wf, res: &inputs.Result{
 			Resolved:     true,
@@ -288,7 +288,7 @@ func TestHoldLedgerSurvivesAnAbortedPass(t *testing.T) {
 func gaugePass(wavefront, node string, pendingSince time.Time) *pass {
 	ref := adapter.NodeRef{Kind: kindKustomization, Namespace: fluxNamespace, Name: node}
 	return &pass{
-		wf: &wavefrontv1alpha1.Wavefront{ObjectMeta: metav1.ObjectMeta{Name: wavefront}},
+		wf: &wavefrontv1alpha1.Wavefront{Name: wavefront},
 		res: &inputs.Result{
 			Resolved:     true,
 			GraphChecked: true,
@@ -478,7 +478,7 @@ func TestWavefrontDeletionRetiresItsMetricSeries(t *testing.T) {
 	// "fleet" no longer exists in the client: Reconcile takes the IsNotFound
 	// branch.
 	if _, err := r.Reconcile(context.Background(), ctrl.Request{
-		NamespacedName: types.NamespacedName{Name: fleetName},
+		Name: fleetName,
 	}); err != nil {
 		t.Fatalf("Reconcile on a deleted Wavefront returned %v, want nil", err)
 	}
@@ -521,7 +521,7 @@ func pollTarget(name string) gitpoll.Target {
 // pollWavefront is one Wavefront's poll policy, as updatePollSet reads it.
 func pollWavefront(name string, interval time.Duration, perHost int) *wavefrontv1alpha1.Wavefront {
 	return &wavefrontv1alpha1.Wavefront{
-		ObjectMeta: metav1.ObjectMeta{Name: name},
+		Name: name,
 		Spec: wavefrontv1alpha1.WavefrontSpec{
 			Poll: wavefrontv1alpha1.PollSpec{
 				Interval:           metav1.Duration{Duration: interval},
@@ -535,7 +535,7 @@ func wavefrontList(names ...string) *wavefrontv1alpha1.WavefrontList {
 	list := &wavefrontv1alpha1.WavefrontList{}
 	for _, name := range names {
 		list.Items = append(list.Items, wavefrontv1alpha1.Wavefront{
-			ObjectMeta: metav1.ObjectMeta{Name: name},
+			Name: name,
 		})
 	}
 	return list
@@ -647,7 +647,7 @@ func TestHoldEventsSuspendMessages(t *testing.T) {
 	recorder := events.NewFakeRecorder(32)
 	r := &WavefrontReconciler{Recorder: recorder, Clock: time.Now, Metrics: metrics.Nop()}
 
-	wf := &wavefrontv1alpha1.Wavefront{ObjectMeta: metav1.ObjectMeta{Name: fleetName}}
+	wf := &wavefrontv1alpha1.Wavefront{Name: fleetName}
 	detect := &pass{wf: wf, res: &inputs.Result{
 		Resolved:     true,
 		Holds:        map[types.NamespacedName]inputs.Hold{teamAKey(): {Kind: inputs.HoldSuspend}},
@@ -685,8 +685,8 @@ func TestHoldEventsKindFlipFiresReleaseAndDetect(t *testing.T) {
 	r := &WavefrontReconciler{Recorder: recorder, Clock: time.Now, Metrics: metrics.Nop()}
 
 	wf := &wavefrontv1alpha1.Wavefront{
-		ObjectMeta: metav1.ObjectMeta{Name: fleetName},
-		Status:     wavefrontv1alpha1.WavefrontStatus{Held: heldStatus("", wavefrontv1alpha1.HoldReasonSuspend)},
+		Name:   fleetName,
+		Status: wavefrontv1alpha1.WavefrontStatus{Held: heldStatus("", wavefrontv1alpha1.HoldReasonSuspend)},
 	}
 	p := &pass{wf: wf, res: &inputs.Result{
 		Resolved:     true,
@@ -720,8 +720,8 @@ func TestHoldEventsIdenticalLedgerFiresNothing(t *testing.T) {
 	r := &WavefrontReconciler{Recorder: recorder, Clock: time.Now, Metrics: metrics.Nop()}
 
 	wf := &wavefrontv1alpha1.Wavefront{
-		ObjectMeta: metav1.ObjectMeta{Name: fleetName},
-		Status:     wavefrontv1alpha1.WavefrontStatus{Held: heldStatus(humanManager, wavefrontv1alpha1.HoldReasonHandPin)},
+		Name:   fleetName,
+		Status: wavefrontv1alpha1.WavefrontStatus{Held: heldStatus(humanManager, wavefrontv1alpha1.HoldReasonHandPin)},
 	}
 	p := &pass{wf: wf, res: &inputs.Result{
 		Resolved:     true,
@@ -744,8 +744,8 @@ func TestHoldEventsEmptyReasonDefaultsToHandPin(t *testing.T) {
 	r := &WavefrontReconciler{Recorder: recorder, Clock: time.Now, Metrics: metrics.Nop()}
 
 	wf := &wavefrontv1alpha1.Wavefront{
-		ObjectMeta: metav1.ObjectMeta{Name: fleetName},
-		Status:     wavefrontv1alpha1.WavefrontStatus{Held: heldStatus(humanManager, "")},
+		Name:   fleetName,
+		Status: wavefrontv1alpha1.WavefrontStatus{Held: heldStatus(humanManager, "")},
 	}
 	p := &pass{wf: wf, res: &inputs.Result{
 		Resolved:     true,
@@ -789,7 +789,7 @@ func TestHoldEventsCapMirrorsStatus(t *testing.T) {
 	recorder := events.NewFakeRecorder(64)
 	r := &WavefrontReconciler{Recorder: recorder, Clock: time.Now, Metrics: metrics.Nop()}
 
-	wf := &wavefrontv1alpha1.Wavefront{ObjectMeta: metav1.ObjectMeta{Name: fleetName}}
+	wf := &wavefrontv1alpha1.Wavefront{Name: fleetName}
 	holds, nodeBySource := manyHolds(25)
 
 	// Pass 1: 25 sources held, only StatusListCap (20) fit the mirrored ledger.
@@ -824,7 +824,7 @@ func TestHoldEventsReleasePromotes21st(t *testing.T) {
 	recorder := events.NewFakeRecorder(64)
 	r := &WavefrontReconciler{Recorder: recorder, Clock: time.Now, Metrics: metrics.Nop()}
 
-	wf := &wavefrontv1alpha1.Wavefront{ObjectMeta: metav1.ObjectMeta{Name: fleetName}}
+	wf := &wavefrontv1alpha1.Wavefront{Name: fleetName}
 	holds, nodeBySource := manyHolds(25)
 
 	first := &pass{wf: wf, res: &inputs.Result{Resolved: true, Holds: holds, NodeBySource: nodeBySource}}
@@ -891,7 +891,7 @@ func TestShadowAdmissionsNoRefireOnIdenticalPass(t *testing.T) {
 	instr := metrics.Nop()
 	r := &WavefrontReconciler{Recorder: recorder, Clock: time.Now, Metrics: instr}
 
-	wf := &wavefrontv1alpha1.Wavefront{ObjectMeta: metav1.ObjectMeta{Name: fleetName}}
+	wf := &wavefrontv1alpha1.Wavefront{Name: fleetName}
 	admissions := []engine.Admission{admissionFor(teamAKey(), shaA)}
 
 	first := &pass{wf: wf, res: &inputs.Result{}}
@@ -925,7 +925,7 @@ func TestShadowAdmissionsNewToRefires(t *testing.T) {
 	instr := metrics.Nop()
 	r := &WavefrontReconciler{Recorder: recorder, Clock: time.Now, Metrics: instr}
 
-	wf := &wavefrontv1alpha1.Wavefront{ObjectMeta: metav1.ObjectMeta{Name: fleetName}}
+	wf := &wavefrontv1alpha1.Wavefront{Name: fleetName}
 
 	first := &pass{wf: wf, res: &inputs.Result{}}
 	r.shadowAdmissions(first, []engine.Admission{admissionFor(teamAKey(), shaA)})
@@ -954,8 +954,8 @@ func TestExecuteEnforceClearsStaleShadowLedger(t *testing.T) {
 	r := &WavefrontReconciler{Recorder: recorder, Clock: time.Now, Metrics: metrics.Nop()}
 
 	wf := &wavefrontv1alpha1.Wavefront{
-		ObjectMeta: metav1.ObjectMeta{Name: fleetName},
-		Spec:       wavefrontv1alpha1.WavefrontSpec{Mode: wavefrontv1alpha1.ModeEnforce},
+		Name: fleetName,
+		Spec: wavefrontv1alpha1.WavefrontSpec{Mode: wavefrontv1alpha1.ModeEnforce},
 		Status: wavefrontv1alpha1.WavefrontStatus{
 			Shadow: []wavefrontv1alpha1.ShadowAdmission{{Source: teamASource, To: shaA}},
 		},
@@ -980,8 +980,8 @@ func TestExecuteSkipAdmissionsLeavesShadowLedgerUntouched(t *testing.T) {
 	r := &WavefrontReconciler{Recorder: recorder, Clock: time.Now, Metrics: metrics.Nop()}
 
 	wf := &wavefrontv1alpha1.Wavefront{
-		ObjectMeta: metav1.ObjectMeta{Name: fleetName},
-		Spec:       wavefrontv1alpha1.WavefrontSpec{Mode: wavefrontv1alpha1.ModeShadow},
+		Name: fleetName,
+		Spec: wavefrontv1alpha1.WavefrontSpec{Mode: wavefrontv1alpha1.ModeShadow},
 		Status: wavefrontv1alpha1.WavefrontStatus{
 			Shadow: []wavefrontv1alpha1.ShadowAdmission{{Source: teamASource, To: shaA}},
 		},
@@ -1008,8 +1008,8 @@ func TestExecuteSuspendLeavesShadowLedgerUntouched(t *testing.T) {
 	r := &WavefrontReconciler{Recorder: recorder, Clock: time.Now, Metrics: metrics.Nop()}
 
 	wf := &wavefrontv1alpha1.Wavefront{
-		ObjectMeta: metav1.ObjectMeta{Name: fleetName},
-		Spec:       wavefrontv1alpha1.WavefrontSpec{Mode: wavefrontv1alpha1.ModeShadow, Suspend: true},
+		Name: fleetName,
+		Spec: wavefrontv1alpha1.WavefrontSpec{Mode: wavefrontv1alpha1.ModeShadow, Suspend: true},
 		Status: wavefrontv1alpha1.WavefrontStatus{
 			Shadow: []wavefrontv1alpha1.ShadowAdmission{{Source: teamASource, To: shaA}},
 		},
@@ -1039,7 +1039,7 @@ func TestShadowAdmissionsCapMirrorsStatus(t *testing.T) {
 	instr := metrics.Nop()
 	r := &WavefrontReconciler{Recorder: recorder, Clock: time.Now, Metrics: instr}
 
-	wf := &wavefrontv1alpha1.Wavefront{ObjectMeta: metav1.ObjectMeta{Name: fleetName}}
+	wf := &wavefrontv1alpha1.Wavefront{Name: fleetName}
 	admissions := manyAdmissions(25)
 
 	first := &pass{wf: wf, res: &inputs.Result{}}
@@ -1106,7 +1106,7 @@ func TestSummariseStampsLastEvaluatedAtMostOncePerInterval(t *testing.T) {
 	}
 
 	wf := &wavefrontv1alpha1.Wavefront{
-		ObjectMeta: metav1.ObjectMeta{Name: fleetName},
+		Name: fleetName,
 		Spec: wavefrontv1alpha1.WavefrontSpec{
 			Poll: wavefrontv1alpha1.PollSpec{Interval: metav1.Duration{Duration: 90 * time.Second}},
 		},

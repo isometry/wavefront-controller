@@ -26,7 +26,6 @@ import (
 	sourcev1 "github.com/fluxcd/source-controller/api/v1"
 	"github.com/spf13/cobra"
 	eventsv1 "k8s.io/api/events/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -58,17 +57,15 @@ func writeCluster() client.WithWatch {
 		WithScheme(scheme).
 		WithObjects(
 			&wavefrontv1alpha1.Wavefront{
-				ObjectMeta: metav1.ObjectMeta{Name: testWavefront},
+				Name: testWavefront,
 				Spec: wavefrontv1alpha1.WavefrontSpec{
 					Mode: wavefrontv1alpha1.ModeShadow,
 				},
 			},
 			&sourcev1.GitRepository{
-				ObjectMeta: metav1.ObjectMeta{
-					Namespace: "default",
-					Name:      "infra",
-					Labels:    map[string]string{pin.ManagedLabel: "true"},
-				},
+				Namespace: "default",
+				Name:      "infra",
+				Labels:    map[string]string{pin.ManagedLabel: "true"},
 				Spec: sourcev1.GitRepositorySpec{
 					Reference: &sourcev1.GitRepositoryRef{Name: "refs/heads/main", Commit: "abc123"},
 				},

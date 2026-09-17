@@ -363,7 +363,7 @@ func withoutCommit(
 			kept = append(kept, entry)
 			continue
 		}
-		entry.FieldsV1 = &metav1.FieldsV1{Raw: raw}
+		entry.FieldsV1 = metav1.NewFieldsV1(string(raw))
 		kept = append(kept, entry)
 	}
 

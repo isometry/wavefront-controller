@@ -97,12 +97,10 @@ func Audit(
 	at time.Time,
 ) error {
 	event := &eventsv1.Event{
-		ObjectMeta: metav1.ObjectMeta{
-			// The recorder's own naming scheme: unique per object per instant,
-			// which is all the apiserver requires of an event name.
-			Name:      fmt.Sprintf("%s.%x", wf.Name, at.UnixNano()),
-			Namespace: auditNamespace,
-		},
+		// The recorder's own naming scheme: unique per object per instant,
+		// which is all the apiserver requires of an event name.
+		Name:                fmt.Sprintf("%s.%x", wf.Name, at.UnixNano()),
+		Namespace:           auditNamespace,
 		EventTime:           metav1.MicroTime{Time: at},
 		ReportingController: auditController,
 		ReportingInstance:   auditController,
