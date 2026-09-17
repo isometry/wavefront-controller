@@ -6,7 +6,6 @@
 *.dylib
 bin/*
 test/e2e/gitserver/bin/
-Dockerfile.cross
 
 # Test binary, built with `go test -c`
 *.test

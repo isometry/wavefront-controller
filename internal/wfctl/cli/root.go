@@ -227,8 +227,9 @@ func NewOptions() *Options {
 // with the cluster, the terminal and the kubeconfig replaced.
 func newRootCommand(argv0 string, opts *Options) *cobra.Command {
 	root := &cobra.Command{
-		Use:   binaryName,
-		Short: "Inspect and operate a Wavefront progressive-delivery fleet",
+		Use:     binaryName,
+		Version: Version,
+		Short:   "Inspect and operate a Wavefront progressive-delivery fleet",
 		Long: strings.TrimSpace(`
 wfctl reports what a Wavefront is doing and why, and operates it when it is
 stuck.
