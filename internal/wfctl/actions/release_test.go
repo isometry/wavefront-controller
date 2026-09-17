@@ -125,25 +125,16 @@ var _ = Describe("release", func() {
 	// not know about. The CRD's pruning is relaxed for the length of the spec
 	// so that "a field this build does not know about" can exist at all.
 	It("preserves fields the vendored Go type has never heard of", func() {
-		const unknownField = "unknownToThisBuild"
-
 		preserveUnknownFields()
 
 		key := types.NamespacedName{Namespace: testNamespace, Name: uniqueName("release-skew")}
-		Eventually(func(g Gomega) {
-			g.Expect(k8sClient.Create(ctx, object(
-				sourcev1.GroupVersion.String(), sourcev1.GitRepositoryKind,
-				map[string]any{fieldName: key.Name, fieldNS: key.Namespace},
-				map[string]any{
-					"url":      repoURL,
-					"interval": "1m",
-					fieldRef:   map[string]any{fieldName: trackingRef},
-					// The field a newer source-controller would render and
-					// this build's Go type would drop on the floor.
-					unknownField: "kept",
-				}))).To(Succeed())
-			g.Expect(unknownValue(key)).To(Equal("kept"))
-		}).Should(Succeed())
+		Expect(k8sClient.Create(ctx, object(
+			sourcev1.GroupVersion.String(), sourcev1.GitRepositoryKind,
+			map[string]any{fieldName: key.Name, fieldNS: key.Namespace},
+			// The field a newer source-controller would render and this
+			// build's Go type would drop on the floor.
+			sourceSpec(func(spec map[string]any) { spec[unknownToThisBuild] = "kept" })))).To(Succeed())
+		Expect(unknownValue(key)).To(Equal("kept"))
 
 		advance(key, shaA)
 

@@ -95,12 +95,9 @@ func uniqueName(prefix string) string {
 	return fmt.Sprintf("%s-%d", prefix, names[prefix])
 }
 
-// renderSource applies a GitRepository the way the catalog does: the tracking
-// ref and the participation label, and no commit (DESIGN §3.5.1).
-func renderSource(prefix string, mutate ...func(spec map[string]any)) types.NamespacedName {
-	GinkgoHelper()
-
-	key := types.NamespacedName{Namespace: testNamespace, Name: uniqueName(prefix)}
+// sourceSpec is the minimal GitRepository spec the catalog renders: the
+// tracking ref and no commit (DESIGN §3.5.1), with mutate applied on top.
+func sourceSpec(mutate ...func(spec map[string]any)) map[string]any {
 	spec := map[string]any{
 		"url":      repoURL,
 		"interval": "1m",
@@ -109,6 +106,16 @@ func renderSource(prefix string, mutate ...func(spec map[string]any)) types.Name
 	for _, m := range mutate {
 		m(spec)
 	}
+	return spec
+}
+
+// renderSource applies a GitRepository the way the catalog does: sourceSpec
+// and the participation label.
+func renderSource(prefix string, mutate ...func(spec map[string]any)) types.NamespacedName {
+	GinkgoHelper()
+
+	key := types.NamespacedName{Namespace: testNamespace, Name: uniqueName(prefix)}
+	spec := sourceSpec(mutate...)
 
 	rendered := object(sourcev1.GroupVersion.String(), sourcev1.GitRepositoryKind, map[string]any{
 		fieldName: key.Name,
@@ -152,11 +159,15 @@ func unstructuredSource(key types.NamespacedName) *unstructured.Unstructured {
 	return repo
 }
 
+// unknownToThisBuild is the spec field this build's Go type does not declare:
+// the version skew a release has to survive, staged by preserveUnknownFields.
+const unknownToThisBuild = "unknownToThisBuild"
+
 // unknownValue reads the spec field this build's Go type does not declare.
 func unknownValue(key types.NamespacedName) string {
 	GinkgoHelper()
 
-	value, _, err := unstructured.NestedString(unstructuredSource(key).Object, "spec", "unknownToThisBuild")
+	value, _, err := unstructured.NestedString(unstructuredSource(key).Object, "spec", unknownToThisBuild)
 	Expect(err).NotTo(HaveOccurred())
 	return value
 }
@@ -189,6 +200,21 @@ func preserveUnknownFields() {
 	}
 	Expect(unstructured.SetNestedSlice(crd.Object, versions, "spec", "versions")).To(Succeed())
 	Expect(k8sClient.Update(ctx, crd)).To(Succeed())
+
+	// The apiserver picks up a CRD schema change asynchronously, so a create
+	// racing the update above is still pruned on a slow runner. A server-side
+	// dry run persists nothing and returns the object as it would be stored,
+	// so it is the honest readiness probe: wait until it hands the unknown
+	// field back before letting the spec stage one for real.
+	Eventually(func(g Gomega) {
+		probe := object(sourcev1.GroupVersion.String(), sourcev1.GitRepositoryKind,
+			map[string]any{fieldName: uniqueName("preserve-probe"), fieldNS: testNamespace},
+			sourceSpec(func(spec map[string]any) { spec[unknownToThisBuild] = "probe" }))
+		g.Expect(k8sClient.Create(ctx, probe, client.DryRunAll)).To(Succeed())
+		value, _, err := unstructured.NestedString(probe.Object, "spec", unknownToThisBuild)
+		g.Expect(err).NotTo(HaveOccurred())
+		g.Expect(value).To(Equal("probe"))
+	}, 30*time.Second).Should(Succeed())
 
 	DeferCleanup(func() {
 		restored := &unstructured.Unstructured{}
