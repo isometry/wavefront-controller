@@ -1,0 +1,7 @@
+flotillas/grandchild is Pending: AncestorPending → ancestor flotillas/child
+  flotillas/child is Pending: AncestorHeld → ancestor flotillas/held
+    flotillas/held is Pending (held): SelfHeld
+
+root cause: flotillas/held is Pending (held): SelfHeld
+  source: sources/held, held by HandPin(kubectl-patch)
+fix: release the hold on sources/held, held by kubectl-patch (`wfctl release sources/held`). The controller then admits normally from the current pin.

@@ -1,9 +1,10 @@
 # Wavefront Controller — High-Level Design
 
-**Status:** Proposed (v4.1)
+**Status:** Proposed (v4.2)
 **Date:** 2026-08-27
 **Scope:** Sequenced admission of flotilla source updates across ~300 team-owned flotillas, for both piecemeal and en-masse (demo / air-gapped) releases.
 **v4.1:** group fixed to `wavefront.as-code.io`; participation label extended to flotilla `GitRepository`s as the managed-source marker (§8.2); toolchain (kubebuilder) and Flux SDK facts verified against current releases (§7).
+**v4.2:** `status.members` (per-node derived state, capped at `MembersCap` = 2000 with `status.membersOmitted`) and `status.lastEvaluated` added to §4.1, closing §9's "status size" open question; `wfctl` named as the per-flotilla observability surface it feeds (§6, D14).
 
 ---
 
@@ -135,9 +136,11 @@ Every node carries a small state machine; the "wavefront" is simply the set of n
 
 - a *pinned* node is settled ⟺ its observed tracking-ref SHA equals its pin **and** it is `Ready` at that revision;
 - a *gate* node is settled ⟺ it is `Ready`;
-- a *held* node (hand-pinned, §3.5.3) is settled only if it is `Ready` **and** nothing is pending on its ref — a held node with pending changes is unsettled and blocks its descendants, exactly as it should.
+- a *held* node (hand-pinned or suspended, §3.5.3) is settled only if it is `Ready`, nothing is pending on its ref, and — once the source carries a pin — it is `Ready` at that pin too (`AppliedSHA == Pin`); a never-pinned source is exempt from that last clause (decision D-E, `isSettled`), so a suspended, never-pinned, `Ready` source is not livelocked into permanent unsettlement by a requirement it can never satisfy. A held node with pending changes is unsettled and blocks its descendants, exactly as it should.
 
 **Admissibility rule (D13):** a pinned node with a pending revision is admitted — its pin advanced to the latest observed SHA — when **every transitive `dependsOn` ancestor is settled**. Transitive, not merely direct: an unhealthy node blocks its entire descendant subtree (D6), even through intermediaries that are themselves quiescent and green.
+
+**Shared sources admit as one (`gateSharedSources`):** two or more selected nodes referencing the same `GitRepository` (a standard Flux monorepo topology) share a single pin, so pending-ness is a property of the source, not of any one referencing node. The engine emits at most one admission per source — the first referencing node by deterministic order — and only when *every* referencing node is independently admissible; a node that is itself admissible but blocked by a sibling reports `SharedSourceBlocked`, naming the blocking sibling rather than an ancestor.
 
 ```mermaid
 stateDiagram-v2
@@ -196,8 +199,8 @@ sequenceDiagram
 
 1. **The catalog renders the tracking ref only** (`spec.ref.name`) **and omits `spec.ref.commit`**, enforced by catalog CI. Under server-side apply, kustomize-controller then neither owns nor reverts the commit field; the controller manages it under its own field manager with no conflicts.
 2. **Provenance annotation:** every pin advance records the previous pin, admitted SHA, observed ref, and timestamp in annotations under the controller's field manager (§4.2) — making the API audit log self-explanatory, enabling rollback (§3.7), and distinguishing controller-managed pins from hand-set ones.
-3. **Human overrides are respected:** a `commit` value whose field manager is not the controller (a hand-pin during an incident) is treated as an external hold — reported, and not advanced until the manual pin is removed. Human *suspension* simply pauses that source; its unsettled state propagates to descendants through the normal rule (§3.3). The controller's own `suspend` and `mode: Shadow` (§4.1) provide fleet-level equivalents without touching any Flux resource.
-4. **Initial pin on discovery:** a freshly rendered `GitRepository` has no pin and follows its tracking ref until the controller acts. On discovering a new matched source, the controller immediately pins it to the commit of its current `status.artifact.revision` (or, absent an artifact, the first observed SHA), closing the ungated window to seconds. First *apply* remains gated by the existing `dependsOn` (D7). In `Shadow` mode initial pins are suppressed along with all other writes — the pre-enablement status quo.
+3. **Human overrides are respected — one unified hold model:** a `commit` value whose field manager is not the controller (a hand-pin) and `spec.suspend: true` (a suspension) are both treated as an external hold on the source — reported identically, and not advanced until the pin is removed or the suspension lifted. The controller's hold ledger (`hold{manager, kind}`) distinguishes the two only in `status.held[].reason` (`HandPin` | `Suspend`, the latter carrying no manager); a source that is both hand-pinned and suspended reports `HandPin` — it names an actor, `Suspend` does not. Either kind fires `HoldDetected`/`HoldReleased`. The engine itself already refuses to admit or settle a held or suspended source (§3.3); `advance()`'s own hold check is defense-in-depth behind that guard, not the primary enforcement point. The controller's own `suspend` and `mode: Shadow` (§4.1) provide fleet-level equivalents without touching any Flux resource.
+4. **Initial pin on discovery:** a freshly rendered `GitRepository` has no pin and follows its tracking ref until the controller acts. On discovering a new matched source, the controller immediately pins it to the commit of its current `status.artifact.revision` (or, absent an artifact, the first observed SHA), closing the ungated window to seconds. First *apply* remains gated by the existing `dependsOn` (D7). A held or suspended source receives no initial pin either — an unpinned source that is already hand-pinned or suspended waits like any other held source. Two or more selected nodes sharing an unpinned source get exactly one Initial admission (deduped by source, `gateSharedSources`). In `Shadow` mode initial pins are suppressed along with all other writes — the pre-enablement status quo.
 
 ### 3.6 Candidate selection strategies (extension point)
 
@@ -249,12 +252,36 @@ status:
   held:
     - node: { kind: Kustomization, namespace: flotillas, name: team-y }
       manager: kubectl-edit
+      reason: HandPin                     # HandPin | Suspend (empty manager for Suspend)
+  shadow:                                 # Shadow mode only: would-be admissions already announced
+    - source: flotillas/team-z
+      to: "deadbeef…"
+  members:                                # every evaluated node, not StatusListCap-capped (bound: MembersCap = 2000)
+    - node: { kind: Kustomization, namespace: flotillas, name: team-x }
+      role: Pinned                        # Pinned | Gate
+      state: Pending                      # Settled | Pending | Admissible | Converging | Unhealthy
+      dependsOn: [{ kind: Kustomization, namespace: waves, name: wave-2-gate }]
+      source: flotillas/team-x-repo       # "" for a gate node
+      pin: "ab12…"
+      observedSHA: "cd34…"                # "" = unobserved this pass
+      pendingSince: "2026-08-27T09:14:03Z"
+      ready: true
+      blocked: { reason: AncestorUnhealthy, ancestor: { kind: Kustomization, namespace: waves, name: wave-2-gate } }
+  lastEvaluated: "2026-08-27T09:15:11Z"   # advanced at most once per spec.poll.interval
   conditions:
     - type: Ready
     - type: GraphValid                    # False on dependsOn cycles or selector overlap
 ```
 
-Status carries summary counts plus *exceptional-state* lists (blocked, held) with a size cap — at 300 flotillas, enumerating every node in status is neither useful nor kind to etcd; per-node detail lives in metrics, events, and the nodes' own resources.
+Status carries summary counts, *exceptional-state* lists (blocked, held, shadow) with a size cap (`StatusListCap` = 20), and — since v4.2 — `status.members`: the whole evaluated graph, one entry per node, in the state the pass derived. `status.shadow` is Shadow mode's own edge-trigger ledger (`shadowAdmissions`) — the capped, source-sorted list of would-be admissions already announced this pass, recomputed wholesale every pass and cleared outright on a flip to `Enforce` — mirroring `status.held`'s (`heldSources`) role for hold events (decision D-C).
+
+**`status.members` is a per-node list, deliberately not capped at `StatusListCap`.** The v4.0 position was that at 300 flotillas enumerating every node in status is neither useful nor kind to etcd; the shipped position is narrower. It is useful — it is what makes a viewer-tier `wfctl` (§6) answer "what is every node doing and why" from one `GET`, with no read access to Flux's own resources — and it is affordable on three counts:
+
+- **Size.** A `Member` is a typed node reference, two enum strings, its `dependsOn` edges, a source name, two SHAs, a timestamp and two flags — a few hundred bytes serialised, call it 500 with a couple of edges. The design target of ~300 flotillas plus their gates is therefore around 200 KB, well inside the apiserver's ~1.5 MB request limit. `MembersCap` = 2000 bounds the pathological case at roughly 1 MB — inside that limit, deliberately not far inside — and `status.membersOmitted` counts the remainder, so the truncation is never silent.
+- **Write budget.** The list changes whenever any node's derived state does, which at fleet scale is most passes. `status.lastEvaluated` is therefore advanced **at most once per `spec.poll.interval`**, so watch-triggered reconciles between polls do not rewrite status merely to restamp it; a status write still happens whenever the substance changes.
+- **Write-only.** The reconciler never reads `status.members` back. Admissibility is re-derived from live inputs on every pass (D9), so a hand-edited, stale, or truncated members list cannot change what the controller does — it can only mislead a reader. Status remains output, never state.
+
+Per-node detail therefore now has three homes with different retention: `status.members` (current, one pass deep), metrics (time series), and events (the API server's TTL). None is the durable ledger; that is provenance annotations (§4.2).
 
 `mode: Shadow` is Phase 0 as a spec field (§9): full detection, graph derivation, admissibility evaluation, status, metrics, and `ShadowAdmission` events — zero writes. The Phase 0 → Phase 1 transition is a one-field spec edit, visible and auditable in the API. `suspend: true` is the gentle fleet-level brake: admissions freeze, visibility persists, no Flux resource is touched — a softer instrument than the break-glass pin-strip (§8.5).
 
@@ -270,7 +297,9 @@ metadata:
     wavefront.as-code.io/observed-ref: "refs/heads/main"
 ```
 
-and emits a Kubernetes event (`PinAdvanced`; also `InitialPin`, `HoldDetected`, `HoldReleased`, `ShadowAdmission`). Annotations + events are the admission ledger (D14); there is no per-release CR. **The release set is derived, not stored:** at quiescence (`status.phase: Quiescent`), the pin set across managed `GitRepository`s — one `kubectl get gitrepositories -l wavefront.as-code.io/managed -o jsonpath` away — *is* the release manifest, with per-pin provenance attached to each entry. Air-gapped determinism holds because the mirror is static during a rollout: rolling admission over unchanging refs reproduces exactly the batch the mirror carries; determinism comes from the environment, not from snapshots (D9). A small report tool can render and archive the derived set (§9, Phase 3); long-term retention beyond the events window is external log aggregation's job.
+and emits a Kubernetes event (`PinAdvanced`; also `InitialPin`, `HoldDetected`, `HoldReleased`, `ShadowAdmission`). Annotations + events are the admission ledger (D14); there is no per-release CR.
+
+`HoldDetected`/`HoldReleased` and `ShadowAdmission` are edge-triggered against the *exact same* capped, source-sorted list status writes (`status.held`, `status.shadow`) — never against the unbounded internal ledger (decision D-C). A hold beyond `StatusListCap` is still counted (`status.nodes.held`) but not individually announced until a freed slot promotes it into the cap, at which point it fires once — late, never on every reconcile. A would-be admission beyond `StatusListCap` is different: it is neither announced nor counted (the shadow-admissions metric mirrors the capped `status.shadow` list, not the unbounded candidate set) until promoted — visible only via `status.nodes.pending` and pin-lag in the interim. Because the edge-trigger diffs this pass's write against the previous pass's, events are at-least-once, not exactly-once: the next reconcile can read the informer cache before it has absorbed this controller's own status patch (`client.MergeFrom` carries no optimistic lock) and re-fire the same transition once more — the dominant cause in practice — and the same can happen after a failed status patch or a controller restart between deriving and persisting. A would-be admission that stops being pending (e.g. its source becomes held) drops out of `status.shadow` silently — Shadow mode has no `ShadowWithdrawn` counterpart to `HoldReleased`. **The release set is derived, not stored:** at quiescence (`status.phase: Quiescent`), the pin set across managed `GitRepository`s — one `kubectl get gitrepositories -l wavefront.as-code.io/managed -o jsonpath` away — *is* the release manifest, with per-pin provenance attached to each entry. Air-gapped determinism holds because the mirror is static during a rollout: rolling admission over unchanging refs reproduces exactly the batch the mirror carries; determinism comes from the environment, not from snapshots (D9). A small report tool can render and archive the derived set (§9, Phase 3); long-term retention beyond the events window is external log aggregation's job.
 
 ### 4.3 Node adapters (extension point)
 
@@ -381,17 +410,19 @@ The original objection to pinning targeted *git-rendered* pins (release-stamping
 **Decision:** the API is the `Wavefront` CRD alone (§4.1). No per-release object exists; the admission ledger is provenance annotations + events (§4.2), and the release set is derived from the pin set at quiescence.
 **Rationale:** with rolling admission (D9) there is no cycle for a cycle CR to represent, and a synthetic epoch object (open on divergence, close on quiescence) would exist only to be a stored copy of state the `GitRepository`s already carry authoritatively. The `Wavefront` CR earns its place on four counts topology never touches: declarative scope (the selector — Phase 1's incremental enablement is labelling), auditable mode switches (`Shadow`/`Enforce`, `suspend`), a typed home for fleet status between admissions (blocked/held/pending surfaces), and tuning without redeploy.
 **Consequence:** air-gapped release records are produced by a report tool reading pins + provenance at quiescence (§9, Phase 3) rather than collected from a CR; retention beyond the Kubernetes events window is log aggregation's responsibility.
+**v4.2 note:** `status.members` (§4.1) publishes per-node derived state on the `Wavefront` itself, but does not qualify this decision — it is derived *output*, rewritten wholesale each pass and never read back, not a stored per-release or per-node object. There is still no per-release CR and no state the controller could resume from.
 
 ---
 
 ## 6. Observability (launch requirements)
 
-- **Per-flotilla:** pinned revision, observed ref SHA, pin lag (age of unadmitted revision), blocking attribution ("blocked by unsettled ancestor Z"), pin provenance (previous pin, admitted-at), external-hold flag (hand-pinned or human-suspended).
-- **Fleet (`Wavefront` status, §4.1):** phase (`Quiescent`/`Advancing`/`Blocked`), node counts by state, capped blocked/held lists with attribution, `GraphValid` condition.
-- **Metrics:** `wavefront_admissions_total` (by result); `wavefront_node_pin_lag_seconds` (gauge); `wavefront_admission_wait_seconds` (histogram, observed→admitted — the starvation signal, D13); `wavefront_blocked_nodes` (gauge, by reason); `wavefront_ref_list_failures_total` (per git host); `wavefront_pinned_fetch_failures` (source `FetchFailed` on pinned commits, §10 force-push).
+- **Per-flotilla:** pinned revision, observed ref SHA, pin lag (age of unadmitted revision), blocking attribution ("blocked by unsettled ancestor Z"), pin provenance (previous pin, admitted-at), external-hold flag (hand-pinned or human-suspended). This view is **`status.members`** (§4.1) — published by the controller for every evaluated node, per pass — rendered by **`wfctl`** (`wfctl nodes`, `sources`, `source`, `explain`, `graph`; `status` for the fleet roll-up). Because it is served from the `Wavefront`'s own status, every one of those views is available to a viewer who can `get`/`list` `wavefronts` and nothing else — no access to Flux's `Kustomization`s, `GitRepository`s or credential `Secret`s (`wfctl history`, alone among the read commands, additionally reads `events.events.k8s.io`). `wfctl --derive` re-derives the same view live through the controller's own pipeline for when the controller is down or under suspicion, and `wfctl status --derive` prints reported against derived so the disagreement is itself evidence; `wfctl snapshot` freezes either into a secret-free document that replays offline (`--from`).
+- **Fleet (`Wavefront` status, §4.1):** phase (`Quiescent`/`Advancing`/`Blocked`), node counts by state, capped blocked/held lists with attribution, `GraphValid` condition, `lastEvaluated` (the staleness signal: advanced at most once per poll interval, frozen entirely when the controller is).
+- **Metrics:** `wavefront_admissions_total{wavefront,result}` (counter; `result=shadow` increments once per distinct (source, to) would-be admission — edge-triggered off the same ledger as `ShadowAdmission` events, not once per reconcile — so it is directly comparable to `admitted`/`initial`); `wavefront_node_pin_lag_seconds{wavefront,kind,namespace,name}` (gauge); `wavefront_admission_wait_seconds{wavefront}` (histogram, observed→admitted — the starvation signal, D13); `wavefront_blocked_nodes{wavefront,reason}` (gauge); `wavefront_ref_list_failures_total{host}` (counter); `wavefront_credential_read_failures_total` (counter, no labels — Secret reads, apiserver-side); `wavefront_pinned_fetch_failures{wavefront}` (gauge, source `FetchFailed` on pinned commits, §10 force-push). Per-Wavefront series are published only by a valid resolved pass, and retired — deleted, not zeroed — on an aborted pass, on graph invalidation (selector overlap or a `dependsOn` cycle, so a fleet-wide `sum()` never double-counts a Wavefront during overlap), and on the Wavefront's deletion; absent means "not currently measured", not zero — deadman alerts pair `absent()` with the Wavefront's `Ready` condition, never a standing zero series. Cumulative series (`wavefront_admissions_total`, `wavefront_admission_wait_seconds`) are attributed per Wavefront but deleted only when their Wavefront is deleted, never retired by a pass.
+- **Startup:** metric registration failures (a name collision on the shared registry that cannot be resolved by collector reuse) are fatal at startup, not silent — `metrics.New` returns an error joining every collision and `main` exits rather than running with a partially wired metric set.
 - **Events:** `PinAdvanced`, `InitialPin`, `HoldDetected`/`HoldReleased`, `ShadowAdmission` — the admission ledger (D14).
 - **Release set:** derived at quiescence from managed pins + provenance (§4.2); rendered/archived by report tooling (Phase 3).
-- **Safety alarms:** controller liveness; pin-staleness (observed ≠ pin beyond threshold, especially while controller unhealthy); ref-listing failure rate per git host; pinned-commit fetch failures.
+- **Safety alarms:** controller liveness; pin-staleness (observed ≠ pin beyond threshold, especially while controller unhealthy); ref-listing failure rate per git host; credential-read failure rate (Secret reads, apiserver-side — distinct from git-host ref-listing failures); pinned-commit fetch failures.
 
 ---
 
@@ -434,8 +465,8 @@ Flux's git source-tracking machinery was deliberately consolidated out of the co
 **Open questions to resolve during Phase 0–1:**
 - Poll period: start at 1–2 min; is ancestor-chain convergence latency acceptable to product teams?
 - Starvation in practice: do admission-wait distributions justify a D13 refinement (staleness bound), or is the caveat theoretical?
-- Status size: are the capped blocked/held lists sufficient at fleet scale, or is a per-node status CR (or conditions on the nodes) warranted?
-- Release-report form: CLI rendering pins + provenance, or also mirrored to git for long-term audit?
+- ~~Status size: are the capped blocked/held lists sufficient at fleet scale, or is a per-node status CR (or conditions on the nodes) warranted?~~ **Resolved (v4.2):** neither. The capped lists alone were not sufficient — they answer "what is exceptional" but not "what is every node doing", which is the question an operator in an incident actually asks — and a per-node CR (or conditions written onto other teams' `Kustomization`s) would have meant writing to objects the controller has no business owning, plus N objects of reconcile churn. The answer is one uncapped-in-practice list, `status.members`, on the object the controller already owns: bounded at `MembersCap` = 2000 with `status.membersOmitted`, restamped at most once per poll interval, and write-only so admission never depends on it (§4.1, D9). The consumer is `wfctl` (§6), which is what makes the list pay for itself.
+- Release-report form: CLI rendering pins + provenance, or also mirrored to git for long-term audit? (`wfctl sources -o wide` renders the derived set on demand; archival to git remains open.)
 
 ---
 
@@ -448,6 +479,6 @@ Flux's git source-tracking machinery was deliberately consolidated out of the co
 | Force-push over a pinned commit | *Detection is unaffected* — a ref advertisement reports the new advertised SHA regardless of history rewrites. Exposure is confined to source-controller: if a pinned commit becomes unfetchable/unreachable, the source reports `FetchFailed` while its existing artifact (and everything deployed from it) remains intact. **Self-healing:** the next poll observes the rewritten ref and rolling admission re-pins the node when its ancestors permit — a transient blip, not a stuck state | Fetch-failure alarm names the flotilla; Phase 1 exercises this deliberately; exact `cloneCommit` failure semantics confirmed by the Phase 0 spike (§7.4). Residual caveat: *rollback* (§3.7) to a rewritten-away commit is genuinely lost — the only lasting cost of force-pushes |
 | Node never converges | Its descendant subtree blocks (D6); independent branches unaffected; descendants' pin lag grows | Blocking attribution in status (§6); blocked-since alarm; recovery is the normal path — a fix on the unhealthy node's ref |
 | Hot upstream never quiesces | Descendants starve behind a perpetually unsettled ancestor (D13 caveat) | `admission_wait` histogram surfaces it; Phase 0 data decides whether a staleness bound is warranted; the team owning the hot repo is identifiable from status |
-| Human hand-pins or suspends a source | Controller treats it as an external hold and does not advance it; if changes are pending, the node is unsettled and its descendants block with attribution | Provenance/field-manager rules (§3.5); `HoldDetected` event; status names the held node |
+| Human hand-pins or suspends a source | Controller treats either as an external hold and does not advance it; if changes are pending, the node is unsettled and its descendants block with attribution | Provenance/field-manager rules (§3.5); `HoldDetected`/`HoldReleased` events fire for both kinds; `status.held[].reason` names `HandPin` or `Suspend` (hand-pin wins if both apply) |
 | Controller bug pins wrong SHA | Worst case: fetch failure (unobserved/unreachable SHA) or mis-sequenced admission | Observed-SHAs-only invariant (§3.1); `dependsOn` apply-side backstop (D7); shadow mode + pilot validation |
-| Catalog changes plumbing (refs, edges, membership) | Graph re-derived continuously from watches; every pin write is preceded by a fresh observation of the current tracking ref — stale candidates cannot survive a plumbing change (D8) | `GraphValid` condition catches structural breakage (cycles, selector overlap); initial-pin-on-discovery covers joiners |
+| Catalog changes plumbing (refs, edges, membership) | Graph re-derived continuously from watches; every pin write is preceded by a fresh observation of the current tracking ref — stale candidates cannot survive a plumbing change, even within the same pass: observations carry the URL + tracking ref they were observed against and are rejected on any mismatch (`observedCurrentPlumbing`), closing a one-pass window where a stale observation recorded under the old plumbing could otherwise be reused under the new (D8) | `GraphValid` condition catches structural breakage (cycles, selector overlap); initial-pin-on-discovery covers joiners |

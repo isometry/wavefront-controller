@@ -1,0 +1,5 @@
+SOURCE          PIN       OBSERVED   PENDING   HOLD   OWNERS                 ARTIFACT   ADMITTED   NODES
+sources/app     bbbb111   ?          ?         -      wavefront-controller   bbbb111    120m       1
+sources/edge    cccc111   ?          ?         -      wavefront-controller   cccc111    120m       1
+sources/infra   aaaa111   ?          ?         -      wavefront-controller   aaaa111    120m       1
+? = unknown: this snapshot carries no ref observations; re-run with --derive --poll.

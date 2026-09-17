@@ -1,0 +1,305 @@
+{
+  "apiVersion": "wfctl.wavefront.as-code.io/v1alpha1",
+  "kind": "Snapshot",
+  "origin": "derive",
+  "capturedAt": "2026-09-01T11:58:00Z",
+  "evaluated": "2026-09-01T11:58:00Z",
+  "cluster": {
+    "context": "prod-eu",
+    "server": "https://api.prod-eu.example.test",
+    "wfctlVersion": "v0.1.0"
+  },
+  "observed": true,
+  "wavefront": {
+    "name": "fleet",
+    "generation": 4,
+    "spec": {
+      "nodes": {
+        "kinds": [
+          "Kustomization"
+        ],
+        "selector": {
+          "matchLabels": {
+            "wavefront.as-code.io/managed": "true"
+          }
+        }
+      },
+      "mode": "Enforce",
+      "suspend": false,
+      "poll": {
+        "interval": "90s",
+        "perHostConcurrency": 4
+      }
+    },
+    "status": {
+      "phase": "Blocked",
+      "nodes": {
+        "observed": 3,
+        "pinned": 3,
+        "gates": 0,
+        "pending": 2,
+        "converging": 0,
+        "blocked": 2,
+        "held": 0
+      },
+      "blocked": [
+        {
+          "node": {
+            "kind": "Kustomization",
+            "namespace": "flotillas",
+            "name": "api"
+          },
+          "since": "2026-09-01T11:46:00Z",
+          "reason": "SharedSourceBlocked",
+          "ancestor": {
+            "kind": "Kustomization",
+            "namespace": "flotillas",
+            "name": "worker"
+          }
+        },
+        {
+          "node": {
+            "kind": "Kustomization",
+            "namespace": "flotillas",
+            "name": "worker"
+          },
+          "since": "2026-09-01T11:46:00Z",
+          "reason": "AncestorUnhealthy",
+          "ancestor": {
+            "kind": "Kustomization",
+            "namespace": "flotillas",
+            "name": "db"
+          }
+        }
+      ],
+      "conditions": [
+        {
+          "type": "Ready",
+          "status": "True",
+          "reason": "Succeeded",
+          "message": "evaluated 3 nodes",
+          "lastTransitionTime": "2026-09-01T11:57:30Z",
+          "observedGeneration": 4
+        },
+        {
+          "type": "GraphValid",
+          "status": "True",
+          "reason": "Valid",
+          "message": "3 nodes, 1 edge",
+          "lastTransitionTime": "2026-09-01T11:57:30Z",
+          "observedGeneration": 4
+        }
+      ],
+      "observedGeneration": 4,
+      "lastEvaluated": "2026-09-01T11:57:30Z"
+    }
+  },
+  "nodes": [
+    {
+      "ref": {
+        "kind": "Kustomization",
+        "namespace": "flotillas",
+        "name": "api"
+      },
+      "role": "Pinned",
+      "state": "Pending",
+      "ready": true,
+      "wave": 0,
+      "source": "sources/mono",
+      "pin": "aaaa111000000000000000000000000000000000",
+      "observedSHA": "aaaa222000000000000000000000000000000000",
+      "appliedSHA": "aaaa111000000000000000000000000000000000",
+      "pendingSince": "2026-09-01T11:46:00Z",
+      "blocked": {
+        "reason": "SharedSourceBlocked",
+        "ancestor": {
+          "kind": "Kustomization",
+          "namespace": "flotillas",
+          "name": "worker"
+        }
+      }
+    },
+    {
+      "ref": {
+        "kind": "Kustomization",
+        "namespace": "flotillas",
+        "name": "db"
+      },
+      "role": "Pinned",
+      "state": "Unhealthy",
+      "ready": false,
+      "wave": 0,
+      "failing": true,
+      "readyMessage": "Health check failed after 30s: deployment/db not ready",
+      "source": "sources/db",
+      "pin": "cccc111000000000000000000000000000000000",
+      "observedSHA": "cccc111000000000000000000000000000000000",
+      "appliedSHA": "cccc111000000000000000000000000000000000"
+    },
+    {
+      "ref": {
+        "kind": "Kustomization",
+        "namespace": "flotillas",
+        "name": "worker"
+      },
+      "role": "Pinned",
+      "state": "Pending",
+      "ready": true,
+      "wave": 1,
+      "source": "sources/mono",
+      "pin": "aaaa111000000000000000000000000000000000",
+      "observedSHA": "aaaa222000000000000000000000000000000000",
+      "appliedSHA": "aaaa111000000000000000000000000000000000",
+      "pendingSince": "2026-09-01T11:46:00Z",
+      "blocked": {
+        "reason": "AncestorUnhealthy",
+        "ancestor": {
+          "kind": "Kustomization",
+          "namespace": "flotillas",
+          "name": "db"
+        }
+      },
+      "dependsOn": [
+        {
+          "kind": "Kustomization",
+          "namespace": "flotillas",
+          "name": "db"
+        }
+      ]
+    }
+  ],
+  "sources": [
+    {
+      "name": "sources/db",
+      "url": "https://git.example.test/org/db.git",
+      "secretRefName": "git-credentials",
+      "trackingRef": "refs/heads/main",
+      "pin": "cccc111000000000000000000000000000000000",
+      "artifactSHA": "cccc111000000000000000000000000000000000",
+      "commitOwners": [
+        {
+          "manager": "wavefront-controller",
+          "operation": "Apply"
+        }
+      ],
+      "provenance": {
+        "wavefront.as-code.io/admitted-at": "2026-09-01T10:00:00Z",
+        "wavefront.as-code.io/previous-pin": "0000fff000000000000000000000000000000000",
+        "wavefront.as-code.io/observed-ref": "refs/heads/main"
+      },
+      "conditions": [
+        {
+          "type": "Ready",
+          "status": "True",
+          "reason": "Succeeded",
+          "message": "stored artifact for revision 'main@sha1:cccc111000000000000000000000000000000000'",
+          "lastTransitionTime": "2026-09-01T10:00:02Z",
+          "observedGeneration": 4
+        }
+      ],
+      "observedSHA": "cccc111000000000000000000000000000000000",
+      "firstObserved": "2026-09-01T09:58:00Z",
+      "nodes": [
+        {
+          "kind": "Kustomization",
+          "namespace": "flotillas",
+          "name": "db"
+        }
+      ]
+    },
+    {
+      "name": "sources/mono",
+      "url": "https://git.example.test/org/mono.git",
+      "secretRefName": "git-credentials",
+      "trackingRef": "refs/heads/main",
+      "pin": "aaaa111000000000000000000000000000000000",
+      "artifactSHA": "aaaa111000000000000000000000000000000000",
+      "commitOwners": [
+        {
+          "manager": "wavefront-controller",
+          "operation": "Apply"
+        }
+      ],
+      "provenance": {
+        "wavefront.as-code.io/admitted-at": "2026-09-01T10:00:00Z",
+        "wavefront.as-code.io/previous-pin": "0000fff000000000000000000000000000000000",
+        "wavefront.as-code.io/observed-ref": "refs/heads/main"
+      },
+      "conditions": [
+        {
+          "type": "Ready",
+          "status": "True",
+          "reason": "Succeeded",
+          "message": "stored artifact for revision 'main@sha1:aaaa111000000000000000000000000000000000'",
+          "lastTransitionTime": "2026-09-01T10:00:02Z",
+          "observedGeneration": 4
+        }
+      ],
+      "observedSHA": "aaaa222000000000000000000000000000000000",
+      "firstObserved": "2026-09-01T11:46:00Z",
+      "nodes": [
+        {
+          "kind": "Kustomization",
+          "namespace": "flotillas",
+          "name": "api"
+        },
+        {
+          "kind": "Kustomization",
+          "namespace": "flotillas",
+          "name": "worker"
+        }
+      ]
+    }
+  ],
+  "graph": {},
+  "derived": {
+    "phase": "Blocked",
+    "counts": {
+      "observed": 3,
+      "pinned": 3,
+      "gates": 0,
+      "pending": 2,
+      "converging": 0,
+      "blocked": 2,
+      "held": 0
+    },
+    "blocked": [
+      {
+        "node": {
+          "kind": "Kustomization",
+          "namespace": "flotillas",
+          "name": "api"
+        },
+        "since": "2026-09-01T11:46:00Z",
+        "reason": "SharedSourceBlocked",
+        "ancestor": {
+          "kind": "Kustomization",
+          "namespace": "flotillas",
+          "name": "worker"
+        }
+      },
+      {
+        "node": {
+          "kind": "Kustomization",
+          "namespace": "flotillas",
+          "name": "worker"
+        },
+        "since": "2026-09-01T11:46:00Z",
+        "reason": "AncestorUnhealthy",
+        "ancestor": {
+          "kind": "Kustomization",
+          "namespace": "flotillas",
+          "name": "db"
+        }
+      }
+    ],
+    "blockedByReason": {
+      "SharedSourceBlocked": 1,
+      "AncestorUnhealthy": 1
+    },
+    "graphValid": true,
+    "graphReason": "Valid",
+    "graphMessage": "3 nodes, 1 edge"
+  },
+  "diagnostics": []
+}

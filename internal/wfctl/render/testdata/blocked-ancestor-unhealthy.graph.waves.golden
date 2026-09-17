@@ -1,0 +1,8 @@
+wave 0 (1)
+  flotillas/root   Pinned   Unhealthy
+
+wave 1 (1)
+  flotillas/mid   Pinned   Pending
+
+wave 2 (1)
+  flotillas/leaf   Pinned   Pending

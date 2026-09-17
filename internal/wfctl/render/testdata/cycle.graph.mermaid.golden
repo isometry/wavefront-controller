@@ -1,0 +1,9 @@
+graph LR
+  n0["flotillas/a — Pending"]
+  n1["flotillas/b — Pending"]
+  n2["flotillas/c — Settled"]
+  n1 --> n0
+  n0 --> n1
+  style n0 stroke:#b58900,stroke-width:4px
+  style n1 stroke:#b58900,stroke-width:4px
+  style n2 stroke:#2e7d32,stroke-width:1px

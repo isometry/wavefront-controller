@@ -1,0 +1,214 @@
+{
+  "apiVersion": "wfctl.wavefront.as-code.io/v1alpha1",
+  "kind": "Snapshot",
+  "origin": "status",
+  "replayed": true,
+  "capturedAt": "2026-09-01T11:58:00Z",
+  "evaluated": "2026-09-01T11:57:30Z",
+  "cluster": {
+    "context": "prod-eu",
+    "server": "https://api.prod-eu.example.test",
+    "wfctlVersion": "v0.1.0"
+  },
+  "observed": true,
+  "wavefront": {
+    "name": "fleet",
+    "generation": 4,
+    "spec": {
+      "nodes": {
+        "kinds": [
+          "Kustomization"
+        ],
+        "selector": {
+          "matchLabels": {
+            "wavefront.as-code.io/managed": "true"
+          }
+        }
+      },
+      "mode": "Enforce",
+      "poll": {
+        "interval": "1m30s",
+        "perHostConcurrency": 4
+      }
+    },
+    "status": {
+      "phase": "Quiescent",
+      "nodes": {
+        "observed": 3,
+        "pinned": 2,
+        "gates": 1,
+        "pending": 0,
+        "converging": 0,
+        "blocked": 0,
+        "held": 0
+      },
+      "conditions": [
+        {
+          "type": "Ready",
+          "status": "True",
+          "observedGeneration": 4,
+          "lastTransitionTime": "2026-09-01T11:57:30Z",
+          "reason": "Succeeded",
+          "message": "evaluated 3 nodes"
+        },
+        {
+          "type": "GraphValid",
+          "status": "True",
+          "observedGeneration": 4,
+          "lastTransitionTime": "2026-09-01T11:57:30Z",
+          "reason": "Valid",
+          "message": "3 nodes, 2 edges"
+        }
+      ],
+      "observedGeneration": 4,
+      "lastEvaluated": "2026-09-01T11:57:30Z"
+    }
+  },
+  "nodes": [
+    {
+      "ref": {
+        "kind": "Kustomization",
+        "namespace": "flotillas",
+        "name": "infra"
+      },
+      "role": "Pinned",
+      "state": "Settled",
+      "ready": true,
+      "source": "sources/infra",
+      "pin": "aaaa111000000000000000000000000000000000",
+      "observedSHA": "aaaa111000000000000000000000000000000000",
+      "wave": 0
+    },
+    {
+      "ref": {
+        "kind": "Kustomization",
+        "namespace": "flotillas",
+        "name": "team-a"
+      },
+      "role": "Pinned",
+      "state": "Settled",
+      "ready": true,
+      "dependsOn": [
+        {
+          "kind": "Kustomization",
+          "namespace": "flotillas",
+          "name": "infra"
+        }
+      ],
+      "source": "sources/team-a",
+      "pin": "bbbb111000000000000000000000000000000000",
+      "observedSHA": "bbbb111000000000000000000000000000000000",
+      "wave": 1
+    },
+    {
+      "ref": {
+        "kind": "Kustomization",
+        "namespace": "waves",
+        "name": "gate"
+      },
+      "role": "Gate",
+      "state": "Settled",
+      "ready": true,
+      "dependsOn": [
+        {
+          "kind": "Kustomization",
+          "namespace": "flotillas",
+          "name": "team-a"
+        }
+      ],
+      "wave": 2
+    }
+  ],
+  "sources": [
+    {
+      "name": "sources/infra",
+      "url": "https://git.example.test/org/infra.git",
+      "secretRefName": "git-credentials",
+      "trackingRef": "refs/heads/main",
+      "pin": "aaaa111000000000000000000000000000000000",
+      "commitOwners": [
+        {
+          "manager": "wavefront-controller",
+          "operation": "Apply"
+        }
+      ],
+      "provenance": {
+        "wavefront.as-code.io/admitted-at": "2026-09-01T10:00:00Z",
+        "wavefront.as-code.io/observed-ref": "refs/heads/main",
+        "wavefront.as-code.io/previous-pin": "0000fff000000000000000000000000000000000"
+      },
+      "artifactSHA": "aaaa111000000000000000000000000000000000",
+      "conditions": [
+        {
+          "type": "Ready",
+          "status": "True",
+          "observedGeneration": 4,
+          "lastTransitionTime": "2026-09-01T10:00:02Z",
+          "reason": "Succeeded",
+          "message": "stored artifact for revision 'main@sha1:aaaa111000000000000000000000000000000000'"
+        }
+      ],
+      "observedSHA": "aaaa111000000000000000000000000000000000",
+      "firstObserved": "2026-09-01T09:58:00Z",
+      "nodes": [
+        {
+          "kind": "Kustomization",
+          "namespace": "flotillas",
+          "name": "infra"
+        }
+      ]
+    },
+    {
+      "name": "sources/team-a",
+      "url": "https://git.example.test/org/team-a.git",
+      "secretRefName": "git-credentials",
+      "trackingRef": "refs/heads/main",
+      "pin": "bbbb111000000000000000000000000000000000",
+      "commitOwners": [
+        {
+          "manager": "wavefront-controller",
+          "operation": "Apply"
+        }
+      ],
+      "provenance": {
+        "wavefront.as-code.io/admitted-at": "2026-09-01T10:00:00Z",
+        "wavefront.as-code.io/observed-ref": "refs/heads/main",
+        "wavefront.as-code.io/previous-pin": "0000fff000000000000000000000000000000000"
+      },
+      "artifactSHA": "bbbb111000000000000000000000000000000000",
+      "conditions": [
+        {
+          "type": "Ready",
+          "status": "True",
+          "observedGeneration": 4,
+          "lastTransitionTime": "2026-09-01T10:00:02Z",
+          "reason": "Succeeded",
+          "message": "stored artifact for revision 'main@sha1:bbbb111000000000000000000000000000000000'"
+        }
+      ],
+      "observedSHA": "bbbb111000000000000000000000000000000000",
+      "firstObserved": "2026-09-01T09:58:00Z",
+      "nodes": [
+        {
+          "kind": "Kustomization",
+          "namespace": "flotillas",
+          "name": "team-a"
+        }
+      ]
+    }
+  ],
+  "graph": {},
+  "derived": {
+    "counts": {
+      "observed": 0,
+      "pinned": 0,
+      "gates": 0,
+      "pending": 0,
+      "converging": 0,
+      "blocked": 0,
+      "held": 0
+    },
+    "graphValid": false
+  },
+  "diagnostics": []
+}

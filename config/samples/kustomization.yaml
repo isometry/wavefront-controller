@@ -1,0 +1,4 @@
+## Append samples of your project ##
+resources:
+- wavefront_v1alpha1_wavefront.yaml
+# +kubebuilder:scaffold:manifestskustomizesamples

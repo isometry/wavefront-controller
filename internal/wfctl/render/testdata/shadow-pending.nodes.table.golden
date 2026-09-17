@@ -1,0 +1,4 @@
+NODE              ROLE     STATE        HELD    BLOCKED           ANCESTOR          SOURCE          PIN       OBSERVED   LAG
+flotillas/alpha   Pinned   Admissible   false   -                 -                 sources/alpha   aaaa111   aaaa222    10m
+flotillas/beta    Pinned   Pending      false   AncestorPending   flotillas/alpha   sources/beta    bbbb111   bbbb222    8m
+waves/gate        Gate     Settled      false   -                 -                 -               -         -          -

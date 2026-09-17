@@ -1,0 +1,7 @@
+flotillas/leaf is Pending: AncestorPending → ancestor flotillas/mid
+  flotillas/mid is Pending: AncestorUnhealthy → ancestor flotillas/root
+    flotillas/root is Unhealthy
+
+root cause: flotillas/root is Unhealthy
+  source: sources/root
+fix: fix flotillas/root and push to its tracking ref. A fix is not a special case (DESIGN §3.3): it is that node's next admission and sits at the front of its own subtree, so its descendants unblock as it converges.

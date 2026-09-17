@@ -1,0 +1,10 @@
+digraph wavefront {
+  rankdir="LR";
+  node [fontname="sans-serif", fontsize=10];
+  edge [fontname="sans-serif", fontsize=9];
+  "Kustomization/flotillas/infra" [label="flotillas/infra\nSettled", shape="box", style="rounded", color="forestgreen"];
+  "Kustomization/flotillas/team-a" [label="flotillas/team-a\nSettled", shape="box", style="rounded", color="forestgreen"];
+  "Kustomization/waves/gate" [label="waves/gate\nSettled", shape="hexagon", style="rounded", color="forestgreen"];
+  "Kustomization/flotillas/infra" -> "Kustomization/flotillas/team-a";
+  "Kustomization/flotillas/team-a" -> "Kustomization/waves/gate";
+}

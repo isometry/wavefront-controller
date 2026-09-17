@@ -1,0 +1,4 @@
+SOURCE               PIN       OBSERVED   PENDING   HOLD                     OWNERS                               ARTIFACT   ADMITTED   NODES   PREVIOUS-PIN   OBSERVED-REF      FETCH   URL
+sources/child        bbbb111   bbbb222    15m       -                        wavefront-controller                 bbbb111    120m       1       0000fff        refs/heads/main   ok      https://git.example.test/org/child.git
+sources/grandchild   cccc111   cccc222    15m       -                        wavefront-controller                 cccc111    120m       1       0000fff        refs/heads/main   ok      https://git.example.test/org/grandchild.git
+sources/held         aaaa111   aaaa222    20m       HandPin(kubectl-patch)   wavefront-controller,kubectl-patch   aaaa111    120m       1       0000fff        refs/heads/main   ok      https://git.example.test/org/held.git

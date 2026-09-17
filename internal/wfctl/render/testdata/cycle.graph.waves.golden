@@ -1,0 +1,6 @@
+wave 0 (1)
+  flotillas/c   Pinned   Settled
+
+unlayered (2) (cycle: flotillas/a→flotillas/b→flotillas/a)
+  flotillas/a   Pinned   Pending
+  flotillas/b   Pinned   Pending

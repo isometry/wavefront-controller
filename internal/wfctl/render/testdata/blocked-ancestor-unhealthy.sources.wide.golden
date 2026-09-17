@@ -1,0 +1,4 @@
+SOURCE         PIN       OBSERVED   PENDING   HOLD   OWNERS                 ARTIFACT   ADMITTED   NODES   PREVIOUS-PIN   OBSERVED-REF      FETCH   URL
+sources/leaf   cccc111   cccc222    12m       -      wavefront-controller   cccc111    120m       1       0000fff        refs/heads/main   ok      https://git.example.test/org/leaf.git
+sources/mid    bbbb111   bbbb222    10m       -      wavefront-controller   bbbb111    120m       1       0000fff        refs/heads/main   ok      https://git.example.test/org/mid.git
+sources/root   aaaa111   aaaa111    -         -      wavefront-controller   aaaa111    120m       1       0000fff        refs/heads/main   ok      https://git.example.test/org/root.git

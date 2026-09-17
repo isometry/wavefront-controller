@@ -1,0 +1,6 @@
+flotillas/app is Converging
+
+root cause: flotillas/app is Converging
+  source: sources/app
+  observation: unknown — this ref has no observed SHA in this snapshot
+fix: wait for the controller's next sweep to observe the ref (spec.poll.interval), or re-run with `--derive --poll` to list refs now.

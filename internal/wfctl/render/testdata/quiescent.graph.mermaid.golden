@@ -1,0 +1,9 @@
+graph LR
+  n0["flotillas/infra — Settled"]
+  n1["flotillas/team-a — Settled"]
+  n2{{"waves/gate — Settled"}}
+  n0 --> n1
+  n1 --> n2
+  style n0 stroke:#2e7d32,stroke-width:1px
+  style n1 stroke:#2e7d32,stroke-width:1px
+  style n2 stroke:#2e7d32,stroke-width:1px

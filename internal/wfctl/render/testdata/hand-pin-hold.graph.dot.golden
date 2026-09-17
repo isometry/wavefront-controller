@@ -1,0 +1,12 @@
+digraph wavefront {
+  rankdir="LR";
+  node [fontname="sans-serif", fontsize=10];
+  edge [fontname="sans-serif", fontsize=9];
+  "Kustomization/flotillas/child" [label="flotillas/child\nPending", shape="box", style="rounded", color="goldenrod"];
+  "Kustomization/flotillas/grandchild" [label="flotillas/grandchild\nPending", shape="box", style="rounded", color="goldenrod"];
+  "Kustomization/flotillas/held" [label="flotillas/held\nPending", shape="box", style="rounded,dashed", color="goldenrod"];
+  "Kustomization/flotillas/held" -> "Kustomization/flotillas/child";
+  "Kustomization/flotillas/child" -> "Kustomization/flotillas/grandchild";
+  "Kustomization/flotillas/held" -> "Kustomization/flotillas/child" [style="dashed", color="firebrick", constraint=false, label="AncestorHeld"];
+  "Kustomization/flotillas/child" -> "Kustomization/flotillas/grandchild" [style="dashed", color="firebrick", constraint=false, label="AncestorPending"];
+}

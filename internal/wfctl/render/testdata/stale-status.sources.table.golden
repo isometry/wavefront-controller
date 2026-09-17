@@ -1,0 +1,4 @@
+SOURCE        PIN       OBSERVED   PENDING   HOLD   OWNERS                 ARTIFACT   ADMITTED   NODES
+sources/one   aaaa111   aaaa111    -         -      wavefront-controller   aaaa111    120m       1
+sources/two   bbbb111   !          !         !      !                      !          !          1
+! = unproven: the GitRepository could not be read (RBAC or deleted); see the diagnostics.

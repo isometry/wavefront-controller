@@ -1,0 +1,300 @@
+{
+  "apiVersion": "wfctl.wavefront.as-code.io/v1alpha1",
+  "kind": "Snapshot",
+  "origin": "status",
+  "capturedAt": "2026-09-01T11:58:00Z",
+  "evaluated": "2026-09-01T11:57:30Z",
+  "cluster": {
+    "context": "prod-eu",
+    "server": "https://api.prod-eu.example.test",
+    "wfctlVersion": "v0.1.0"
+  },
+  "observed": true,
+  "wavefront": {
+    "name": "fleet",
+    "generation": 4,
+    "spec": {
+      "nodes": {
+        "kinds": [
+          "Kustomization"
+        ],
+        "selector": {
+          "matchLabels": {
+            "wavefront.as-code.io/managed": "true"
+          }
+        }
+      },
+      "mode": "Enforce",
+      "suspend": false,
+      "poll": {
+        "interval": "90s",
+        "perHostConcurrency": 4
+      }
+    },
+    "status": {
+      "phase": "Blocked",
+      "nodes": {
+        "observed": 3,
+        "pinned": 3,
+        "gates": 0,
+        "pending": 2,
+        "converging": 0,
+        "blocked": 2,
+        "held": 0
+      },
+      "blocked": [
+        {
+          "node": {
+            "kind": "Kustomization",
+            "namespace": "flotillas",
+            "name": "a"
+          },
+          "since": "2026-09-01T11:45:00Z",
+          "reason": "GraphCycle"
+        },
+        {
+          "node": {
+            "kind": "Kustomization",
+            "namespace": "flotillas",
+            "name": "b"
+          },
+          "since": "2026-09-01T11:45:00Z",
+          "reason": "GraphCycle"
+        }
+      ],
+      "conditions": [
+        {
+          "type": "Ready",
+          "status": "True",
+          "reason": "Succeeded",
+          "message": "evaluated 3 nodes",
+          "lastTransitionTime": "2026-09-01T11:57:30Z",
+          "observedGeneration": 4
+        },
+        {
+          "type": "GraphValid",
+          "status": "False",
+          "reason": "CyclesDetected",
+          "message": "1 cycle detected",
+          "lastTransitionTime": "2026-09-01T11:57:30Z",
+          "observedGeneration": 4
+        }
+      ],
+      "observedGeneration": 4,
+      "lastEvaluated": "2026-09-01T11:57:30Z"
+    }
+  },
+  "nodes": [
+    {
+      "ref": {
+        "kind": "Kustomization",
+        "namespace": "flotillas",
+        "name": "a"
+      },
+      "role": "Pinned",
+      "state": "Pending",
+      "ready": true,
+      "wave": -1,
+      "source": "sources/a",
+      "pin": "aaaa111000000000000000000000000000000000",
+      "observedSHA": "aaaa222000000000000000000000000000000000",
+      "pendingSince": "2026-09-01T11:45:00Z",
+      "blocked": {
+        "reason": "GraphCycle"
+      },
+      "dependsOn": [
+        {
+          "kind": "Kustomization",
+          "namespace": "flotillas",
+          "name": "b"
+        }
+      ]
+    },
+    {
+      "ref": {
+        "kind": "Kustomization",
+        "namespace": "flotillas",
+        "name": "b"
+      },
+      "role": "Pinned",
+      "state": "Pending",
+      "ready": true,
+      "wave": -1,
+      "source": "sources/b",
+      "pin": "bbbb111000000000000000000000000000000000",
+      "observedSHA": "bbbb222000000000000000000000000000000000",
+      "pendingSince": "2026-09-01T11:45:00Z",
+      "blocked": {
+        "reason": "GraphCycle"
+      },
+      "dependsOn": [
+        {
+          "kind": "Kustomization",
+          "namespace": "flotillas",
+          "name": "a"
+        }
+      ]
+    },
+    {
+      "ref": {
+        "kind": "Kustomization",
+        "namespace": "flotillas",
+        "name": "c"
+      },
+      "role": "Pinned",
+      "state": "Settled",
+      "ready": true,
+      "wave": 0,
+      "source": "sources/c",
+      "pin": "cccc111000000000000000000000000000000000",
+      "observedSHA": "cccc111000000000000000000000000000000000"
+    }
+  ],
+  "sources": [
+    {
+      "name": "sources/a",
+      "url": "https://git.example.test/org/a.git",
+      "secretRefName": "git-credentials",
+      "trackingRef": "refs/heads/main",
+      "pin": "aaaa111000000000000000000000000000000000",
+      "artifactSHA": "aaaa111000000000000000000000000000000000",
+      "commitOwners": [
+        {
+          "manager": "wavefront-controller",
+          "operation": "Apply"
+        }
+      ],
+      "provenance": {
+        "wavefront.as-code.io/admitted-at": "2026-09-01T10:00:00Z",
+        "wavefront.as-code.io/previous-pin": "0000fff000000000000000000000000000000000",
+        "wavefront.as-code.io/observed-ref": "refs/heads/main"
+      },
+      "conditions": [
+        {
+          "type": "Ready",
+          "status": "True",
+          "reason": "Succeeded",
+          "message": "stored artifact for revision 'main@sha1:aaaa111000000000000000000000000000000000'",
+          "lastTransitionTime": "2026-09-01T10:00:02Z",
+          "observedGeneration": 4
+        }
+      ],
+      "observedSHA": "aaaa222000000000000000000000000000000000",
+      "firstObserved": "2026-09-01T11:45:00Z",
+      "nodes": [
+        {
+          "kind": "Kustomization",
+          "namespace": "flotillas",
+          "name": "a"
+        }
+      ]
+    },
+    {
+      "name": "sources/b",
+      "url": "https://git.example.test/org/b.git",
+      "secretRefName": "git-credentials",
+      "trackingRef": "refs/heads/main",
+      "pin": "bbbb111000000000000000000000000000000000",
+      "artifactSHA": "bbbb111000000000000000000000000000000000",
+      "commitOwners": [
+        {
+          "manager": "wavefront-controller",
+          "operation": "Apply"
+        }
+      ],
+      "provenance": {
+        "wavefront.as-code.io/admitted-at": "2026-09-01T10:00:00Z",
+        "wavefront.as-code.io/previous-pin": "0000fff000000000000000000000000000000000",
+        "wavefront.as-code.io/observed-ref": "refs/heads/main"
+      },
+      "conditions": [
+        {
+          "type": "Ready",
+          "status": "True",
+          "reason": "Succeeded",
+          "message": "stored artifact for revision 'main@sha1:bbbb111000000000000000000000000000000000'",
+          "lastTransitionTime": "2026-09-01T10:00:02Z",
+          "observedGeneration": 4
+        }
+      ],
+      "observedSHA": "bbbb222000000000000000000000000000000000",
+      "firstObserved": "2026-09-01T11:45:00Z",
+      "nodes": [
+        {
+          "kind": "Kustomization",
+          "namespace": "flotillas",
+          "name": "b"
+        }
+      ]
+    },
+    {
+      "name": "sources/c",
+      "url": "https://git.example.test/org/c.git",
+      "secretRefName": "git-credentials",
+      "trackingRef": "refs/heads/main",
+      "pin": "cccc111000000000000000000000000000000000",
+      "artifactSHA": "cccc111000000000000000000000000000000000",
+      "commitOwners": [
+        {
+          "manager": "wavefront-controller",
+          "operation": "Apply"
+        }
+      ],
+      "provenance": {
+        "wavefront.as-code.io/admitted-at": "2026-09-01T10:00:00Z",
+        "wavefront.as-code.io/previous-pin": "0000fff000000000000000000000000000000000",
+        "wavefront.as-code.io/observed-ref": "refs/heads/main"
+      },
+      "conditions": [
+        {
+          "type": "Ready",
+          "status": "True",
+          "reason": "Succeeded",
+          "message": "stored artifact for revision 'main@sha1:cccc111000000000000000000000000000000000'",
+          "lastTransitionTime": "2026-09-01T10:00:02Z",
+          "observedGeneration": 4
+        }
+      ],
+      "observedSHA": "cccc111000000000000000000000000000000000",
+      "firstObserved": "2026-09-01T09:58:00Z",
+      "nodes": [
+        {
+          "kind": "Kustomization",
+          "namespace": "flotillas",
+          "name": "c"
+        }
+      ]
+    }
+  ],
+  "graph": {
+    "cycles": [
+      [
+        {
+          "kind": "Kustomization",
+          "namespace": "flotillas",
+          "name": "a"
+        },
+        {
+          "kind": "Kustomization",
+          "namespace": "flotillas",
+          "name": "b"
+        }
+      ]
+    ]
+  },
+  "derived": {
+    "counts": {
+      "observed": 0,
+      "pinned": 0,
+      "gates": 0,
+      "pending": 0,
+      "converging": 0,
+      "blocked": 0,
+      "held": 0
+    },
+    "graphValid": false
+  },
+  "diagnostics": [
+    "dependsOn cycle detected: flotillas/a -> flotillas/b -> flotillas/a"
+  ]
+}

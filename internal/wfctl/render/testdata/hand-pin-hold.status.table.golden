@@ -1,0 +1,31 @@
+NAME:             fleet
+MODE:             Enforce
+SUSPEND:          false
+GENERATION:       4
+ORIGIN:           status (replayed from file)
+CAPTURED:         2026-09-01T11:58:00Z (2m ago)
+LAST EVALUATED:   2026-09-01T11:57:30Z (2m30s ago)
+CLUSTER:          prod-eu (https://api.prod-eu.example.test)
+
+FIELD        VALUE
+PHASE        Blocked
+GRAPHVALID   true
+OBSERVED     3
+PINNED       3
+GATES        0
+PENDING      3
+CONVERGING   0
+BLOCKED      2
+HELD         1
+
+BLOCKED (2)
+NODE                   REASON            ANCESTOR          SINCE
+flotillas/child        AncestorHeld      flotillas/held    15m
+flotillas/grandchild   AncestorPending   flotillas/child   15m
+
+HELD (1)
+NODE             SOURCE         REASON    MANAGER
+flotillas/held   sources/held   HandPin   kubectl-patch
+
+DIAGNOSTICS (0)
+  (none)

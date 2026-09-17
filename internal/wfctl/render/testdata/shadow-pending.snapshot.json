@@ -1,0 +1,246 @@
+{
+  "apiVersion": "wfctl.wavefront.as-code.io/v1alpha1",
+  "kind": "Snapshot",
+  "origin": "status",
+  "capturedAt": "2026-09-01T11:58:00Z",
+  "evaluated": "2026-09-01T11:57:30Z",
+  "cluster": {
+    "context": "prod-eu",
+    "server": "https://api.prod-eu.example.test",
+    "wfctlVersion": "v0.1.0"
+  },
+  "observed": true,
+  "wavefront": {
+    "name": "fleet",
+    "generation": 4,
+    "spec": {
+      "nodes": {
+        "kinds": [
+          "Kustomization"
+        ],
+        "selector": {
+          "matchLabels": {
+            "wavefront.as-code.io/managed": "true"
+          }
+        }
+      },
+      "mode": "Shadow",
+      "suspend": false,
+      "poll": {
+        "interval": "90s",
+        "perHostConcurrency": 4
+      }
+    },
+    "status": {
+      "phase": "Advancing",
+      "nodes": {
+        "observed": 3,
+        "pinned": 2,
+        "gates": 1,
+        "pending": 2,
+        "converging": 0,
+        "blocked": 1,
+        "held": 0
+      },
+      "blocked": [
+        {
+          "node": {
+            "kind": "Kustomization",
+            "namespace": "flotillas",
+            "name": "beta"
+          },
+          "since": "2026-09-01T11:52:00Z",
+          "reason": "AncestorPending",
+          "ancestor": {
+            "kind": "Kustomization",
+            "namespace": "flotillas",
+            "name": "alpha"
+          }
+        }
+      ],
+      "shadow": [
+        {
+          "source": "sources/alpha",
+          "to": "aaaa222000000000000000000000000000000000"
+        }
+      ],
+      "conditions": [
+        {
+          "type": "Ready",
+          "status": "True",
+          "reason": "Succeeded",
+          "message": "evaluated 3 nodes",
+          "lastTransitionTime": "2026-09-01T11:57:30Z",
+          "observedGeneration": 4
+        },
+        {
+          "type": "GraphValid",
+          "status": "True",
+          "reason": "Valid",
+          "message": "3 nodes, 2 edges",
+          "lastTransitionTime": "2026-09-01T11:57:30Z",
+          "observedGeneration": 4
+        }
+      ],
+      "observedGeneration": 4,
+      "lastEvaluated": "2026-09-01T11:57:30Z"
+    }
+  },
+  "nodes": [
+    {
+      "ref": {
+        "kind": "Kustomization",
+        "namespace": "flotillas",
+        "name": "alpha"
+      },
+      "role": "Pinned",
+      "state": "Admissible",
+      "ready": true,
+      "wave": 0,
+      "source": "sources/alpha",
+      "pin": "aaaa111000000000000000000000000000000000",
+      "observedSHA": "aaaa222000000000000000000000000000000000",
+      "pendingSince": "2026-09-01T11:50:00Z"
+    },
+    {
+      "ref": {
+        "kind": "Kustomization",
+        "namespace": "flotillas",
+        "name": "beta"
+      },
+      "role": "Pinned",
+      "state": "Pending",
+      "ready": true,
+      "wave": 1,
+      "source": "sources/beta",
+      "pin": "bbbb111000000000000000000000000000000000",
+      "observedSHA": "bbbb222000000000000000000000000000000000",
+      "pendingSince": "2026-09-01T11:52:00Z",
+      "blocked": {
+        "reason": "AncestorPending",
+        "ancestor": {
+          "kind": "Kustomization",
+          "namespace": "flotillas",
+          "name": "alpha"
+        }
+      },
+      "dependsOn": [
+        {
+          "kind": "Kustomization",
+          "namespace": "flotillas",
+          "name": "alpha"
+        }
+      ]
+    },
+    {
+      "ref": {
+        "kind": "Kustomization",
+        "namespace": "waves",
+        "name": "gate"
+      },
+      "role": "Gate",
+      "state": "Settled",
+      "ready": true,
+      "wave": 2,
+      "dependsOn": [
+        {
+          "kind": "Kustomization",
+          "namespace": "flotillas",
+          "name": "beta"
+        }
+      ]
+    }
+  ],
+  "sources": [
+    {
+      "name": "sources/alpha",
+      "url": "https://git.example.test/org/alpha.git",
+      "secretRefName": "git-credentials",
+      "trackingRef": "refs/heads/main",
+      "pin": "aaaa111000000000000000000000000000000000",
+      "artifactSHA": "aaaa111000000000000000000000000000000000",
+      "commitOwners": [
+        {
+          "manager": "wavefront-controller",
+          "operation": "Apply"
+        }
+      ],
+      "provenance": {
+        "wavefront.as-code.io/admitted-at": "2026-09-01T10:00:00Z",
+        "wavefront.as-code.io/previous-pin": "0000fff000000000000000000000000000000000",
+        "wavefront.as-code.io/observed-ref": "refs/heads/main"
+      },
+      "conditions": [
+        {
+          "type": "Ready",
+          "status": "True",
+          "reason": "Succeeded",
+          "message": "stored artifact for revision 'main@sha1:aaaa111000000000000000000000000000000000'",
+          "lastTransitionTime": "2026-09-01T10:00:02Z",
+          "observedGeneration": 4
+        }
+      ],
+      "observedSHA": "aaaa222000000000000000000000000000000000",
+      "firstObserved": "2026-09-01T11:50:00Z",
+      "nodes": [
+        {
+          "kind": "Kustomization",
+          "namespace": "flotillas",
+          "name": "alpha"
+        }
+      ]
+    },
+    {
+      "name": "sources/beta",
+      "url": "https://git.example.test/org/beta.git",
+      "secretRefName": "git-credentials",
+      "trackingRef": "refs/heads/main",
+      "pin": "bbbb111000000000000000000000000000000000",
+      "artifactSHA": "bbbb111000000000000000000000000000000000",
+      "commitOwners": [
+        {
+          "manager": "wavefront-controller",
+          "operation": "Apply"
+        }
+      ],
+      "provenance": {
+        "wavefront.as-code.io/admitted-at": "2026-09-01T10:00:00Z",
+        "wavefront.as-code.io/previous-pin": "0000fff000000000000000000000000000000000",
+        "wavefront.as-code.io/observed-ref": "refs/heads/main"
+      },
+      "conditions": [
+        {
+          "type": "Ready",
+          "status": "True",
+          "reason": "Succeeded",
+          "message": "stored artifact for revision 'main@sha1:bbbb111000000000000000000000000000000000'",
+          "lastTransitionTime": "2026-09-01T10:00:02Z",
+          "observedGeneration": 4
+        }
+      ],
+      "observedSHA": "bbbb222000000000000000000000000000000000",
+      "firstObserved": "2026-09-01T11:52:00Z",
+      "nodes": [
+        {
+          "kind": "Kustomization",
+          "namespace": "flotillas",
+          "name": "beta"
+        }
+      ]
+    }
+  ],
+  "graph": {},
+  "derived": {
+    "counts": {
+      "observed": 0,
+      "pinned": 0,
+      "gates": 0,
+      "pending": 0,
+      "converging": 0,
+      "blocked": 0,
+      "held": 0
+    },
+    "graphValid": false
+  },
+  "diagnostics": []
+}

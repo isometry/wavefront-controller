@@ -1,0 +1,11 @@
+digraph wavefront {
+  rankdir="LR";
+  node [fontname="sans-serif", fontsize=10];
+  edge [fontname="sans-serif", fontsize=9];
+  "Kustomization/flotillas/api" [label="flotillas/api\nPending", shape="box", style="rounded", color="goldenrod"];
+  "Kustomization/flotillas/db" [label="flotillas/db\nUnhealthy", shape="box", style="rounded", color="firebrick"];
+  "Kustomization/flotillas/worker" [label="flotillas/worker\nPending", shape="box", style="rounded", color="goldenrod"];
+  "Kustomization/flotillas/db" -> "Kustomization/flotillas/worker";
+  "Kustomization/flotillas/worker" -> "Kustomization/flotillas/api" [style="dashed", color="firebrick", constraint=false, label="SharedSourceBlocked"];
+  "Kustomization/flotillas/db" -> "Kustomization/flotillas/worker" [style="dashed", color="firebrick", constraint=false, label="AncestorUnhealthy"];
+}

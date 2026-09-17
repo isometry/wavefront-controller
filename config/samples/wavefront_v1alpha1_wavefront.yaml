@@ -1,0 +1,19 @@
+apiVersion: wavefront.as-code.io/v1alpha1
+kind: Wavefront
+metadata:
+  name: fleet
+  labels:
+    app.kubernetes.io/name: wavefront-controller
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  nodes:
+    kinds: [Kustomization]           # v1: only Kustomization; HelmRelease reserved (D12)
+    selector:
+      matchLabels:
+        wavefront.as-code.io/managed: "true"   # the participation label (DESIGN §8.2/§4.1)
+  mode: Shadow                       # start in Shadow: detect, derive, report — zero writes.
+                                      # Flip to Enforce once Phase 0 data looks right (see docs/runbook.md).
+  suspend: false
+  poll:
+    interval: 90s
+    perHostConcurrency: 4
