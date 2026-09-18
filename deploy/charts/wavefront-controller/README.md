@@ -24,11 +24,22 @@ Releases are keyless-signed (Sigstore) and carry SLSA build provenance.
 Verify before installing:
 
 ```sh
-helm pull oci://ghcr.io/isometry/charts/wavefront-controller --version <version> --verify
+cosign verify \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  --certificate-identity-regexp '^https://github\.com/isometry/wavefront-controller/\.github/workflows/publish\.yaml@refs/tags/v.+$' \
+  ghcr.io/isometry/charts/wavefront-controller:<version>
+
+gh attestation verify \
+  oci://ghcr.io/isometry/charts/wavefront-controller:<version> \
+  --repo isometry/wavefront-controller
 ```
 
-See [`docs/verification.md`](../../../docs/verification.md) for cosign
-commands and ready-to-apply Flux/Kyverno enforcement policies.
+Helm's own `--verify` (PGP `.prov` provenance) is not used by this chart —
+it is signed with cosign instead, so `helm pull --verify` does not work
+here; use the commands above.
+
+See [`docs/verification.md`](../../../docs/verification.md) for the full
+verification commands and trust anchor details.
 
 ## Uninstalling the Chart
 

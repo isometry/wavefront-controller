@@ -80,10 +80,21 @@ hold and does not itself enforce them:
 
 ### Deploy
 
-**Build and push the image, then deploy:**
+**With Helm** (recommended):
 
 ```sh
-make docker-build docker-push IMG=<some-registry>/wavefront-controller:tag
+helm install wavefront-controller \
+  -n wavefront-controller-system --create-namespace \
+  oci://ghcr.io/isometry/charts/wavefront-controller
+```
+
+See the [chart README](deploy/charts/wavefront-controller/README.md) for
+configuration, upgrade and uninstall.
+
+**Or build your own image and deploy via Kustomize:**
+
+```sh
+make ko-build IMG=<some-registry>/wavefront-controller:tag
 make install                                  # CRDs
 make deploy IMG=<some-registry>/wavefront-controller:tag
 ```
@@ -268,6 +279,31 @@ reach.
 
 ### Install
 
+**With Homebrew:**
+
+```sh
+brew trust isometry/tap && brew install isometry/tap/wfctl
+```
+
+The formula installs the `kubectl-wavefront` symlink and shell completions
+alongside `wfctl`.
+
+**From a GitHub Release archive:**
+
+Download `wfctl_<version>_<os>_<arch>.tar.gz` (or `.zip` on Windows) from the
+[releases page](https://github.com/isometry/wavefront-controller/releases),
+extract it, and symlink `kubectl-wavefront` yourself if you want the kubectl
+plugin form. See [`docs/verification.md`](docs/verification.md) to verify the
+archive before running it.
+
+**With `go install`:**
+
+```sh
+go install github.com/isometry/wavefront-controller/cmd/wfctl@<tag>
+```
+
+**From a checkout of this repo:**
+
 ```sh
 make build-wfctl                          # bin/wfctl only
 make install-wfctl                        # into GOBIN, + kubectl-wavefront symlink
@@ -342,6 +378,16 @@ prefix, so the installed roles are `wavefront-controller-wfctl-viewer-role` and
 not scaffolded: their extra verbs are on Flux's own resources and belong to
 whatever policy regime already governs those.
 
+Installing via the [Helm chart](deploy/charts/wavefront-controller) instead
+gains the chart's `<fullname>` as a prefix: `rbac.userRoles.enabled` (default
+`true`) renders `<fullname>-wavefront-{admin,editor,viewer}-role` and
+`<fullname>-wfctl-viewer-role`. `<fullname>` is the release name when the
+release is named `wavefront-controller` (the same names as above) — for any
+other release name it's `<release>-wavefront-controller-...` (release name
+prefixed onto the chart name). See the [chart
+README](deploy/charts/wavefront-controller/README.md#user-facing-roles) for
+details.
+
 ### Commands
 
 Read commands honour `--derive`, `--poll` and `--from` and take
@@ -375,6 +421,16 @@ record one is a warning, never a failed command.
 
 Every command's `--help` is the authoritative reference; `docs/runbook.md`
 gives the operational procedures each one belongs to.
+
+## Supply chain
+
+Tagged releases publish a keyless-signed (Sigstore) container image, OCI
+Helm chart, `wfctl` GitHub Release archives and Homebrew bottles, each with
+SLSA build provenance; the image also carries an SBOM attestation.
+[`docs/verification.md`](docs/verification.md) documents how to verify all
+of them with `gh attestation verify` and `cosign`, plus the artifact layout
+and mirroring guidance. (Everything is signed with cosign, not Helm's own
+PGP-based `--verify`/`.prov` mechanism, which this pipeline does not use.)
 
 ## Limitations
 

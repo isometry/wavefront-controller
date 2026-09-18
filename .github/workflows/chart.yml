@@ -1,0 +1,57 @@
+---
+name: Chart
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions: {}
+
+jobs:
+  chart:
+    permissions:
+      contents: read
+    name: Run on Ubuntu
+    runs-on: ubuntu-latest
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Setup Go
+        uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
+        with:
+          go-version-file: go.mod
+
+      - name: Setup Helm
+        uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+
+      - name: Install kubeconform
+        run: |
+          go install github.com/yannh/kubeconform/cmd/kubeconform@v0.8.0
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+      - name: Check chart is up to date
+        run: |
+          make manifests
+          if [[ -n "$(git status --porcelain -- deploy/charts config)" ]]; then
+            echo "::error::deploy/charts or config drifted from the generated source — run 'make manifests' and commit the result"
+            git status --porcelain -- deploy/charts config
+            exit 1
+          fi
+
+      - name: Lint chart
+        run: make helm-lint
+
+      - name: Validate rendered manifests
+        run: |
+          helm template wavefront-controller deploy/charts/wavefront-controller \
+            --set metrics.serviceMonitor.enabled=true \
+            --set metrics.networkPolicy.enabled=true \
+            | kubeconform -strict -ignore-missing-schemas -summary
