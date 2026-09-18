@@ -1,0 +1,21 @@
+formula:
+  name: wfctl
+  description: Inspect and operate a Wavefront progressive-delivery fleet
+  homepage: https://github.com/isometry/wavefront-controller
+  license: Apache-2.0
+  install:
+    completions: true
+    extra:
+      - bin.install_symlink "wfctl" => "kubectl-wavefront"
+  test:
+    command: [--version]
+
+source:
+  type: local
+  dist_path: build
+  build:
+    packages: ["./cmd/wfctl"]
+    ldflags: "-X github.com/isometry/wavefront-controller/internal/wfctl/cli.Version={{.Tag}}"
+
+tap:
+  owner: isometry

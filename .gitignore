@@ -31,3 +31,8 @@ go.work
 
 .superpowers/
 .serena/
+
+# goreleaser / gobottle release outputs
+/build/
+/bottles/
+dist/*.tgz
