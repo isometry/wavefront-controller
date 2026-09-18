@@ -346,6 +346,20 @@ func TestCaptureStampsTheCluster(t *testing.T) {
 	}
 }
 
+// TestVersionFlag proves `--version` reports the package's Version, which is
+// "dev" by default and stamped with `-X .../cli.Version=v1.2.3` at release
+// build time. Cobra only wires the flag when Command.Version is set, so this
+// also guards against that wiring being dropped.
+func TestVersionFlag(t *testing.T) {
+	out, err := run(t, "--version")
+	if err != nil {
+		t.Fatalf("--version: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, Version) {
+		t.Errorf("--version output %q does not contain Version %q", out, Version)
+	}
+}
+
 // TestFail covers the mapping main relies on.
 func TestFail(t *testing.T) {
 	var out bytes.Buffer

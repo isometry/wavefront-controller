@@ -1,5 +1,11 @@
-# Image URL to use all building/pushing image targets
-IMG ?= controller:latest
+# VERSION is derived from the nearest v* tag (git describe, v stripped); the
+# release workflow overrides it from the pushed tag.
+VERSION ?= $(shell git describe --tags --match 'v*' --dirty 2>/dev/null | sed 's/^v//')
+ifeq ($(VERSION),)
+VERSION := 0.0.0-dev
+endif
+IMAGE_TAG_BASE ?= ghcr.io/isometry/wavefront-controller
+IMG ?= $(IMAGE_TAG_BASE):$(VERSION)
 # YEAR defines the year value used for substituting the YEAR placeholder in the boilerplate header.
 YEAR ?= $(shell date +%Y)
 
@@ -46,6 +52,7 @@ help: ## Display this help.
 .PHONY: manifests
 manifests: controller-gen ## Generate WebhookConfiguration, ClusterRole and CustomResourceDefinition objects.
 	"$(CONTROLLER_GEN)" rbac:roleName=manager-role crd webhook paths="./..." output:crd:artifacts:config=config/crd/bases
+	./hack/sync-chart.sh
 
 .PHONY: generate
 generate: controller-gen ## Generate code containing DeepCopy, DeepCopyInto, and DeepCopyObject method implementations.
@@ -91,6 +98,10 @@ KIND_CLUSTER ?= wavefront-controller-test-e2e
 E2E_IMG ?= example.com/wavefront-controller:v0.0.1
 GITSERVER_IMG ?= example.com/wavefront-gitserver:v0.0.1
 E2E_TIMEOUT ?= 90m
+# E2E_INSTALL selects how the suite installs the controller: `kustomize` (the
+# config/ overlays, i.e. `make deploy`) or `helm` (the chart under
+# $(CHART_DIR)). Both install paths are expected to pass the same specs.
+E2E_INSTALL ?= kustomize
 
 # Every e2e step addresses the kind cluster through this file and nothing else,
 # so a context switch in ~/.kube/config — or another kind cluster being created
@@ -121,6 +132,19 @@ setup-test-e2e: ## Set up a Kind cluster for e2e tests if it does not exist
 			$(E2E_ENV) $(KIND) create cluster --name $(KIND_CLUSTER) ;; \
 	esac
 
+# Checked before the cluster is built, so a typo in E2E_INSTALL — or a missing
+# helm — costs a second rather than the whole setup.
+.PHONY: e2e-install-guard
+e2e-install-guard: ## Validate E2E_INSTALL and the tooling the chosen installer needs.
+	@case "$(E2E_INSTALL)" in \
+		kustomize) ;; \
+		helm) command -v $(HELM) >/dev/null 2>&1 || { \
+			echo "E2E_INSTALL=helm needs '$(HELM)' on PATH; install Helm or set HELM=<path>"; \
+			exit 1; \
+		} ;; \
+		*) echo "E2E_INSTALL must be 'kustomize' or 'helm' (got '$(E2E_INSTALL)')"; exit 1 ;; \
+	esac
+
 .PHONY: e2e-guard
 e2e-guard: ## Refuse to run e2e against anything but the kind cluster on loopback.
 	@ctx="$$($(E2E_ENV) $(KUBECTL) config current-context 2>/dev/null)"; \
@@ -140,7 +164,7 @@ gitserver-build: ## Build the e2e git server image (fluxcd/pkg/gittestserver on 
 
 .PHONY: e2e-images
 e2e-images: gitserver-build ## Build the manager and git server images and load them into Kind.
-	$(MAKE) docker-build IMG=$(E2E_IMG)
+	$(MAKE) ko-build-local IMG=$(E2E_IMG)
 	$(KIND) load docker-image $(E2E_IMG) --name $(KIND_CLUSTER)
 	$(KIND) load docker-image $(GITSERVER_IMG) --name $(KIND_CLUSTER)
 
@@ -160,9 +184,10 @@ e2e-gitserver: e2e-guard ## Deploy the e2e git server on an empty repository sto
 	$(E2E_ENV) $(KUBECTL) -n wavefront-e2e rollout status deployment/gitserver --timeout=3m
 
 .PHONY: test-e2e
-test-e2e: setup-test-e2e e2e-guard manifests generate fmt vet kustomize build-wfctl e2e-images e2e-flux e2e-gitserver ## Run the e2e tests. Expected an isolated environment using Kind.
+test-e2e: e2e-install-guard setup-test-e2e e2e-guard manifests generate fmt vet kustomize build-wfctl e2e-images e2e-flux e2e-gitserver ## Run the e2e tests. Expected an isolated environment using Kind.
 	@status=0; \
 	CERT_MANAGER_INSTALL_SKIP=true $(E2E_ENV) KIND=$(KIND) KIND_CLUSTER=$(KIND_CLUSTER) E2E_IMG=$(E2E_IMG) \
+	  E2E_INSTALL=$(E2E_INSTALL) HELM=$(HELM) \
 	  go test -tags=e2e ./test/e2e/ -v -ginkgo.v -timeout $(E2E_TIMEOUT) || status=$$?; \
 	( cd config/manager && "$(KUSTOMIZE)" edit set image controller=controller:latest ); \
 	exit $$status
@@ -193,7 +218,7 @@ build: manifests generate fmt vet build-wfctl ## Build manager and wfctl binarie
 
 .PHONY: build-wfctl
 build-wfctl: ## Build wfctl binary.
-	go build -o bin/wfctl ./cmd/wfctl
+	go build -ldflags "-X github.com/isometry/wavefront-controller/internal/wfctl/cli.Version=v$(VERSION)" -o bin/wfctl ./cmd/wfctl
 
 # wfctl is deliberately absent from the manager image (see README, "wfctl"):
 # the manager's ServiceAccount is exactly the RBAC an exec into that pod
@@ -208,33 +233,20 @@ install-wfctl: build-wfctl ## Install wfctl into GOBIN, with the kubectl-wavefro
 run: manifests generate fmt vet ## Run a controller from your host.
 	go run ./cmd/main.go
 
-# If you wish to build the manager image targeting other platforms you can use the --platform flag.
-# (i.e. docker build --platform linux/arm64). However, you must enable docker buildKit for it.
-# More info: https://docs.docker.com/develop/develop-images/build_enhancements/
-.PHONY: docker-build
-docker-build: ## Build docker image with the manager.
-	$(CONTAINER_TOOL) build -t ${IMG} .
+# $(IMG) is repo:tag; ko wants the repo and the tag split apart. This breaks
+# on a registry:port host (e.g. localhost:5000/x:tag) because the port's
+# colon is indistinguishable from the tag separator — acceptable here since
+# IMG is always a plain registry host.
+.PHONY: ko-build
+ko-build: ko ## Build and push the multi-arch manager image with ko (IMG=repo:tag).
+	KO_DOCKER_REPO=$(firstword $(subst :, ,$(IMG))) "$(KO)" build --bare --platform=linux/amd64,linux/arm64 \
+	  --tags=$(lastword $(subst :, ,$(IMG))) \
+	  --image-label org.opencontainers.image.source=https://github.com/isometry/wavefront-controller ./cmd
 
-.PHONY: docker-push
-docker-push: ## Push docker image with the manager.
-	$(CONTAINER_TOOL) push ${IMG}
-
-# PLATFORMS defines the target platforms for the manager image be built to provide support to multiple
-# architectures. (i.e. make docker-buildx IMG=myregistry/mypoperator:0.0.1). To use this option you need to:
-# - be able to use docker buildx. More info: https://docs.docker.com/build/buildx/
-# - have enabled BuildKit. More info: https://docs.docker.com/develop/develop-images/build_enhancements/
-# - be able to push the image to your registry (i.e. if you do not set a valid value via IMG=<myregistry/image:<tag>> then the export will fail)
-# To adequately provide solutions that are compatible with multiple platforms, you should consider using this option.
-PLATFORMS ?= linux/arm64,linux/amd64,linux/s390x,linux/ppc64le
-.PHONY: docker-buildx
-docker-buildx: ## Build and push docker image for the manager for cross-platform support
-	# copy existing Dockerfile and insert --platform=${BUILDPLATFORM} into Dockerfile.cross, and preserve the original Dockerfile
-	sed -e '1 s/\(^FROM\)/FROM --platform=\$$\{BUILDPLATFORM\}/; t' -e ' 1,// s//FROM --platform=\$$\{BUILDPLATFORM\}/' Dockerfile > Dockerfile.cross
-	- $(CONTAINER_TOOL) buildx create --name wavefront-controller-builder
-	$(CONTAINER_TOOL) buildx use wavefront-controller-builder
-	- $(CONTAINER_TOOL) buildx build --push --platform=$(PLATFORMS) --tag ${IMG} -f Dockerfile.cross .
-	- $(CONTAINER_TOOL) buildx rm wavefront-controller-builder
-	rm Dockerfile.cross
+.PHONY: ko-build-local
+ko-build-local: ko ## Build the manager image for the local docker daemon with ko (IMG=repo:tag).
+	KO_DOCKER_REPO=$(firstword $(subst :, ,$(IMG))) "$(KO)" build --local --bare --platform=linux/$(GITSERVER_ARCH) \
+	  --tags=$(lastword $(subst :, ,$(IMG))) ./cmd
 
 .PHONY: build-installer
 build-installer: manifests generate kustomize ## Generate a consolidated YAML with CRDs and deployment.
@@ -267,6 +279,24 @@ deploy: manifests kustomize ## Deploy controller to the K8s cluster specified in
 undeploy: kustomize ## Undeploy controller from the K8s cluster specified in ~/.kube/config. Call with ignore-not-found=true to ignore resource not found errors during deletion.
 	"$(KUSTOMIZE)" build config/default | "$(KUBECTL)" delete --ignore-not-found=$(ignore-not-found) -f -
 
+##@ Helm
+
+HELM ?= helm
+CHART_DIR ?= deploy/charts/wavefront-controller
+
+.PHONY: helm-lint
+helm-lint: manifests ## Lint the Helm chart (regenerates chart CRDs/RBAC first).
+	$(HELM) lint $(CHART_DIR)
+
+.PHONY: helm-template
+helm-template: manifests ## Render the Helm chart to stdout (regenerates chart CRDs/RBAC first).
+	$(HELM) template wavefront-controller $(CHART_DIR)
+
+.PHONY: helm-package
+helm-package: manifests ## Package the chart into dist/ with version/appVersion = $(VERSION).
+	mkdir -p dist
+	$(HELM) package $(CHART_DIR) --destination dist --version "$(VERSION)" --app-version "$(VERSION)"
+
 ##@ Dependencies
 
 ## Location to install dependencies to
@@ -281,10 +311,12 @@ KUSTOMIZE ?= $(LOCALBIN)/kustomize
 CONTROLLER_GEN ?= $(LOCALBIN)/controller-gen
 ENVTEST ?= $(LOCALBIN)/setup-envtest
 GOLANGCI_LINT = $(LOCALBIN)/golangci-lint
+KO ?= $(LOCALBIN)/ko
 
 ## Tool Versions
 KUSTOMIZE_VERSION ?= v5.8.1
 CONTROLLER_TOOLS_VERSION ?= v0.21.0
+KO_VERSION ?= v0.19.1
 
 #ENVTEST_VERSION is the controller-runtime version to use for setup-envtest, derived from go.mod
 ENVTEST_VERSION ?= $(shell v='$(call gomodver,sigs.k8s.io/controller-runtime)'; \
@@ -306,6 +338,11 @@ $(KUSTOMIZE): $(LOCALBIN)
 controller-gen: $(CONTROLLER_GEN) ## Download controller-gen locally if necessary.
 $(CONTROLLER_GEN): $(LOCALBIN)
 	$(call go-install-tool,$(CONTROLLER_GEN),sigs.k8s.io/controller-tools/cmd/controller-gen,$(CONTROLLER_TOOLS_VERSION))
+
+.PHONY: ko
+ko: $(KO) ## Download ko locally if necessary.
+$(KO): $(LOCALBIN)
+	$(call go-install-tool,$(KO),github.com/google/ko,$(KO_VERSION))
 
 .PHONY: setup-envtest
 setup-envtest: envtest ## Download the binaries required for ENVTEST in the local bin directory.

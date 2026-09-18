@@ -538,7 +538,7 @@ var _ = Describe("Wavefront fleet", Ordered, func() {
 
 		By("killing the controller mid-rollout")
 		cmd := exec.Command("kubectl", "delete", "pod",
-			"-l", "control-plane=controller-manager", "-n", namespace, "--wait=false")
+			"-l", inst.PodSelector(), "-n", inst.Namespace(), "--wait=false")
 		_, err := utils.Run(cmd)
 		Expect(err).NotTo(HaveOccurred(), "failed to delete the controller pod")
 
@@ -1004,7 +1004,7 @@ func dumpFleet() {
 		{get, "wavefront", fleetName, "-o", "yaml"},
 		{get, "events", "-n", fleetNamespace},
 		{get, "events", "-n", fleetEventNamespace},
-		{"logs", "-l", "control-plane=controller-manager", "-n", namespace, "--tail=200"},
+		{"logs", "-l", inst.PodSelector(), "-n", inst.Namespace(), "--tail=200"},
 	} {
 		out, err := utils.Run(exec.Command("kubectl", args...))
 		_, _ = fmt.Fprintf(GinkgoWriter, "kubectl %s:\n%s\n%v\n", strings.Join(args, " "), out, err)

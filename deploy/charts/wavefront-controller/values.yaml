@@ -1,0 +1,114 @@
+---
+# Common values
+commonLabels: {}
+commonAnnotations: {}
+nameOverride: ~
+fullnameOverride: ~
+
+## namespace: defaults to the namespace where the chart is deployed if not specified
+namespace: ~
+
+## crds
+##   install: true | false
+##     true: install the CRDs
+##     false: do not install the CRDs (e.g. when managed out-of-band)
+##   keep: true | false
+##     true: annotate CRDs with helm.sh/resource-policy: keep so a `helm uninstall`
+##           leaves them (and your Wavefront resources) in place
+##     false: allow helm to delete the CRDs when the chart is uninstalled
+crds:
+  install: true
+  keep: true
+
+## leaderElection: run a single active manager via a coordination.k8s.io Lease
+leaderElection:
+  enabled: true
+
+## rbac
+rbac:
+  ## create: install the controller's ServiceAccount, Roles and Bindings
+  create: true
+  serviceAccount:
+    ## name: defaults to the chart fullname when unset
+    name: ~
+    annotations: {}
+
+  ## extraClusterRoleBindings: bind pre-existing (out-of-band) ClusterRoles to
+  ## the controller's ServiceAccount, e.g. [view, my-shared-reader].
+  extraClusterRoleBindings: []
+
+  ## userRoles: render the four user-facing ClusterRoles — they grant humans and
+  ## tooling access to Wavefront resources and are never bound by the chart:
+  ##   <fullname>-wavefront-admin-role   full ('*') control of wavefronts
+  ##   <fullname>-wavefront-editor-role  create/update/delete wavefronts
+  ##   <fullname>-wavefront-viewer-role  read-only on wavefronts
+  ##   <fullname>-wfctl-viewer-role      the wfctl "viewer" tier: read on
+  ##                                     wavefronts plus the events
+  ##                                     `wfctl history` lists
+  ## See the README "Access tiers"; cluster admins bind these themselves with
+  ## their own (Cluster)RoleBindings.
+  userRoles:
+    enabled: true
+
+## metrics
+##   enabled: serve and expose the controller-runtime /metrics endpoint
+##   listen.port: port for --metrics-bind-address=:<port>
+##   secure: serve metrics over HTTPS with a bearer-token AuthN/AuthZ filter
+##           (--metrics-secure); false = plain HTTP. Only when true does the
+##           chart render the metrics-auth ClusterRole/Binding
+##           (tokenreviews/subjectaccessreviews), which that filter needs.
+##   service.type: ClusterIP | NodePort | LoadBalancer
+##   serviceMonitor.enabled: render a monitoring.coreos.com/v1 ServiceMonitor
+##           (requires the Prometheus Operator CRDs)
+##   networkPolicy.enabled: render a NetworkPolicy allowing ingress to the
+##           metrics port only from namespaces labelled `metrics: enabled`
+metrics:
+  enabled: true
+  listen:
+    port: 8443
+  secure: true
+  service:
+    type: ClusterIP
+  serviceMonitor:
+    enabled: false
+  networkPolicy:
+    enabled: false
+
+## manager
+##   repository: image repository
+##   tag: image tag (a sha256:... value is treated as a digest); defaults to the
+##        chart appVersion, then "latest"
+##   imagePullPolicy: container imagePullPolicy; rendered only when set, so the
+##        cluster default (IfNotPresent, or Always for a "latest" tag) applies
+##   imagePullSecrets: pod-level imagePullSecrets, e.g. [{name: regcred}];
+##        rendered only when non-empty
+##   replicas: number of replicas
+##   annotations: additional annotations for the Deployment
+##   podAnnotations: additional annotations for the manager Pod template
+##   extraLabels: additional labels for the Deployment
+##   priorityClassName: PriorityClass for the manager Pod
+##   extraArgs: map of additional CLI flags rendered as --key=value (or --key for
+##              a null value)
+##   env: additional environment variables for the manager container
+manager:
+  repository: ghcr.io/isometry/wavefront-controller
+  tag: ~
+  imagePullPolicy: ~
+  imagePullSecrets: []
+  replicas: 1
+  annotations: {}
+  podAnnotations: {}
+  extraLabels: {}
+  priorityClassName: ~
+  nodeSelector: ~
+  tolerations: ~
+  affinity: ~
+  env: []
+  extraArgs: {}
+  resources:
+    requests:
+      cpu: 10m
+      memory: 64Mi
+    limits:
+      cpu: 500m
+      memory: 128Mi

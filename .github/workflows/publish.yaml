@@ -1,0 +1,241 @@
+---
+name: Publish
+
+on:
+  push:
+    tags: ["v*.*.*"]
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false # a release must never be cancelled mid-flight
+
+env:
+  IMAGE: ghcr.io/isometry/wavefront-controller
+  CHART: ghcr.io/isometry/charts/wavefront-controller
+  CHART_DIR: deploy/charts/wavefront-controller
+
+jobs:
+  release:
+    name: Release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+      id-token: write # keyless OIDC for cosign + attest-*
+      attestations: write # upload provenance/SBOM attestations
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Setup Go
+        uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
+        with:
+          go-version-file: go.mod
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
+      - name: Install syft
+        uses: anchore/sbom-action/download-syft@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Run GoReleaser
+        uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
+        with:
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+
+      # goreleaser's ko integration writes one "Docker Manifest" entry per tag
+      # (version + latest); both share the manager image's digest, so unique()
+      # must collapse to exactly one value or something is wrong.
+      - name: Extract manager image digest
+        id: image
+        run: |
+          mapfile -t digests < <(jq -r '[.[] | select(.type=="Docker Manifest") | .extra.Digest] | unique | .[]' build/artifacts.json)
+          if [[ ${#digests[@]} -ne 1 || -z "${digests[0]}" ]]; then
+            echo "::error::expected exactly one manager image digest in build/artifacts.json, found ${#digests[@]}: ${digests[*]}"
+            exit 1
+          fi
+          digest="${digests[0]}"
+          [[ "$digest" == sha256:* ]] || digest="sha256:${digest}"
+          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
+
+      - name: Generate Image SBOM
+        uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
+        with:
+          image: ${{ env.IMAGE }}@${{ steps.image.outputs.digest }}
+          format: spdx-json
+          output-file: sbom.spdx.json
+          upload-artifact: false
+
+      - name: Attest Image Provenance
+        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
+        with:
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ steps.image.outputs.digest }}
+          push-to-registry: true
+
+      - name: Attest Image SBOM
+        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
+        with:
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ steps.image.outputs.digest }}
+          sbom-path: sbom.spdx.json
+          push-to-registry: true
+
+      # `make build-installer` would rewrite config/manager/kustomization.yaml
+      # in the checkout; the bundle is therefore rendered from a throwaway copy
+      # of config/ so the tree stays clean. goreleaser has already run, so
+      # build/ survives its --clean and the GitHub Release exists to upload to.
+      - name: Build and upload install.yaml
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          make kustomize
+          cp -r config "$RUNNER_TEMP/config"
+          (cd "$RUNNER_TEMP/config/manager" && "$GITHUB_WORKSPACE/bin/kustomize" edit set image "controller=${IMAGE}:${VERSION}")
+          bin/kustomize build "$RUNNER_TEMP/config/default" > build/install.yaml
+          gh release upload "$GITHUB_REF_NAME" build/install.yaml --clobber
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Attest Release Artifacts Provenance
+        if: ${{ hashFiles('build/*.tar.gz', 'build/*.zip') != '' }}
+        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
+        with:
+          subject-path: |
+            build/*.tar.gz
+            build/*.zip
+            build/*_SHA256SUMS
+            build/*/wfctl*
+            build/install.yaml
+
+      # upload-artifact drops the executable bit; the bottle job pours the very
+      # binaries goreleaser built, so hand them over inside a tarball instead.
+      - name: Archive goreleaser output
+        run: tar -czf "$RUNNER_TEMP/goreleaser-build.tgz" build
+
+      - name: Upload goreleaser output
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: goreleaser-build
+          path: ${{ runner.temp }}/goreleaser-build.tgz
+          retention-days: 7
+          if-no-files-found: error
+
+  homebrew:
+    name: Homebrew Bottles
+    runs-on: ubuntu-latest
+    needs: release
+    # Prerelease tags (vX.Y.Z-rc.N) publish everything else, but never reach
+    # the tap: `brew install` would otherwise hand users a release candidate.
+    if: ${{ !contains(github.ref_name, '-') }}
+    permissions:
+      contents: read
+      packages: write
+      id-token: write # keyless OIDC for cosign + attest-*
+      attestations: write # upload provenance attestations
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Download goreleaser output
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: goreleaser-build
+          path: ${{ runner.temp }}
+
+      # Restores build/ at the repo root, where .gobottle.yaml's
+      # source.dist_path expects it, executable bits intact.
+      - name: Restore goreleaser output
+        run: tar -xzf "$RUNNER_TEMP/goreleaser-build.tgz" -C "$GITHUB_WORKSPACE"
+
+      - name: Set up gobottle
+        uses: isometry/gobottle-setup@c7fe02d3fd382ccf59387747aaec4686c2281475 # v1.0.0
+
+      - name: Publish Homebrew bottles
+        run: gobottle release --source local
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GOBOTTLE_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
+
+      - name: Upload bottles manifest
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: bottles-manifest-${{ github.ref_name }}
+          path: bottles/bottles.json
+          if-no-files-found: ignore
+
+      - name: Attest Bottle Provenance
+        if: ${{ !cancelled() && hashFiles('bottles/*.tar.gz') != '' }}
+        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
+        with:
+          subject-path: bottles/*.tar.gz
+
+  publish-chart:
+    name: Publish Chart
+    runs-on: ubuntu-latest
+    needs: release
+    permissions:
+      contents: read
+      packages: write
+      id-token: write # keyless OIDC for cosign + attest-*
+      attestations: write # upload provenance attestation
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
+      - name: Setup Helm
+        uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Build and Push Helm Chart
+        id: push
+        run: |
+          VERSION=${GITHUB_REF#refs/tags/v}
+          helm package "${CHART_DIR}" --destination _build --version "$VERSION" --app-version "$VERSION"
+          helm push _build/wavefront-controller-*.tgz "oci://${CHART%/*}" 2>&1 | tee push.log
+          DIGEST=$(grep -oE 'sha256:[0-9a-f]{64}' push.log | head -1 || true)
+          test -n "$DIGEST" || { echo "::error::failed to capture chart digest"; exit 1; }
+          echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"
+
+      - name: Sign Chart
+        run: cosign sign --yes "${CHART}@${DIGEST}"
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+
+      - name: Attest Chart Provenance
+        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
+        with:
+          subject-name: ${{ env.CHART }}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true

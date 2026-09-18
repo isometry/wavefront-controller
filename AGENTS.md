@@ -42,6 +42,8 @@ Multi-group layout organizes APIs by group name (e.g., `batch`, `apps`). Check t
 - `config/webhook/manifests.yaml` - from `make manifests`
 - `**/zz_generated.*.go` - from `make generate`
 - `PROJECT` - from `kubebuilder [OPTIONS]`
+- `deploy/charts/wavefront-controller/templates/crds.yaml` - from `make manifests` (via `hack/sync-chart.sh`)
+- `deploy/charts/wavefront-controller/templates/clusterrole-manager.yaml` - from `make manifests` (via `hack/sync-chart.sh`)
 
 ### Never Remove Scaffold Markers
 Do NOT delete `// +kubebuilder:scaffold:*` comments. CLI injects code at these markers.
@@ -158,7 +160,7 @@ make manifests generate
 
 # 2. Build & deploy
 export IMG=<registry>/<project>:tag
-make docker-build docker-push IMG=$IMG  # Or: kind load docker-image $IMG --name <cluster>
+make ko-build IMG=$IMG        # Or: make ko-build-local IMG=$IMG (local docker daemon)
 make deploy IMG=$IMG
 
 # 3. Test
@@ -269,37 +271,78 @@ kubectl apply -f https://raw.githubusercontent.com/<org>/<repo>/<tag>/dist/insta
 
 ### Option 2: Helm Chart
 
-```bash
-kubebuilder edit --plugins=helm/v2-alpha                      # Generates dist/chart/ (default)
-kubebuilder edit --plugins=helm/v2-alpha --output-dir=charts  # Generates charts/chart/
-```
+The chart lives at `deploy/charts/wavefront-controller`. Its generated
+templates (`templates/crds.yaml`, `templates/clusterrole-manager.yaml`) are
+synced from `config/` by `hack/sync-chart.sh`, which `make manifests` runs
+automatically — never hand-edit them, and never regenerate the chart with
+kubebuilder's `helm/v2-alpha` plugin (it is not used here).
 
-**For development:**
 ```bash
-make helm-deploy IMG=<registry>/<project>:<tag>          # Deploy manager via Helm
-make helm-deploy IMG=$IMG HELM_EXTRA_ARGS="--set ..."    # Deploy with custom values
-make helm-status                                         # Show release status
-make helm-uninstall                                      # Remove release
-make helm-history                                        # View release history
-make helm-rollback                                       # Rollback to previous version
+make helm-lint                              # helm lint deploy/charts/wavefront-controller
+make helm-template                          # helm template … to stdout
+make helm-package                           # package into dist/, version/appVersion=$(VERSION)
 ```
 
 **For end users/production:**
 ```bash
-helm install my-release ./<output-dir>/chart/ --namespace <ns> --create-namespace
+helm install wavefront-controller \
+  -n wavefront-controller-system --create-namespace \
+  oci://ghcr.io/isometry/charts/wavefront-controller
 ```
 
-**Important:** If you add webhooks or modify manifests after initial chart generation:
-1. Backup any customizations in `<output-dir>/chart/values.yaml` and `<output-dir>/chart/manager/manager.yaml`
-2. Re-run: `kubebuilder edit --plugins=helm/v2-alpha --force` (use same `--output-dir` if customized)
-3. Manually restore your custom values from the backup
+**If you add webhooks or otherwise change what the manager needs:** edit the
+chart's `templates/` and `values.yaml` directly, then run `make helm-lint`
+and `make helm-template` to check the result.
 
-### Publish Container Image
+### Publish the Manager Image
+
+The manager image is built with [`ko`](https://ko.build) (`.ko.yaml`) — there
+is no `Dockerfile` for it (the only `Dockerfile` in this repo is
+`test/e2e/gitserver/Dockerfile`, used solely by the e2e suite's git server
+fixture):
 
 ```bash
-export IMG=<registry>/<project>:<version>
-make docker-build docker-push IMG=$IMG
+make ko-build IMG=<registry>/wavefront-controller:tag        # multi-arch, pushes
+make ko-build-local IMG=<registry>/wavefront-controller:tag  # single-arch, local docker daemon
 ```
+
+### Release Flow
+
+Pushing a `vX.Y.Z` tag triggers `.github/workflows/publish.yaml`, which runs
+three jobs:
+
+1. **`release`** — `goreleaser` (manager image via `ko`, `wfctl` archives,
+   cosign signing), image SBOM and attestations, then a versioned kustomize
+   bundle uploaded to the release as the `install.yaml` asset. It renders that
+   bundle from a copy of `config/` under `$RUNNER_TEMP` rather than via `make
+   build-installer`, which would dirty `config/manager/kustomization.yaml` in
+   the checkout. Finally it tars `build/` (preserving executable bits that
+   `upload-artifact` drops) and uploads it as the `goreleaser-build` artifact.
+2. **`homebrew`** (`needs: release`) — untars `goreleaser-build` back to
+   `build/` and runs `gobottle release --source local`. Skipped for prerelease
+   tags, so a release candidate never reaches the tap. This is the only job
+   the `HOMEBREW_TAP_GITHUB_TOKEN` PAT is exposed to, and only in that step.
+3. **`publish-chart`** (`needs: release`, *not* `homebrew`) — packages, pushes,
+   signs and attests the Helm chart.
+
+Prerelease tags (`vX.Y.Z-rc.N`) are marked prerelease on GitHub
+(`release.prerelease: auto`), publish the image, chart and archives, but build
+no bottles and never move the `latest` image tag.
+
+See [`docs/verification.md`](docs/verification.md) for how released artifacts
+are signed and verified.
+
+Re-running the workflow for a tag that already published is **not**
+idempotent for the `release` job: the GitHub Release and the `ko` image tag
+already exist, so `goreleaser` fails rather than overwriting them. Recovery
+from a partial publish is to re-run **just** the failed `homebrew` or
+`publish-chart` job from the Actions UI — both are safe to repeat, and
+`homebrew` re-downloads the `goreleaser-build` artifact rather than rebuilding.
+To redo the `release` job, delete the GitHub Release and re-push the tag.
+
+`deploy/charts/wavefront-controller/templates/user-roles.yaml` is a
+hand-maintained copy of `config/rbac/{wavefront_*,wfctl_viewer}_role.yaml` —
+`hack/sync-chart.sh` does not generate it, so change both together.
 
 ## References
 

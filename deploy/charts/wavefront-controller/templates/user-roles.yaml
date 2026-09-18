@@ -1,0 +1,161 @@
+{{- if and .Values.rbac.create .Values.rbac.userRoles.enabled }}
+{{/*
+These roles are not used by wavefront-controller itself. They are provided to
+allow the cluster admin to help manage permissions for users; the chart renders
+them but never binds them.
+
+wavefront-admin-role grants full permissions ('*') over wavefront.as-code.io.
+This role is intended for users authorized to modify roles and bindings within
+the cluster, enabling them to delegate specific permissions to other users or
+groups as needed.
+*/}}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "chart.fullname" . }}-wavefront-admin-role
+  {{- with (deepCopy (default dict .Values.commonAnnotations)) }}
+  annotations:
+    {{- range $key, $value := . }}
+    {{ $key }}: {{ tpl (toString $value) $ | quote }}
+    {{- end }}
+  {{- end }}
+  labels:
+    component: rbac
+    {{- include "labels" . | nindent 4 }}
+rules:
+  - apiGroups:
+      - wavefront.as-code.io
+    resources:
+      - wavefronts
+    verbs:
+      - '*'
+  - apiGroups:
+      - wavefront.as-code.io
+    resources:
+      - wavefronts/status
+    verbs:
+      - get
+{{/*
+wavefront-editor-role grants permissions to create, update, and delete
+resources within wavefront.as-code.io. This role is intended for users who need
+to manage these resources but should not control RBAC or manage permissions for
+others.
+*/}}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "chart.fullname" . }}-wavefront-editor-role
+  {{- with (deepCopy (default dict .Values.commonAnnotations)) }}
+  annotations:
+    {{- range $key, $value := . }}
+    {{ $key }}: {{ tpl (toString $value) $ | quote }}
+    {{- end }}
+  {{- end }}
+  labels:
+    component: rbac
+    {{- include "labels" . | nindent 4 }}
+rules:
+  - apiGroups:
+      - wavefront.as-code.io
+    resources:
+      - wavefronts
+    verbs:
+      - create
+      - delete
+      - get
+      - list
+      - patch
+      - update
+      - watch
+  - apiGroups:
+      - wavefront.as-code.io
+    resources:
+      - wavefronts/status
+    verbs:
+      - get
+{{/*
+wavefront-viewer-role grants read-only access to wavefront.as-code.io
+resources. This role is intended for users who need visibility into these
+resources without permissions to modify them. It is ideal for monitoring
+purposes and limited-access viewing.
+*/}}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "chart.fullname" . }}-wavefront-viewer-role
+  {{- with (deepCopy (default dict .Values.commonAnnotations)) }}
+  annotations:
+    {{- range $key, $value := . }}
+    {{ $key }}: {{ tpl (toString $value) $ | quote }}
+    {{- end }}
+  {{- end }}
+  labels:
+    component: rbac
+    {{- include "labels" . | nindent 4 }}
+rules:
+  - apiGroups:
+      - wavefront.as-code.io
+    resources:
+      - wavefronts
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - wavefront.as-code.io
+    resources:
+      - wavefronts/status
+    verbs:
+      - get
+{{/*
+wfctl-viewer-role grants the wfctl "viewer" tier described in the README:
+everything the status-backed default provider reads, and nothing more.
+
+wfctl's default truth is the picture the controller published in
+status.members, so read access to wavefronts is the whole of it — plus
+events.events.k8s.io in the namespace where events regarding a cluster-scoped
+Wavefront land (default), which is what `wfctl history` lists. It grants no
+access to Kustomizations, GitRepositories or Secrets: --derive and --poll need
+the wider "derive" tier, and the write commands the "operator" tier (README,
+"Access tiers").
+*/}}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "chart.fullname" . }}-wfctl-viewer-role
+  {{- with (deepCopy (default dict .Values.commonAnnotations)) }}
+  annotations:
+    {{- range $key, $value := . }}
+    {{ $key }}: {{ tpl (toString $value) $ | quote }}
+    {{- end }}
+  {{- end }}
+  labels:
+    component: rbac
+    {{- include "labels" . | nindent 4 }}
+rules:
+  - apiGroups:
+      - wavefront.as-code.io
+    resources:
+      - wavefronts
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - wavefront.as-code.io
+    resources:
+      - wavefronts/status
+    verbs:
+      - get
+  - apiGroups:
+      - events.k8s.io
+    resources:
+      - events
+    verbs:
+      - get
+      - list
+{{- end }}

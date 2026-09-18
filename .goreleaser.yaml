@@ -1,0 +1,92 @@
+version: 2
+project_name: wavefront-controller
+dist: build
+
+builds:
+  - id: wfctl
+    main: ./cmd/wfctl
+    binary: wfctl
+    env: [CGO_ENABLED=0]
+    goos: [linux, darwin, windows]
+    goarch: [amd64, arm64]
+    flags: [-trimpath]
+    ldflags:
+      - -s -w -X github.com/isometry/wavefront-controller/internal/wfctl/cli.Version={{ .Tag }}
+    mod_timestamp: "{{ .CommitTimestamp }}"
+
+  # A stub so `kos[].build` — which defaults to the kos id — resolves; ko
+  # compiles the image itself, and `skip: true` keeps this entry out of the
+  # archives.
+  - id: manager
+    main: ./cmd
+    env: [CGO_ENABLED=0]
+    goos: [linux]
+    goarch: [amd64, arm64]
+    flags: [-trimpath]
+    ldflags: [-s -w]
+    skip: true
+
+archives:
+  - id: wfctl
+    ids: [wfctl]
+    name_template: "wfctl_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    files: [LICENSE]
+
+checksum:
+  name_template: "wfctl_{{ .Version }}_SHA256SUMS"
+
+sboms:
+  - id: archives
+    artifacts: archive
+
+signs:
+  - cmd: cosign
+    signature: "${artifact}.sigstore.json"
+    args: [sign-blob, "--bundle=${signature}", "${artifact}", "--yes"]
+    artifacts: checksum
+
+kos:
+  - id: manager
+    main: ./cmd
+    repositories: [ghcr.io/isometry/wavefront-controller]
+    base_image: gcr.io/distroless/static:nonroot
+    platforms: [linux/amd64, linux/arm64]
+    tags:
+      - "{{ .Version }}"
+      - "{{ if not .Prerelease }}latest{{ end }}"
+    bare: true
+    preserve_import_paths: false
+    sbom: spdx
+    creation_time: "{{ .CommitTimestamp }}"
+    ko_data_creation_time: "{{ .CommitTimestamp }}"
+    labels:
+      org.opencontainers.image.source: https://github.com/isometry/wavefront-controller
+      org.opencontainers.image.version: "{{ .Version }}"
+      org.opencontainers.image.revision: "{{ .FullCommit }}"
+    flags: [-trimpath]
+    ldflags: [-s -w]
+    env: [CGO_ENABLED=0]
+
+docker_signs:
+  - cmd: cosign
+    artifacts: manifests
+    args: [sign, "${artifact}", "--yes"]
+    output: true
+
+release:
+  github:
+    owner: isometry
+    name: wavefront-controller
+  prerelease: auto
+  header: |
+    ## Artifacts
+    - Manager image: `ghcr.io/isometry/wavefront-controller:{{ .Version }}`
+    - Helm chart: `oci://ghcr.io/isometry/charts/wavefront-controller` version `{{ .Version }}`
+    - wfctl: `brew trust isometry/tap && brew install isometry/tap/wfctl`, or the archives below
+    See docs/verification.md for signature and provenance verification.
+
+changelog:
+  use: github-native

@@ -1,0 +1,33 @@
+{{ include "chart.fullname" . }} has been installed.
+
+The wavefront-controller manager is deploying into namespace {{ include "chart.namespace" . }}.
+
+Check rollout status:
+  kubectl -n {{ include "chart.namespace" . }} rollout status deployment/{{ include "chart.fullname" . }}
+
+{{- if .Values.crds.install }}
+
+CRD installed: wavefronts.wavefront.as-code.io
+{{- if .Values.crds.keep }}
+(annotated helm.sh/resource-policy: keep — a `helm uninstall` will NOT remove it.)
+{{- end }}
+{{- else }}
+
+The CRD was NOT installed by this release (crds.install=false); ensure
+wavefronts.wavefront.as-code.io exists in the cluster before creating
+Wavefront resources.
+{{- end }}
+
+To see what a Wavefront is doing and why, use the `wfctl` CLI:
+
+  brew trust isometry/tap && brew install isometry/tap/wfctl
+  wfctl status
+
+(`wfctl` also runs as a kubectl plugin — `kubectl wavefront status` — once a
+`kubectl-wavefront` symlink points at it; see the project README, "wfctl".)
+{{- if and .Values.rbac.create .Values.rbac.userRoles.enabled }}
+
+The user-facing ClusterRoles {{ include "chart.fullname" . }}-wavefront-{admin,editor,viewer}-role and
+{{ include "chart.fullname" . }}-wfctl-viewer-role are rendered but not bound; bind them to your own
+users or groups (see the chart README, "User-facing roles").
+{{- end }}

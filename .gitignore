@@ -6,7 +6,6 @@
 *.dylib
 bin/*
 test/e2e/gitserver/bin/
-Dockerfile.cross
 
 # Test binary, built with `go test -c`
 *.test
@@ -32,3 +31,8 @@ go.work
 
 .superpowers/
 .serena/
+
+# goreleaser / gobottle release outputs
+/build/
+/bottles/
+dist/*.tgz

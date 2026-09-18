@@ -1,0 +1,21 @@
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+      semver-major-days: 30
+    groups:
+      actions:
+        patterns: ["*"]
+
+  # Security-only: open-pull-requests-limit: 0 disables routine version PRs;
+  # only Dependabot security-update PRs open (requires repo-level Dependabot
+  # security updates to be enabled in Settings -> Code security).
+  - package-ecosystem: gomod
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 0
