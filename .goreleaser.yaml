@@ -14,6 +14,9 @@ builds:
       - -s -w -X github.com/isometry/wavefront-controller/internal/wfctl/cli.Version={{ .Tag }}
     mod_timestamp: "{{ .CommitTimestamp }}"
 
+  # A stub so `kos[].build` — which defaults to the kos id — resolves; ko
+  # compiles the image itself, and `skip: true` keeps this entry out of the
+  # archives.
   - id: manager
     main: ./cmd
     env: [CGO_ENABLED=0]
@@ -77,6 +80,7 @@ release:
   github:
     owner: isometry
     name: wavefront-controller
+  prerelease: auto
   header: |
     ## Artifacts
     - Manager image: `ghcr.io/isometry/wavefront-controller:{{ .Version }}`

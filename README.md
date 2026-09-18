@@ -102,10 +102,17 @@ make deploy IMG=<some-registry>/wavefront-controller:tag
 **Or apply the pre-built installer bundle:**
 
 ```sh
-kubectl apply -f https://raw.githubusercontent.com/isometry/wavefront-controller/<tag-or-branch>/dist/install.yaml
+kubectl apply -f https://github.com/isometry/wavefront-controller/releases/download/<tag>/install.yaml
 ```
 
-(`make build-installer IMG=<...>` regenerates `dist/install.yaml` locally.)
+Each release publishes `install.yaml` as an asset, with that release's
+versioned image baked in; `<tag>` is the git tag, e.g. `v0.3.0`.
+
+`make build-installer IMG=<...>` regenerates `dist/install.yaml` locally. The
+copy committed at `dist/install.yaml` references `controller:latest` and is for
+development, not for applying to a cluster. Always pass `IMG=` to `make deploy`
+and `make ko-build` — they default to `$(IMAGE_TAG_BASE):$(VERSION)`, a tag
+derived from `git describe` that generally does not exist in the registry.
 
 **Apply a `Wavefront`:**
 
@@ -285,8 +292,13 @@ reach.
 brew trust isometry/tap && brew install isometry/tap/wfctl
 ```
 
-The formula installs the `kubectl-wavefront` symlink and shell completions
-alongside `wfctl`.
+The poured bottle installs `wfctl` and its shell completions, but **not** the
+`kubectl-wavefront` plugin link — only `brew install --build-from-source`
+creates that. Add it yourself if you want the kubectl plugin form:
+
+```sh
+ln -s "$(brew --prefix)/bin/wfctl" "$(brew --prefix)/bin/kubectl-wavefront"
+```
 
 **From a GitHub Release archive:**
 

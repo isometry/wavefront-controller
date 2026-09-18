@@ -218,7 +218,7 @@ build: manifests generate fmt vet build-wfctl ## Build manager and wfctl binarie
 
 .PHONY: build-wfctl
 build-wfctl: ## Build wfctl binary.
-	go build -o bin/wfctl ./cmd/wfctl
+	go build -ldflags "-X github.com/isometry/wavefront-controller/internal/wfctl/cli.Version=v$(VERSION)" -o bin/wfctl ./cmd/wfctl
 
 # wfctl is deliberately absent from the manager image (see README, "wfctl"):
 # the manager's ServiceAccount is exactly the RBAC an exec into that pod

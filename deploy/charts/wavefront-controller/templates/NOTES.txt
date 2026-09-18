@@ -18,11 +18,13 @@ wavefronts.wavefront.as-code.io exists in the cluster before creating
 Wavefront resources.
 {{- end }}
 
-To see what a Wavefront is doing and why, use the `wfctl` CLI (also installable
-as a kubectl plugin):
+To see what a Wavefront is doing and why, use the `wfctl` CLI:
 
-  brew install isometry/tap/wfctl
-  kubectl wavefront status
+  brew trust isometry/tap && brew install isometry/tap/wfctl
+  wfctl status
+
+(`wfctl` also runs as a kubectl plugin — `kubectl wavefront status` — once a
+`kubectl-wavefront` symlink points at it; see the project README, "wfctl".)
 {{- if and .Values.rbac.create .Values.rbac.userRoles.enabled }}
 
 The user-facing ClusterRoles {{ include "chart.fullname" . }}-wavefront-{admin,editor,viewer}-role and

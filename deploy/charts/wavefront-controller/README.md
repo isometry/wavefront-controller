@@ -51,6 +51,14 @@ By default the CRD is annotated `helm.sh/resource-policy: keep`, so a
 `helm uninstall` leaves `wavefronts.wavefront.as-code.io` — and any `Wavefront`
 resources — in place. Set `crds.keep=false` to let Helm remove it.
 
+A kept CRD stays *owned* by the release that installed it. Reinstalling the
+chart under a different release name or namespace therefore fails with Helm's
+ownership-metadata error ("invalid ownership metadata"), because the surviving
+CRD still carries the old `meta.helm.sh/release-name` and
+`meta.helm.sh/release-namespace` annotations. Either update those two
+annotations on the CRD to match the new release, or manage the CRD out of band
+and install with `crds.install=false`.
+
 ## Configuration
 
 | Parameter | Description | Default |
@@ -70,12 +78,14 @@ resources — in place. Set `crds.keep=false` to let Helm remove it.
 | `rbac.userRoles.enabled` | Render the four user-facing ClusterRoles (see below) | `true` |
 | `metrics.enabled` | Serve and expose the `/metrics` endpoint | `true` |
 | `metrics.listen.port` | Metrics port (`--metrics-bind-address`) | `8443` |
-| `metrics.secure` | Serve metrics over HTTPS with bearer-token auth (`--metrics-secure`) | `true` |
+| `metrics.secure` | Serve metrics over HTTPS with bearer-token auth (`--metrics-secure`); also gates the metrics-auth `ClusterRole`/`ClusterRoleBinding` that filter needs | `true` |
 | `metrics.service.type` | Metrics Service type | `ClusterIP` |
 | `metrics.serviceMonitor.enabled` | Render a Prometheus `ServiceMonitor` (needs the Prometheus Operator CRDs) | `false` |
 | `metrics.networkPolicy.enabled` | Render a `NetworkPolicy` allowing metrics ingress from namespaces labelled `metrics: enabled` | `false` |
 | `manager.repository` | Image repository | `ghcr.io/isometry/wavefront-controller` |
 | `manager.tag` | Image tag (a `sha256:…` value is treated as a digest) | chart `appVersion`, then `latest` |
+| `manager.imagePullPolicy` | Container `imagePullPolicy`; rendered only when set | `~` |
+| `manager.imagePullSecrets` | Pod-level `imagePullSecrets` (e.g. `[{name: regcred}]`); rendered only when non-empty | `[]` |
 | `manager.replicas` | Replica count | `1` |
 | `manager.annotations` | Additional annotations on the Deployment | `{}` |
 | `manager.podAnnotations` | Additional annotations on the manager Pod template | `{}` |

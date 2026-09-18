@@ -54,7 +54,9 @@ rbac:
 ##   enabled: serve and expose the controller-runtime /metrics endpoint
 ##   listen.port: port for --metrics-bind-address=:<port>
 ##   secure: serve metrics over HTTPS with a bearer-token AuthN/AuthZ filter
-##           (--metrics-secure); false = plain HTTP
+##           (--metrics-secure); false = plain HTTP. Only when true does the
+##           chart render the metrics-auth ClusterRole/Binding
+##           (tokenreviews/subjectaccessreviews), which that filter needs.
 ##   service.type: ClusterIP | NodePort | LoadBalancer
 ##   serviceMonitor.enabled: render a monitoring.coreos.com/v1 ServiceMonitor
 ##           (requires the Prometheus Operator CRDs)
@@ -76,6 +78,10 @@ metrics:
 ##   repository: image repository
 ##   tag: image tag (a sha256:... value is treated as a digest); defaults to the
 ##        chart appVersion, then "latest"
+##   imagePullPolicy: container imagePullPolicy; rendered only when set, so the
+##        cluster default (IfNotPresent, or Always for a "latest" tag) applies
+##   imagePullSecrets: pod-level imagePullSecrets, e.g. [{name: regcred}];
+##        rendered only when non-empty
 ##   replicas: number of replicas
 ##   annotations: additional annotations for the Deployment
 ##   podAnnotations: additional annotations for the manager Pod template
@@ -87,6 +93,8 @@ metrics:
 manager:
   repository: ghcr.io/isometry/wavefront-controller
   tag: ~
+  imagePullPolicy: ~
+  imagePullSecrets: []
   replicas: 1
   annotations: {}
   podAnnotations: {}

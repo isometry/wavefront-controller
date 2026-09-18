@@ -59,6 +59,9 @@ spec:
             {{- else -}}
               {{- printf "%s:%s" (tpl $manager.repository .) (or $manager.tag $.Chart.AppVersion "latest") -}}
             {{- end }}
+          {{- with $manager.imagePullPolicy }}
+          imagePullPolicy: {{ . }}
+          {{- end }}
           livenessProbe:
             httpGet:
               path: /healthz
@@ -96,6 +99,10 @@ spec:
               type: RuntimeDefault
       {{- with $manager.affinity }}
       affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $manager.imagePullSecrets }}
+      imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       {{- with $manager.nodeSelector }}

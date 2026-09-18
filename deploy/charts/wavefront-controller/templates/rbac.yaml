@@ -94,7 +94,11 @@ subjects:
   - kind: ServiceAccount
     name: {{ include "chart.serviceAccountName" . }}
     namespace: {{ include "chart.namespace" . }}
-{{- if .Values.metrics.enabled }}
+{{- /*
+The TokenReview/SubjectAccessReview grant exists only for the manager's own
+bearer-token filter (--metrics-secure); plain-HTTP metrics never call them.
+*/}}
+{{- if and .Values.metrics.enabled .Values.metrics.secure }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
@@ -144,6 +148,8 @@ subjects:
   - kind: ServiceAccount
     name: {{ include "chart.serviceAccountName" . }}
     namespace: {{ include "chart.namespace" . }}
+{{- end }}
+{{- if .Values.metrics.enabled }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole

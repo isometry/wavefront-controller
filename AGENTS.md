@@ -309,16 +309,40 @@ make ko-build-local IMG=<registry>/wavefront-controller:tag  # single-arch, loca
 ### Release Flow
 
 Pushing a `vX.Y.Z` tag triggers `.github/workflows/publish.yaml`, which runs
-`goreleaser` (manager image via `ko`, `wfctl` archives, cosign signing) and
-`gobottle` (Homebrew bottles), then packages and pushes the Helm chart. See
-[`docs/verification.md`](docs/verification.md) for how released artifacts are
-signed and verified.
+three jobs:
+
+1. **`release`** — `goreleaser` (manager image via `ko`, `wfctl` archives,
+   cosign signing), image SBOM and attestations, then a versioned kustomize
+   bundle uploaded to the release as the `install.yaml` asset. It renders that
+   bundle from a copy of `config/` under `$RUNNER_TEMP` rather than via `make
+   build-installer`, which would dirty `config/manager/kustomization.yaml` in
+   the checkout. Finally it tars `build/` (preserving executable bits that
+   `upload-artifact` drops) and uploads it as the `goreleaser-build` artifact.
+2. **`homebrew`** (`needs: release`) — untars `goreleaser-build` back to
+   `build/` and runs `gobottle release --source local`. Skipped for prerelease
+   tags, so a release candidate never reaches the tap. This is the only job
+   the `HOMEBREW_TAP_GITHUB_TOKEN` PAT is exposed to, and only in that step.
+3. **`publish-chart`** (`needs: release`, *not* `homebrew`) — packages, pushes,
+   signs and attests the Helm chart.
+
+Prerelease tags (`vX.Y.Z-rc.N`) are marked prerelease on GitHub
+(`release.prerelease: auto`), publish the image, chart and archives, but build
+no bottles and never move the `latest` image tag.
+
+See [`docs/verification.md`](docs/verification.md) for how released artifacts
+are signed and verified.
 
 Re-running the workflow for a tag that already published is **not**
-idempotent for the `goreleaser` step: the GitHub Release and the `ko` image
-tag already exist, so it fails rather than overwriting them. `gobottle` and
-the chart push are safe to re-run on their own (delete and re-push the tag
-first if you need to redo the `goreleaser` step).
+idempotent for the `release` job: the GitHub Release and the `ko` image tag
+already exist, so `goreleaser` fails rather than overwriting them. Recovery
+from a partial publish is to re-run **just** the failed `homebrew` or
+`publish-chart` job from the Actions UI — both are safe to repeat, and
+`homebrew` re-downloads the `goreleaser-build` artifact rather than rebuilding.
+To redo the `release` job, delete the GitHub Release and re-push the tag.
+
+`deploy/charts/wavefront-controller/templates/user-roles.yaml` is a
+hand-maintained copy of `config/rbac/{wavefront_*,wfctl_viewer}_role.yaml` —
+`hack/sync-chart.sh` does not generate it, so change both together.
 
 ## References
 

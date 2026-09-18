@@ -96,6 +96,76 @@ jobs:
           sbom-path: sbom.spdx.json
           push-to-registry: true
 
+      # `make build-installer` would rewrite config/manager/kustomization.yaml
+      # in the checkout; the bundle is therefore rendered from a throwaway copy
+      # of config/ so the tree stays clean. goreleaser has already run, so
+      # build/ survives its --clean and the GitHub Release exists to upload to.
+      - name: Build and upload install.yaml
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          make kustomize
+          cp -r config "$RUNNER_TEMP/config"
+          (cd "$RUNNER_TEMP/config/manager" && "$GITHUB_WORKSPACE/bin/kustomize" edit set image "controller=${IMAGE}:${VERSION}")
+          bin/kustomize build "$RUNNER_TEMP/config/default" > build/install.yaml
+          gh release upload "$GITHUB_REF_NAME" build/install.yaml --clobber
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Attest Release Artifacts Provenance
+        if: ${{ hashFiles('build/*.tar.gz', 'build/*.zip') != '' }}
+        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
+        with:
+          subject-path: |
+            build/*.tar.gz
+            build/*.zip
+            build/*_SHA256SUMS
+            build/*/wfctl*
+            build/install.yaml
+
+      # upload-artifact drops the executable bit; the bottle job pours the very
+      # binaries goreleaser built, so hand them over inside a tarball instead.
+      - name: Archive goreleaser output
+        run: tar -czf "$RUNNER_TEMP/goreleaser-build.tgz" build
+
+      - name: Upload goreleaser output
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: goreleaser-build
+          path: ${{ runner.temp }}/goreleaser-build.tgz
+          retention-days: 7
+          if-no-files-found: error
+
+  homebrew:
+    name: Homebrew Bottles
+    runs-on: ubuntu-latest
+    needs: release
+    # Prerelease tags (vX.Y.Z-rc.N) publish everything else, but never reach
+    # the tap: `brew install` would otherwise hand users a release candidate.
+    if: ${{ !contains(github.ref_name, '-') }}
+    permissions:
+      contents: read
+      packages: write
+      id-token: write # keyless OIDC for cosign + attest-*
+      attestations: write # upload provenance attestations
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Download goreleaser output
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: goreleaser-build
+          path: ${{ runner.temp }}
+
+      # Restores build/ at the repo root, where .gobottle.yaml's
+      # source.dist_path expects it, executable bits intact.
+      - name: Restore goreleaser output
+        run: tar -xzf "$RUNNER_TEMP/goreleaser-build.tgz" -C "$GITHUB_WORKSPACE"
+
       - name: Set up gobottle
         uses: isometry/gobottle-setup@c7fe02d3fd382ccf59387747aaec4686c2281475 # v1.0.0
 
@@ -113,16 +183,11 @@ jobs:
           path: bottles/bottles.json
           if-no-files-found: ignore
 
-      - name: Attest Release Artifacts Provenance
-        if: ${{ !cancelled() && hashFiles('build/*.tar.gz', 'build/*.zip') != '' }}
+      - name: Attest Bottle Provenance
+        if: ${{ !cancelled() && hashFiles('bottles/*.tar.gz') != '' }}
         uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
         with:
-          subject-path: |
-            build/*.tar.gz
-            build/*.zip
-            build/*_SHA256SUMS
-            build/*/wfctl*
-            bottles/*.tar.gz
+          subject-path: bottles/*.tar.gz
 
   publish-chart:
     name: Publish Chart
@@ -142,6 +207,9 @@ jobs:
 
       - name: Install cosign
         uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
+      - name: Setup Helm
+        uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
 
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0

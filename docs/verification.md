@@ -1,20 +1,28 @@
 # Verifying release artifacts
 
-Every tagged release (`v*.*.*`) of `wavefront-controller` publishes four
-kinds of artifact, all **keyless-signed with Sigstore** (GitHub OIDC, no
-long-lived keys) and accompanied by **SLSA build provenance**; the manager
-image additionally carries an **SBOM attestation**:
+Every tagged release (`v*.*.*`) of `wavefront-controller` publishes the
+artifacts below. All of them carry **SLSA build provenance** as a GitHub
+attestation — except the per-archive SBOMs, which are informational (see
+below). The manager image, the Helm chart and the `wfctl` checksum manifest
+are additionally **keyless-signed with Sigstore** (GitHub OIDC, no long-lived
+keys), and the manager image also carries an **SBOM attestation**:
 
 | Artifact | Reference |
 |----------|-----------|
 | Manager image | `ghcr.io/isometry/wavefront-controller` |
 | Helm chart (OCI) | `oci://ghcr.io/isometry/charts/wavefront-controller` |
+| Kustomize install bundle | `install.yaml` GitHub Release asset (the release's versioned image baked in) |
 | `wfctl` GitHub Release archives | `wfctl_<version>_<os>_<arch>.{tar.gz,zip}`, `wfctl_<version>_SHA256SUMS`, `wfctl_<version>_SHA256SUMS.sigstore.json` |
 | `wfctl` per-archive SBOMs (SPDX, from syft) | `wfctl_<version>_<os>_<arch>.{tar.gz,zip}.sbom.json` — informational only, see below |
 | `wfctl` Homebrew bottles | `ghcr.io/isometry/tap/wfctl` (via `brew trust isometry/tap && brew install isometry/tap/wfctl`) |
 
 This lets you prove an artifact was built by this repository's release
 workflow — not substituted or tampered with — before you run or deploy it.
+
+Prerelease tags (`vX.Y.Z-rc.N`) publish the image, the chart and the `wfctl`
+archives exactly as above, but they build **no Homebrew bottles** and never
+move the `latest` image tag — so `brew install` and `:latest` always resolve
+to the newest stable release.
 
 Only *git* tags carry the `v` prefix. Published image and chart tags are the
 bare semver: the release tagged `v0.3.0` pushes
@@ -99,6 +107,16 @@ pipeline signs the chart with cosign (keyless, Sigstore) instead and
 publishes no `.prov`, so `helm pull --verify` **does not work** against this
 chart — use the `cosign`/`gh attestation` commands above.
 
+## Verify the install bundle
+
+`install.yaml` is a GitHub Release asset, not a registry artifact; it carries
+a GitHub build-provenance attestation and nothing else (no cosign signature,
+no SBOM). Download it, then:
+
+```sh
+gh attestation verify install.yaml --repo isometry/wavefront-controller
+```
+
 ## Verify `wfctl`
 
 ### GitHub Release archives
@@ -115,8 +133,12 @@ cosign verify-blob \
   --certificate-identity-regexp '^https://github\.com/isometry/wavefront-controller/\.github/workflows/publish\.yaml@refs/tags/v.+$' \
   wfctl_<version>_SHA256SUMS
 
-sha256sum -c wfctl_<version>_SHA256SUMS
+sha256sum -c --ignore-missing wfctl_<version>_SHA256SUMS
 ```
+
+(`--ignore-missing` because the manifest covers every platform's archive and
+you have downloaded one; without it `sha256sum` reports the absent files as
+failures.)
 
 Or, per-archive, with GitHub attestations:
 
@@ -135,9 +157,10 @@ archive it describes instead, with the commands above.
 
 ### Homebrew bottles
 
-`brew install isometry/tap/wfctl` pours a signed bottle from
-`ghcr.io/isometry/tap/wfctl`; verify the installed binary's build
-provenance directly:
+`brew install isometry/tap/wfctl` pours a bottle from
+`ghcr.io/isometry/tap/wfctl`. Bottles are **attested**, not cosign-signed:
+the binary inside carries a GitHub build-provenance attestation, which you
+can verify on the installed file directly:
 
 ```sh
 gh attestation verify "$(brew --prefix)/bin/wfctl" \
@@ -147,12 +170,11 @@ gh attestation verify "$(brew --prefix)/bin/wfctl" \
 ## Artifact layout & mirroring
 
 The manager image is built with `ko`, not BuildKit, so its supply-chain
-artifacts are stored two different ways — the difference matters when you
+artifacts are not all stored the same way — the difference matters when you
 mirror:
 
-- **As cosign-style digest tags** (`sha256-<digest>.sbom`,
-  `sha256-<digest>.sig`): `ko`'s SPDX SBOM and the cosign signature are each
-  pushed as their own manifest, tagged off the subject's digest — the
+- **As a cosign-style digest tag** (`sha256-<digest>.sbom`): `ko` pushes its
+  SPDX SBOM as its own manifest, tagged off the subject's digest — the
   convention cosign and ko share, predating OCI 1.1 referrers. These are
   ordinary tags, so any copy tool that copies *all* tags (not just the one
   you asked for) preserves them; a copy that only follows the one tag or
@@ -165,6 +187,12 @@ mirror:
   --all` or a tag-only copy does **not** carry them (skopeo has no
   referrers support: [containers/skopeo#2061]), and a referrers-aware
   consumer looking for them against such a mirror finds nothing.
+- **The cosign signature: either, depending on cosign's version** — the
+  classic layout attaches it as a `sha256-<digest>.sig` tag, while cosign's
+  newer bundle format attaches it as an OCI referrer instead. Don't assume
+  which one a given release has; copy both layouts and you are correct either
+  way, which is exactly what `regctl image copy --referrers --digest-tags`
+  (below) does.
 
 To mirror with the SBOM, signature and signed attestations intact, use a
 copy tool that handles both digest tags and referrers:
@@ -172,7 +200,8 @@ copy tool that handles both digest tags and referrers:
 ```sh
 regctl image copy --referrers --digest-tags ghcr.io/isometry/wavefront-controller:<tag> <mirror>/wavefront-controller:<tag>
 # or: oras cp -r … / cosign copy … (cosign copy carries the digest-tagged
-# SBOM/signature; pair it with a referrers-aware tool for the attestations)
+# SBOM and signature; pair it with a referrers-aware tool for the
+# attestations — and for a bundle-format signature)
 # or repo-level: skopeo sync (copies the sha256-<digest> tags as ordinary
 # tags; the destination's referrers API re-indexes any copied referrers)
 ```
