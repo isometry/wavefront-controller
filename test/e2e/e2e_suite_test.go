@@ -49,6 +49,11 @@ var (
 	// shouldCleanupCertManager tracks whether CertManager was installed by this suite.
 	shouldCleanupCertManager = false
 
+	// inst is the installation path under test — kustomize overlays or the
+	// Helm chart, per E2E_INSTALL. It also supplies the resource names the
+	// specs assert on, which differ between the two.
+	inst installer
+
 	// k8sClient reads (and occasionally patches) the fixture fleet. kubectl
 	// jsonpath would do, but typed reads of Kustomization, GitRepository and
 	// Wavefront keep the scenario assertions about admission rather than about
@@ -80,6 +85,9 @@ var _ = BeforeSuite(func() {
 		managerImage = img
 	}
 
+	By("selecting the installation path from E2E_INSTALL")
+	inst = newInstaller()
+
 	configureKubectlKubeRC()
 
 	By("refusing any target other than the e2e kind cluster")
@@ -93,25 +101,8 @@ var _ = BeforeSuite(func() {
 	By("building a typed client for the test cluster")
 	buildK8sClient()
 
-	By("installing CRDs")
-	cmd := exec.Command("make", "install")
-	_, err := utils.Run(cmd)
-	Expect(err).NotTo(HaveOccurred(), "Failed to install CRDs")
-
-	By("creating manager namespace")
-	cmd = exec.Command("kubectl", "create", "ns", namespace)
-	_, _ = utils.Run(cmd)
-
-	By("labeling the namespace to enforce the restricted security policy")
-	cmd = exec.Command("kubectl", "label", "--overwrite", "ns", namespace,
-		"pod-security.kubernetes.io/enforce=restricted")
-	_, err = utils.Run(cmd)
-	Expect(err).NotTo(HaveOccurred(), "Failed to label namespace with restricted policy")
-
-	By("deploying the controller-manager")
-	cmd = exec.Command("make", "deploy", fmt.Sprintf("IMG=%s", managerImage))
-	_, err = utils.Run(cmd)
-	Expect(err).NotTo(HaveOccurred(), "Failed to deploy the controller-manager")
+	By("installing the controller-manager")
+	inst.Install(managerImage)
 
 	By("forwarding the in-cluster git server to the host")
 	gitForward = utils.StartPortForward(utils.GitServerNamespace, utils.GitServerService,
@@ -124,17 +115,11 @@ var _ = AfterSuite(func() {
 		gitForward.Stop()
 	}
 
-	By("undeploying the controller-manager")
-	cmd := exec.Command("make", "undeploy")
-	_, _ = utils.Run(cmd)
-
-	By("uninstalling CRDs")
-	cmd = exec.Command("make", "uninstall")
-	_, _ = utils.Run(cmd)
-
-	By("removing manager namespace")
-	cmd = exec.Command("kubectl", "delete", "ns", namespace, "--ignore-not-found")
-	_, _ = utils.Run(cmd)
+	// BeforeSuite can fail before it ever picks an installer (an unusable
+	// kubeconfig, say), and AfterSuite still runs.
+	if inst != nil {
+		inst.Uninstall()
+	}
 
 	teardownCertManager()
 })

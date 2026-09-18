@@ -98,6 +98,10 @@ KIND_CLUSTER ?= wavefront-controller-test-e2e
 E2E_IMG ?= example.com/wavefront-controller:v0.0.1
 GITSERVER_IMG ?= example.com/wavefront-gitserver:v0.0.1
 E2E_TIMEOUT ?= 90m
+# E2E_INSTALL selects how the suite installs the controller: `kustomize` (the
+# config/ overlays, i.e. `make deploy`) or `helm` (the chart under
+# $(CHART_DIR)). Both install paths are expected to pass the same specs.
+E2E_INSTALL ?= kustomize
 
 # Every e2e step addresses the kind cluster through this file and nothing else,
 # so a context switch in ~/.kube/config — or another kind cluster being created
@@ -126,6 +130,19 @@ setup-test-e2e: ## Set up a Kind cluster for e2e tests if it does not exist
 		*) \
 			echo "Creating Kind cluster '$(KIND_CLUSTER)'..."; \
 			$(E2E_ENV) $(KIND) create cluster --name $(KIND_CLUSTER) ;; \
+	esac
+
+# Checked before the cluster is built, so a typo in E2E_INSTALL — or a missing
+# helm — costs a second rather than the whole setup.
+.PHONY: e2e-install-guard
+e2e-install-guard: ## Validate E2E_INSTALL and the tooling the chosen installer needs.
+	@case "$(E2E_INSTALL)" in \
+		kustomize) ;; \
+		helm) command -v $(HELM) >/dev/null 2>&1 || { \
+			echo "E2E_INSTALL=helm needs '$(HELM)' on PATH; install Helm or set HELM=<path>"; \
+			exit 1; \
+		} ;; \
+		*) echo "E2E_INSTALL must be 'kustomize' or 'helm' (got '$(E2E_INSTALL)')"; exit 1 ;; \
 	esac
 
 .PHONY: e2e-guard
@@ -167,9 +184,10 @@ e2e-gitserver: e2e-guard ## Deploy the e2e git server on an empty repository sto
 	$(E2E_ENV) $(KUBECTL) -n wavefront-e2e rollout status deployment/gitserver --timeout=3m
 
 .PHONY: test-e2e
-test-e2e: setup-test-e2e e2e-guard manifests generate fmt vet kustomize build-wfctl e2e-images e2e-flux e2e-gitserver ## Run the e2e tests. Expected an isolated environment using Kind.
+test-e2e: e2e-install-guard setup-test-e2e e2e-guard manifests generate fmt vet kustomize build-wfctl e2e-images e2e-flux e2e-gitserver ## Run the e2e tests. Expected an isolated environment using Kind.
 	@status=0; \
 	CERT_MANAGER_INSTALL_SKIP=true $(E2E_ENV) KIND=$(KIND) KIND_CLUSTER=$(KIND_CLUSTER) E2E_IMG=$(E2E_IMG) \
+	  E2E_INSTALL=$(E2E_INSTALL) HELM=$(HELM) \
 	  go test -tags=e2e ./test/e2e/ -v -ginkgo.v -timeout $(E2E_TIMEOUT) || status=$$?; \
 	( cd config/manager && "$(KUSTOMIZE)" edit set image controller=controller:latest ); \
 	exit $$status
