@@ -41,8 +41,9 @@ const EventNamespace = "default"
 // regardingKindWavefront is the only regarding.kind `history` selects on. The
 // controller also records PinAdvanced/InitialPin on the GitRepository
 // (wavefront_controller.go's pinEvent), but it mirrors the same event onto
-// the Wavefront in the same call, so one selector on the Wavefront already
-// sees both streams (plan B3, `history`).
+// the Wavefront in the same call — the two copies are mirror images, each
+// naming the other as its related object — so one selector on the Wavefront
+// already sees both streams (plan B3, `history`).
 const regardingKindWavefront = "Wavefront"
 
 // EventFilter narrows ListEvents (plan B3, `history`).
@@ -68,7 +69,12 @@ type EventFilter struct {
 // wfctl's own audit trail (actions.Audit) both record regarding the
 // Wavefront in EventNamespace, distinguished only by ReportingController
 // ("wavefront-controller" vs "wfctl"), so one selector sees the merged
-// stream `history` promises.
+// stream `history` promises. A per-source event also names that source's
+// GitRepository as its related object (wavefront_controller.go's event
+// helper) — required for the events.k8s.io/v1 recorder's own dedup key to
+// distinguish one source's event from another's in the same pass — but
+// `related` cannot be used in a field selector, so this filter still keys
+// on regarding alone; the note carries the source for filterBySource below.
 func ListEvents(ctx context.Context, reader client.Reader, wavefront string, filter EventFilter) ([]eventsv1.Event, error) {
 	selector := client.MatchingFields{
 		"regarding.kind": regardingKindWavefront,
