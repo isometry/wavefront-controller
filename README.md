@@ -212,15 +212,22 @@ do not rewrite status on every pass — budget for that when judging staleness.
 The controller emits `events.k8s.io/v1` events (not the legacy `core/v1`
 API), attached to the `Wavefront` object:
 
-| Reason | Type | When |
-|---|---|---|
-| `InitialPin` | Normal | First pin of a newly discovered/matched source |
-| `PinAdvanced` | Normal | A subsequent pin advance |
-| `ShadowAdmission` | Normal | Would-be admission while `mode: Shadow` (no write performed) |
-| `HoldDetected` | Warning | `spec.ref.commit` is owned by a field manager other than the controller |
-| `HoldReleased` | Normal | A previously-held source's foreign ownership was removed; controller resumes |
-| `PinFailed` | Warning | A pin write attempt failed (e.g. apply/conflict error) |
-| `UnsupportedRefStyle` | Warning | A source's `spec.ref` uses a selection style v1 can't sequence (e.g. `spec.ref.semver`); the source is demoted to a gate node |
+| Reason | Type | Action | When |
+|---|---|---|---|
+| `InitialPin` | Normal | `Pin` | First pin of a newly discovered/matched source |
+| `PinAdvanced` | Normal | `Pin` | A subsequent pin advance |
+| `ShadowAdmission` | Normal | `ShadowPin` | Would-be admission while `mode: Shadow` (no write performed) |
+| `HoldDetected` | Warning | `Hold` | `spec.ref.commit` is owned by a field manager other than the controller |
+| `HoldReleased` | Normal | `Release` | A previously-held source's foreign ownership was removed; controller resumes |
+| `PinFailed` | Warning | `Pin` | A pin write attempt failed (e.g. apply/conflict error) |
+| `UnsupportedRefStyle` | Warning | `Demote` | A source's `spec.ref` uses a selection style v1 can't sequence (e.g. `spec.ref.semver`); the source is demoted to a gate node |
+
+Every per-source event also names that source's `GitRepository` as its
+`related` object (and, on the `GitRepository`-regarding copy of a pin event,
+the `Wavefront` as `related`) — required for the events.k8s.io/v1 recorder's
+own dedup key (`{type, action, reason, reportingController,
+reportingInstance, regarding, related}`, note excluded) to keep one source's
+event distinct from another's when several admit in the same pass.
 
 ### Metrics
 

@@ -38,6 +38,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -66,6 +67,26 @@ const (
 	reasonHoldReleased        = "HoldReleased"
 	reasonPinFailed           = "PinFailed"
 	reasonUnsupportedRefStyle = "UnsupportedRefStyle"
+)
+
+// Event actions: the machine-readable verb for what the controller did or
+// tried to do (events.k8s.io/v1's Action), distinct from reason's
+// human-readable outcome:
+//
+//	reason                          | type    | action
+//	--------------------------------+---------+----------
+//	InitialPin, PinAdvanced         | Normal  | Pin
+//	PinFailed                       | Warning | Pin
+//	ShadowAdmission                 | Normal  | ShadowPin
+//	HoldDetected                    | Warning | Hold
+//	HoldReleased                    | Normal  | Release
+//	UnsupportedRefStyle             | Warning | Demote
+const (
+	actionPin       = "Pin"
+	actionShadowPin = "ShadowPin"
+	actionHold      = "Hold"
+	actionRelease   = "Release"
+	actionDemote    = "Demote"
 )
 
 // wavefront_admissions_total result labels (DESIGN §6).
@@ -143,16 +164,38 @@ func (p *pass) resolved() bool {
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
 // +kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=create;patch;update
 
-// event records one Kubernetes event against obj.
+// event records one Kubernetes event: regarding is the object the
+// controller's action was taken against, related is the secondary object the
+// action concerns (e.g. the GitRepository a Wavefront-regarding event is
+// about), eventtype is Normal/Warning, reason is the short UpperCamelCase
+// outcome (DESIGN §4.2), and action is the short UpperCamelCase verb for
+// what was done or attempted (the action* consts above).
 //
-// events.EventRecorder.Eventf takes a "related" secondary object (none of
-// this controller's events have one) and distinguishes a machine-readable
-// "action" from the human-readable "reason". This controller has never
-// modelled the two separately — every reason (DESIGN §4.2) is already a
-// short, unique, UpperCamelCase identifier — so action mirrors reason here
-// rather than inventing a second taxonomy with nothing to distinguish.
-func (r *WavefrontReconciler) event(obj runtime.Object, eventtype, reason, messageFmt string, args ...any) {
-	r.Recorder.Eventf(obj, nil, eventtype, reason, reason, messageFmt, args...)
+// The events.k8s.io/v1 recorder decides whether two events are "the same"
+// occurrence — and so collapses repeats into one Event's Series, discarding
+// every repeat's own note — using a key of {type, action, reason,
+// reportingController, reportingInstance, regarding, related}. The note is
+// NOT part of that key. So any event about a specific source MUST name that
+// source as related, or events for different sources with the same
+// type/action/reason/regarding collapse onto a single Event and only the
+// first source's message survives.
+func (r *WavefrontReconciler) event(regarding, related runtime.Object, eventtype, reason, action, messageFmt string, args ...any) {
+	r.Recorder.Eventf(regarding, related, eventtype, reason, action, messageFmt, args...)
+}
+
+// sourceObject returns the object to name as the related GitRepository for
+// an event about src: the real object (with its live UID/resourceVersion)
+// when this pass resolved it, falling back to a stub carrying just the
+// namespaced name — e.g. a hold released on a source that has since been
+// deleted. The stub's GVK is resolved through the scheme by
+// reference.GetReference inside Eventf, so no explicit TypeMeta is needed.
+func sourceObject(p *pass, src types.NamespacedName) runtime.Object {
+	if p != nil && p.res != nil {
+		if repo, ok := p.res.Repos[src]; ok {
+			return repo
+		}
+	}
+	return &sourcev1.GitRepository{Namespace: src.Namespace, Name: src.Name}
 }
 
 // Reconcile runs one full evaluation of the fleet and executes the admissions
@@ -217,7 +260,7 @@ func (r *WavefrontReconciler) evaluate(ctx context.Context, p *pass) error {
 	// pure derivation cannot emit events, and an aborted pass has still
 	// proven this much about whatever it did resolve.
 	for _, src := range res.UnsupportedSources {
-		r.event(p.wf, corev1.EventTypeWarning, reasonUnsupportedRefStyle,
+		r.event(p.wf, sourceObject(p, src), corev1.EventTypeWarning, reasonUnsupportedRefStyle, actionDemote,
 			"%s tracks a ref style this version cannot sequence; every referencing node demoted to a gate", src)
 	}
 
@@ -402,7 +445,7 @@ func (r *WavefrontReconciler) shadowAdmissions(p *pass, admissions []engine.Admi
 	diffLedger(previousMap, currentMap,
 		func(src string, to string) {
 			admission := bySource[src]
-			r.event(p.wf, corev1.EventTypeNormal, reasonShadowAdmission,
+			r.event(p.wf, sourceObject(p, admission.Source), corev1.EventTypeNormal, reasonShadowAdmission, actionShadowPin,
 				"would pin %s to %s (from %s, ref %s)",
 				admission.Source, to, previousPin(admission), admission.ObservedRef)
 			r.Metrics.Wavefront(p.wf.Name).CountAdmission(resultShadow)
@@ -436,7 +479,7 @@ func (r *WavefrontReconciler) advance(ctx context.Context, p *pass, admission en
 		r.Metrics.Wavefront(p.wf.Name).CountAdmission(resultConflict)
 		return nil
 	default:
-		r.event(p.wf, corev1.EventTypeWarning, reasonPinFailed,
+		r.event(p.wf, sourceObject(p, admission.Source), corev1.EventTypeWarning, reasonPinFailed, actionPin,
 			"failed to pin %s to %s: %s", admission.Source, admission.To, err)
 		return err
 	}
@@ -458,6 +501,13 @@ func (r *WavefrontReconciler) holderOf(ctx context.Context, src types.Namespaced
 // provenance lives) and mirrors it on the Wavefront (DESIGN §4.2), and
 // updates the admissions counter and the observed→admitted wait histogram
 // (DESIGN §6, D13).
+//
+// The two copies are mirror images: the GitRepository-regarding copy names
+// the Wavefront as related (so `kubectl describe gitrepository` and Flux
+// tooling show the pin), and the Wavefront-regarding copy names the
+// GitRepository as related — which is what keeps this pass's per-source
+// events from collapsing onto one Event when several sources pin in the
+// same pass (see event's doc comment).
 func (r *WavefrontReconciler) pinEvent(p *pass, admission engine.Admission) {
 	result, reason, message := resultAdmitted, reasonPinAdvanced,
 		fmt.Sprintf("advanced pin of %s to %s (from %s, ref %s)",
@@ -468,9 +518,9 @@ func (r *WavefrontReconciler) pinEvent(p *pass, admission engine.Admission) {
 	}
 
 	if repo, ok := p.res.Repos[admission.Source]; ok {
-		r.event(repo, corev1.EventTypeNormal, reason, "%s", message)
+		r.event(repo, p.wf, corev1.EventTypeNormal, reason, actionPin, "%s", message)
 	}
-	r.event(p.wf, corev1.EventTypeNormal, reason, "%s", message)
+	r.event(p.wf, sourceObject(p, admission.Source), corev1.EventTypeNormal, reason, actionPin, "%s", message)
 
 	r.Metrics.Wavefront(p.wf.Name).CountAdmission(result)
 	if since := admission.PendingSince; !since.IsZero() {
@@ -536,25 +586,43 @@ func (r *WavefrontReconciler) holdEvents(p *pass) {
 	// release of the old hold and a detect of the new one in the same pass.
 	diffLedger(previous, current,
 		func(src string, h inputs.Hold) {
+			related := sourceObject(p, holdSource(src))
 			switch h.Kind {
 			case inputs.HoldSuspend:
-				r.event(p.wf, corev1.EventTypeWarning, reasonHoldDetected,
+				r.event(p.wf, related, corev1.EventTypeWarning, reasonHoldDetected, actionHold,
 					"source %s is suspended; not advancing", src)
 			default:
-				r.event(p.wf, corev1.EventTypeWarning, reasonHoldDetected,
+				r.event(p.wf, related, corev1.EventTypeWarning, reasonHoldDetected, actionHold,
 					"pin of %s is held by field manager %q; not advancing", src, h.Manager)
 			}
 		},
 		func(src string, h inputs.Hold) {
+			related := sourceObject(p, holdSource(src))
 			switch h.Kind {
 			case inputs.HoldSuspend:
-				r.event(p.wf, corev1.EventTypeNormal, reasonHoldReleased,
+				r.event(p.wf, related, corev1.EventTypeNormal, reasonHoldReleased, actionRelease,
 					"suspension of %s lifted", src)
 			default:
-				r.event(p.wf, corev1.EventTypeNormal, reasonHoldReleased,
+				r.event(p.wf, related, corev1.EventTypeNormal, reasonHoldReleased, actionRelease,
 					"hold on %s released by %q", src, h.Manager)
 			}
 		})
+}
+
+// holdSource parses a hold ledger key ("namespace/name", as diffLedger's
+// string keys carry it) into a NamespacedName for sourceObject. The ledger
+// keys are always written by inputs.HeldSources from a real
+// types.NamespacedName.String(), so a split failure here would mean a
+// malformed key slipped into status.held; rather than let that panic or
+// abort event emission, the raw string is used as Name with an empty
+// Namespace, so the event still fires (just without a fully-qualified
+// related object).
+func holdSource(key string) types.NamespacedName {
+	ns, name, err := cache.SplitMetaNamespaceKey(key)
+	if err != nil {
+		return types.NamespacedName{Name: key}
+	}
+	return types.NamespacedName{Namespace: ns, Name: name}
 }
 
 // summarise implements step 9: fleet counts, capped exceptional-state lists,

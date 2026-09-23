@@ -335,15 +335,24 @@ retains.
 
 Reasons emitted, all attached to the `Wavefront` object:
 
-| Reason | Type | When |
-|---|---|---|
-| `InitialPin` | Normal | First pin of a newly discovered/matched source |
-| `PinAdvanced` | Normal | A subsequent pin advance |
-| `ShadowAdmission` | Normal | Would-be admission while `mode: Shadow` (no write performed) |
-| `HoldDetected` | Warning | `spec.ref.commit` is owned by a field manager other than the controller |
-| `HoldReleased` | Normal | A previously-held source's foreign ownership was removed; controller resumes |
-| `PinFailed` | Warning | A pin write attempt failed (e.g. apply/conflict error) |
-| `UnsupportedRefStyle` | Warning | A source's `spec.ref` uses a selection style v1's strategy can't sequence (e.g. `spec.ref.semver`) — the source is demoted to a gate node (no pinning attempted). This is a distinct code path from an auth failure; see [Known limitations](#known-limitations-unsupported-git-auth) for the auth case, which fires no event and is *not* gate-treated |
+| Reason | Type | Action | When |
+|---|---|---|---|
+| `InitialPin` | Normal | `Pin` | First pin of a newly discovered/matched source |
+| `PinAdvanced` | Normal | `Pin` | A subsequent pin advance |
+| `ShadowAdmission` | Normal | `ShadowPin` | Would-be admission while `mode: Shadow` (no write performed) |
+| `HoldDetected` | Warning | `Hold` | `spec.ref.commit` is owned by a field manager other than the controller |
+| `HoldReleased` | Normal | `Release` | A previously-held source's foreign ownership was removed; controller resumes |
+| `PinFailed` | Warning | `Pin` | A pin write attempt failed (e.g. apply/conflict error) |
+| `UnsupportedRefStyle` | Warning | `Demote` | A source's `spec.ref` uses a selection style v1's strategy can't sequence (e.g. `spec.ref.semver`) — the source is demoted to a gate node (no pinning attempted). This is a distinct code path from an auth failure; see [Known limitations](#known-limitations-unsupported-git-auth) for the auth case, which fires no event and is *not* gate-treated |
+
+Every per-source event above also names that source's `GitRepository` as its
+`related` object (and, on the `GitRepository`-regarding copy of a pin event,
+the `Wavefront` as `related`). This is why several sources admitting,
+holding, or releasing in the same pass show up as distinct events rather
+than one collapsed `Series`: the events.k8s.io/v1 recorder's dedup key
+(`{type, action, reason, reportingController, reportingInstance, regarding,
+related}`) excludes the note, so without a distinguishing `related` object
+same-reason events regarding the same object collapse into one.
 
 `wfctl`'s write commands record their own best-effort audit events on the same
 object, distinguished by `reportingController: wfctl`, with a note naming the

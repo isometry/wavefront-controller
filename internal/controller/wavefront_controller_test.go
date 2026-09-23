@@ -271,6 +271,25 @@ func recordedEvents(reason, regardingName string) (messages []string, occurrence
 	return messages, occurrences
 }
 
+// rawEvents returns every events.k8s.io/v1 Event with the given reason,
+// regarding the named object of the given kind, unaggregated — for asserting
+// per-Event fields (Action, Related) that recordedEvents' summary throws
+// away by collapsing across the whole reason+regardingName set.
+func rawEvents(reason, regardingKind, regardingName string) []eventsv1.Event {
+	GinkgoHelper()
+	var list eventsv1.EventList
+	Expect(k8sClient.List(ctx, &list)).To(Succeed())
+	var out []eventsv1.Event
+	for i := range list.Items {
+		e := &list.Items[i]
+		if e.Reason != reason || e.Regarding.Kind != regardingKind || e.Regarding.Name != regardingName {
+			continue
+		}
+		out = append(out, *e)
+	}
+	return out
+}
+
 var _ = Describe("Wavefront reconciler", func() {
 	Describe("initial pin on discovery", func() {
 		It("pins a freshly discovered managed source to its artifact commit", func() {
@@ -320,6 +339,132 @@ var _ = Describe("Wavefront reconciler", func() {
 				HaveField("Pinned", 1),
 				HaveField("Gates", 0),
 			))
+		})
+	})
+
+	Describe("initial pin fan-out", func() {
+		It("records one InitialPin event per source when several pin in the same pass", func() {
+			const ns, scenario = "initial-pin-fanout", "initial-pin-fanout"
+			makeNamespace(ns)
+
+			sources := []string{"fanout-a", "fanout-b", "fanout-c"}
+			for _, name := range sources {
+				url := repoURLFor(ns, name)
+				lister.advertise(url, mainRef, shaA)
+				repo := makeGitRepo(ns, name, url, mainRef, true)
+				setArtifact(repo, revisionOf(shaA))
+				makeKustomization(ns, name,
+					types.NamespacedName{Namespace: ns, Name: name}, nil,
+					map[string]string{scenarioLabel: scenario})
+			}
+
+			makeWavefront("wf-initial-fanout", scenario, wavefrontv1alpha1.ModeEnforce)
+
+			By("pinning every source")
+			for _, name := range sources {
+				Eventually(func() string { return pinOf(ns, name) }).Should(Equal(shaA))
+			}
+
+			By("recording one InitialPin event per source on the Wavefront, each naming its source as related")
+			var wfEvents []eventsv1.Event
+			Eventually(func() []eventsv1.Event {
+				wfEvents = rawEvents("InitialPin", "Wavefront", "wf-initial-fanout")
+				return wfEvents
+			}).Should(HaveLen(len(sources)), "one InitialPin per source, not one collapsed across all of them")
+
+			seen := map[string]bool{}
+			for _, e := range wfEvents {
+				Expect(e.Action).To(Equal("Pin"))
+				Expect(e.Related).NotTo(BeNil())
+				Expect(e.Related.Kind).To(Equal("GitRepository"))
+				Expect(sources).To(ContainElement(e.Related.Name))
+				seen[e.Related.Name] = true
+			}
+			Expect(seen).To(HaveLen(len(sources)), "every source must be named exactly once, not one source's message overwriting another's")
+
+			By("mirroring the pin on each GitRepository, related back to the Wavefront")
+			for _, name := range sources {
+				var repoEvents []eventsv1.Event
+				Eventually(func() []eventsv1.Event {
+					repoEvents = rawEvents("InitialPin", "GitRepository", name)
+					return repoEvents
+				}).Should(HaveLen(1))
+				Expect(repoEvents[0].Action).To(Equal("Pin"))
+				Expect(repoEvents[0].Related).NotTo(BeNil())
+				Expect(repoEvents[0].Related.Kind).To(Equal("Wavefront"))
+				Expect(repoEvents[0].Related.Name).To(Equal("wf-initial-fanout"))
+			}
+		})
+	})
+
+	Describe("Shadow to Enforce fan-out", func() {
+		It("keeps per-source events distinct across a Shadow -> Enforce transition", func() {
+			// Reproduces the reported bug directly: a Wavefront with several
+			// managed sources flipped from Shadow to Enforce fired one
+			// ShadowAdmission (and later one InitialPin) log line per source,
+			// but only a single Event landed on the Wavefront — because
+			// every per-source event shared the same regarding object and
+			// reason with related left nil, so the events.k8s.io/v1
+			// recorder's dedup key collapsed them onto one Event and
+			// discarded every source's message but the first's.
+			const ns, scenario = "shadow-enforce-fanout", "shadow-enforce-fanout"
+			makeNamespace(ns)
+
+			sources := []string{"se-a", "se-b"}
+			for _, name := range sources {
+				url := repoURLFor(ns, name)
+				lister.advertise(url, mainRef, shaA)
+				repo := makeGitRepo(ns, name, url, mainRef, true)
+				setArtifact(repo, revisionOf(shaA))
+				makeKustomization(ns, name,
+					types.NamespacedName{Namespace: ns, Name: name}, nil,
+					map[string]string{scenarioLabel: scenario})
+			}
+
+			makeWavefront("wf-shadow-enforce-fanout", scenario, wavefrontv1alpha1.ModeShadow)
+
+			By("recording one ShadowAdmission event per source")
+			var shadowEvents []eventsv1.Event
+			Eventually(func() []eventsv1.Event {
+				shadowEvents = rawEvents("ShadowAdmission", "Wavefront", "wf-shadow-enforce-fanout")
+				return shadowEvents
+			}).Should(HaveLen(len(sources)))
+
+			seenShadow := map[string]bool{}
+			for _, e := range shadowEvents {
+				Expect(e.Action).To(Equal("ShadowPin"))
+				Expect(e.Related).NotTo(BeNil())
+				Expect(e.Related.Kind).To(Equal("GitRepository"))
+				seenShadow[e.Related.Name] = true
+			}
+			Expect(seenShadow).To(HaveLen(len(sources)))
+
+			By("flipping to Enforce")
+			Eventually(func() error {
+				wf := getWavefront("wf-shadow-enforce-fanout")
+				wf.Spec.Mode = wavefrontv1alpha1.ModeEnforce
+				return k8sClient.Update(ctx, wf)
+			}).Should(Succeed())
+
+			By("recording one InitialPin event per source")
+			var pinEvents []eventsv1.Event
+			Eventually(func() []eventsv1.Event {
+				pinEvents = rawEvents("InitialPin", "Wavefront", "wf-shadow-enforce-fanout")
+				return pinEvents
+			}).Should(HaveLen(len(sources)), "one InitialPin per source across the Shadow -> Enforce transition, not one collapsed across all of them")
+
+			seenPin := map[string]bool{}
+			for _, e := range pinEvents {
+				Expect(e.Action).To(Equal("Pin"))
+				Expect(e.Related).NotTo(BeNil())
+				Expect(e.Related.Kind).To(Equal("GitRepository"))
+				seenPin[e.Related.Name] = true
+			}
+			Expect(seenPin).To(HaveLen(len(sources)))
+
+			for _, name := range sources {
+				Eventually(func() string { return pinOf(ns, name) }).Should(Equal(shaA))
+			}
 		})
 	})
 
