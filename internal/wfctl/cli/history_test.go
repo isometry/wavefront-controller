@@ -133,8 +133,7 @@ func runHistory(t *testing.T, c client.Reader, args ...string) (string, error) {
 }
 
 // TestHistoryCommandIsRegistered proves history is wired without touching
-// the persistent-flag plumbing (plan B3): the flags it declares belong to it
-// alone.
+// the persistent-flag plumbing: the flags it declares belong to it alone.
 func TestHistoryCommandIsRegistered(t *testing.T) {
 	root := NewRootCommand(binaryName)
 	cmd, _, err := root.Find([]string{cmdHistory})
@@ -150,7 +149,7 @@ func TestHistoryCommandIsRegistered(t *testing.T) {
 
 // TestHistoryListsBothStreams proves the controller's own reason and
 // wfctl's own audit reason both come back from one selector, because both
-// are recorded regarding the Wavefront (plan B3).
+// are recorded regarding the Wavefront.
 func TestHistoryListsBothStreams(t *testing.T) {
 	now := time.Now()
 	c := historyCluster(

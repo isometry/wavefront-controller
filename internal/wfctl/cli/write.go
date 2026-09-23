@@ -157,10 +157,10 @@ func newPinCommand(o *Options) *cobra.Command {
 		Short: "Hand-pin one source, holding it against the controller",
 		Long: `Hand-pin one source: set spec.ref.commit under the wfctl field manager.
 
-The controller reads that field manager as an external hold (DESIGN §3.5.3):
-it stops advancing the source, reports HoldDetected with manager "wfctl", and
-reports every node behind it as blocked by an unsettled ancestor. Hand back
-control with "wfctl release".
+The controller reads that field manager as an external hold: it stops
+advancing the source, reports HoldDetected with manager "wfctl", and reports
+every node behind it as blocked by an unsettled ancestor. Hand back control
+with "wfctl release".
 
 The SHA has to be checked or explicitly not: --poll lists the remote's
 advertised refs and verifies it, --unverified pins it unchecked.`,
@@ -210,7 +210,7 @@ displaced-pin annotation, then the holder's claim is relinquished. The fleet
 carries on running exactly the commit the hold pinned.
 
 --float removes spec.ref.commit instead, so the source floats on its tracking
-ref until the controller initial-pins it from its artifact (DESIGN §3.5.4).`,
+ref until the controller initial-pins it from its artifact.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return o.runWrite(cmd, actions.ReasonPinReleased, false,

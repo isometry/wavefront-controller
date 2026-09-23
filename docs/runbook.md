@@ -1,8 +1,9 @@
 # Wavefront Controller — Operations Runbook
 
 This runbook covers the day-to-day and incident-response procedures for
-operating the Wavefront Controller. It assumes familiarity with `DESIGN.md`;
-section references below (`§x.y`) point back into that document.
+operating the Wavefront Controller. It assumes familiarity with `DESIGN.md`,
+which the links below point back into where more design rationale is
+useful.
 
 Every procedure is given as a raw `kubectl` one-liner *and*, where one exists,
 as its `wfctl` equivalent (`make install-wfctl`; also reachable as `kubectl
@@ -14,14 +15,14 @@ tiers.
 - [Modes and brakes](#modes-and-brakes)
 - [Checking fleet status](#checking-fleet-status)
 - [Status staleness](#status-staleness)
-- [The release set (§4.2)](#the-release-set-42)
+- [The release set](#the-release-set)
 - [Hand-pin etiquette](#hand-pin-etiquette)
-- [Break-glass: pin-strip (§8.5)](#break-glass-pin-strip-85)
+- [Break-glass: pin-strip](#break-glass-pin-strip)
 - [Shadow → Enforce flip procedure](#shadow--enforce-flip-procedure)
 - [Deleting a `Wavefront`](#deleting-a-wavefront)
 - [Poll tuning](#poll-tuning)
 - [Events](#events)
-- [Safety alarms (§6)](#safety-alarms-6)
+- [Safety alarms](#safety-alarms)
 - [Known limitations: unsupported git auth](#known-limitations-unsupported-git-auth)
 
 ## Modes and brakes
@@ -49,7 +50,8 @@ kubectl get wavefront fleet -o yaml
 `status.phase` is `Quiescent` (nothing pending), `Advancing` (admissions in
 flight), or `Blocked` (something is stuck; see `status.blocked`).
 `status.nodes` gives fleet-wide counts; `status.blocked` and `status.held` are
-capped, attributed lists of exceptional states (see `DESIGN.md` §4.1).
+capped, attributed lists of exceptional states (see the [`Wavefront` CR's
+status schema](../DESIGN.md#41-the-wavefront-cr) in `DESIGN.md`).
 `status.members` carries the full per-node picture — every evaluated node with
 its state, pin, observed SHA and blocking attribution — bounded only by
 `MembersCap` = 2000, with `status.membersOmitted` counting any excess.
@@ -89,7 +91,7 @@ dead controller leaves the last-published `status.members` sitting there
 looking authoritative. Two checks distinguish "quiet" from "dead":
 
 - `status.conditions[type=Ready]` on the `Wavefront`, plus the controller
-  liveness alarm ([safety alarms](#safety-alarms-6)).
+  liveness alarm ([safety alarms](#safety-alarms)).
 - `wfctl status`, which warns when `lastEvaluated` is older than
   `2 × (poll.interval + 30s)` or `Ready` is `False`, and says to re-run with
   `--derive`.
@@ -106,11 +108,12 @@ imply `get`. Add `--poll` for a real ref-advertisement sweep (which also reads
 the sources' credential `Secret`s), without which observed SHAs render as an
 explicit `?`.
 
-## The release set (§4.2)
+## The release set
 
 There is no per-release CR — the release set is *derived* from the pin state
-of managed `GitRepository` sources at quiescence. One query renders it, with
-per-pin provenance attached:
+of managed `GitRepository` sources at quiescence, exactly as
+[`DESIGN.md` describes](../DESIGN.md#42-provenance-annotations-and-events).
+One query renders it, with per-pin provenance attached:
 
 ```sh
 kubectl get gitrepositories -A -l wavefront.as-code.io/managed=true -o jsonpath='{range .items[*]}{.metadata.namespace}{"/"}{.metadata.name}{"\t"}{.spec.ref.commit}{"\t"}{.metadata.annotations.wavefront\.as-code\.io/admitted-at}{"\t"}{.metadata.annotations.wavefront\.as-code\.io/observed-ref}{"\n"}{end}'
@@ -147,7 +150,9 @@ unowned again, fires `HoldReleased`, and resumes normal admission — no
 special "release" command needed. There is no need to touch `spec.suspend`
 just to hand-pin one source; the hold is scoped to that `GitRepository`
 alone, and its descendants will correctly show as blocked-behind-an-unsettled-
-ancestor for as long as the hold stands (§3.3/§3.5).
+ancestor for as long as the hold stands, per [the rolling-admission state
+machine](../DESIGN.md#33-rolling-admission) and [the unified hold
+model](../DESIGN.md#35-pin-ownership-provenance-and-coexistence).
 
 `wfctl` does both halves under a field manager of its own (`wfctl`), which the
 controller honours as a hold like any other:
@@ -172,11 +177,12 @@ under `wavefront-controller` with provenance restored from the displaced-pin
 annotation before relinquishing wfctl's claim — so the fleet carries on
 running exactly the commit the hold pinned, and the controller resumes from
 there. `--float` is the other choice: remove `spec.ref.commit` and let the
-source float on its tracking ref until the controller initial-pins it from its
-artifact (§3.5.4). Removing a hand-set value with `kubectl` is always the
-`--float` behaviour.
+source float on its tracking ref until the controller initial-pins it from
+its artifact, per [initial pin on
+discovery](../DESIGN.md#35-pin-ownership-provenance-and-coexistence).
+Removing a hand-set value with `kubectl` is always the `--float` behaviour.
 
-## Break-glass: pin-strip (§8.5)
+## Break-glass: pin-strip
 
 Restores plain floating-ref Flux behaviour fleet-wide by removing every
 controller-managed `spec.ref.commit`:
@@ -197,8 +203,10 @@ wfctl pin-strip --suspend --dry-run  # see exactly which sources would be stripp
 
 `wfctl pin-strip` skips every source the controller already treats as held —
 a hand-pin under a foreign field manager, or the source's own
-`spec.suspend: true` (§3.5.3) — because somebody is holding those
-deliberately; `--include-held` strips them too. The `kubectl` loop above
+`spec.suspend: true`, per [the unified hold
+model](../DESIGN.md#35-pin-ownership-provenance-and-coexistence) — because
+somebody is holding those deliberately; `--include-held` strips them too.
+The `kubectl` loop above
 strips them regardless, since it cannot tell the difference. Per-source
 errors are reported and the run continues rather than abandoning the fleet
 half-stripped. The plan always warns that the controller re-pins everything on
@@ -215,14 +223,16 @@ Effects:
 - This does **not** stop the controller from re-pinning on its next
   reconcile unless you also suspend it (`spec.suspend: true`) or scale the
   deployment to zero. Strip-and-leave-running will simply re-pin everything
-  back on the next poll (each such source looks exactly like "initial pin on
-  discovery", §3.5.4 — a no-op-effect re-pin to the currently observed SHA).
-  For a durable break-glass, pair the strip with `spec.suspend: true` (or
-  stop the controller) *before* stripping, so pins stay stripped until you
-  choose to resume.
+  back on the next poll (each such source looks exactly like [initial pin on
+  discovery](../DESIGN.md#35-pin-ownership-provenance-and-coexistence) — a
+  no-op-effect re-pin to the currently observed SHA). For a durable
+  break-glass, pair the strip with `spec.suspend: true` (or stop the
+  controller) *before* stripping, so pins stay stripped until you choose to
+  resume.
 - Use this when you need the fleet to genuinely stop tracking any pins (e.g.
-  suspected controller bug pinning wrong SHAs, per `DESIGN.md` §10) — for
-  merely pausing new admissions while keeping current pins in place, use
+  suspected controller bug pinning wrong SHAs — see [`DESIGN.md`'s
+  failure-mode table](../DESIGN.md#10-failure-modes)) — for merely pausing
+  new admissions while keeping current pins in place, use
   `spec.suspend: true` instead, which touches no Flux resource at all.
 
 ## Shadow → Enforce flip procedure
@@ -234,13 +244,14 @@ Effects:
      or selector overlaps with another `Wavefront`. While `GraphValid` is
      `False`, this Wavefront's per-Wavefront gauges are suppressed (retired,
      not zeroed) so a fleet-wide `sum()` never double-counts against the
-     Wavefront it overlaps with — see [Safety alarms](#safety-alarms-6).
+     Wavefront it overlaps with — see [Safety alarms](#safety-alarms).
    - `ShadowAdmission` events look sane for a representative sample of
      flotillas (correct candidate SHAs, expected sequencing given
      `dependsOn`).
    - `wavefront_admission_wait_seconds` distribution looks reasonable (no
-     surprise starvation behind a hot, never-quiescing upstream — the D13
-     caveat).
+     surprise starvation behind a hot, never-quiescing upstream — the
+     [settled-ancestors starvation
+     caveat](../DESIGN.md#d13--settled-ancestors-admissibility-new-in-v40)).
    - `wavefront_ref_list_failures_total` is flat/zero per git host you care
      about (a private-CA host, or one needing provider-specific auth, will
      show failures here even though source-controller clones it fine — see
@@ -259,19 +270,23 @@ Effects:
    edit belongs in git. A conflicting concurrent write is reported as such —
    re-run.
 
-   This is a visible, auditable, one-field change (§4.1) — no other spec
-   field needs to move. On the first reconcile after the flip, freshly
-   discovered/unpinned sources get an **initial pin to their currently
-   observed SHA** — a no-op-effect write, not a deployment change (§3.5.4,
-   §9 migration note) — so flipping is risk-free even against
-   already-running flotillas.
+   This is a visible, auditable, one-field change — no other spec field
+   needs to move (see the [`Wavefront` CR](../DESIGN.md#41-the-wavefront-cr)).
+   On the first reconcile after the flip, freshly discovered/unpinned
+   sources get an **initial pin to their currently observed SHA** — a
+   no-op-effect write, not a deployment change (per [initial pin on
+   discovery](../DESIGN.md#35-pin-ownership-provenance-and-coexistence) and
+   the [rollout plan's migration
+   note](../DESIGN.md#9-rollout-plan)) — so flipping is risk-free even
+   against already-running flotillas.
 4. Watch `PinAdvanced`/`InitialPin` events and `status.phase` return to
    `Quiescent`. Roll back by flipping `mode` back to `Shadow` (writes stop;
    already-written pins are untouched) or by the break-glass procedure above
    if you need pins actively reverted.
 
-Per DESIGN §9, prefer ramping by dependency depth (infrastructure flotillas
-first) rather than flipping the whole fleet's selector at once — label a
+Per [`DESIGN.md`'s rollout plan](../DESIGN.md#9-rollout-plan), prefer ramping
+by dependency depth (infrastructure flotillas first) rather than flipping
+the whole fleet's selector at once — label a
 small pilot subset initially and widen the selector/participation labelling
 over time.
 
@@ -326,11 +341,12 @@ wfctl history --node flotillas/team-a          # resolves the node to its source
 stream, so a hand-pin and the admissions around it read in order. It needs
 `get`/`list` on `events.events.k8s.io` — the viewer tier — and nothing more.
 
-**Retention caveat, printed after every listing:** events are at-least-once
-(§4.2) and are retained only for the API server's `--event-ttl` (1 hour by
+**Retention caveat, printed after every listing:** events are
+[at-least-once, not exactly-once](../DESIGN.md#42-provenance-annotations-and-events)
+and are retained only for the API server's `--event-ttl` (1 hour by
 default), so `history` is a convenience trail, not the record. The durable
 ledger is the provenance annotations on each source (`wfctl sources -o wide`,
-or the [release-set query](#the-release-set-42)) plus whatever log aggregation
+or the [release-set query](#the-release-set)) plus whatever log aggregation
 retains.
 
 Reasons emitted, all attached to the `Wavefront` object:
@@ -372,9 +388,12 @@ Recording an audit event needs `create` on `events.events.k8s.io` (the
 operator tier); failing to record one is reported as a warning and never
 fails the write, which has already happened by then.
 
-## Safety alarms (§6)
+## Safety alarms
 
-Wire these before ramping past a pilot (DESIGN §9, Phase 2):
+These mirror [`DESIGN.md`'s observability launch
+requirements](../DESIGN.md#6-observability-launch-requirements). Wire them
+before ramping past a pilot, per [the rollout plan's Phase
+2](../DESIGN.md#9-rollout-plan):
 
 - **Controller liveness.** Standard `/healthz` probe / pod-restart alerting
   on the `controller-manager` Deployment. If the controller is down, pins
@@ -384,7 +403,8 @@ Wire these before ramping past a pilot (DESIGN §9, Phase 2):
   Age of an unadmitted observed revision per node, labelled with its owning
   Wavefront. Alert on this growing past a
   threshold, and treat it as more urgent if it's growing *while liveness is
-  also failing* (frozen pins + dead controller is the worst case in §10).
+  also failing* (frozen pins + dead controller is the worst case in
+  [`DESIGN.md`'s failure-mode table](../DESIGN.md#10-failure-modes)).
   Remember the [poll tuning](#poll-tuning) note above when picking a
   threshold — some lag is structural, not a symptom.
 - **Ref-listing failure rate — `rate(wavefront_ref_list_failures_total[...])` per host.**
@@ -409,7 +429,8 @@ Wire these before ramping past a pilot (DESIGN §9, Phase 2):
   surface via `status`.
 - **Pinned-commit fetch failures — `wavefront_pinned_fetch_failures{wavefront}` (gauge;
   `sum()` it for a cross-fleet total).** source-controller reporting `FetchFailed` on a pinned commit (typically a
-  force-push rewriting the pinned SHA out of history, §10). Deployed state
+  force-push rewriting the pinned SHA out of history — see [the force-push
+  failure mode](../DESIGN.md#10-failure-modes)). Deployed state
   stays intact (source-controller keeps the last-good artifact); this is
   self-healing on the next poll once ancestors permit re-pinning, but should
   still page so you know which flotilla is affected and can watch for the
@@ -417,8 +438,9 @@ Wire these before ramping past a pilot (DESIGN §9, Phase 2):
   genuinely lost.
 - Also useful, not launch-blocking safety alarms per se but worth a
   dashboard: `wavefront_admissions_total{wavefront,result}`,
-  `wavefront_admission_wait_seconds{wavefront}` (the starvation signal,
-  D13), and `wavefront_blocked_nodes{wavefront,reason}`.
+  `wavefront_admission_wait_seconds{wavefront}` (the [starvation
+  signal](../DESIGN.md#d13--settled-ancestors-admissibility-new-in-v40)),
+  and `wavefront_blocked_nodes{wavefront,reason}`.
 - **Deadman / gauge-absence.** Per-Wavefront gauges
   (`wavefront_node_pin_lag_seconds`, `wavefront_blocked_nodes`,
   `wavefront_pinned_fetch_failures`) are published only by a valid, resolved
@@ -444,8 +466,9 @@ shapes fall outside that and fail ref listing like any other auth failure —
 `wavefront_ref_list_failures_total` rises for that host, and the source is
 treated **conservatively, not permissively**: it is *not* pinned, but it is
 also *not* demoted to a gate — it stays a real node with no successful
-observation, and (per the fail-closed rule, DESIGN D4) an unobserved node is
-treated as unsettled, so **it can block its own descendants** exactly like
+observation, and (per [the fail-closed rule](../DESIGN.md#d4--fail-closed))
+an unobserved node is treated as unsettled, so **it can block its own
+descendants** exactly like
 any other stuck node would. This is a different — and more consequential —
 failure mode than `UnsupportedRefStyle` (which really does gate the node,
 see the [events table](#events)): no event fires, and an operator checking

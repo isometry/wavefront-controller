@@ -81,7 +81,7 @@ const (
 	outputMermaid = "mermaid"
 )
 
-// Exit codes (plan B3). 0 and 1 are the usual pair; 2 is reserved for the one
+// Exit codes. 0 and 1 are the usual pair; 2 is reserved for the one
 // question a script actually wants answered without parsing text — is the
 // fleet blocked?
 const (
@@ -321,7 +321,7 @@ func (o *Options) renderOptions() render.Options {
 	}
 }
 
-// colorEnabled implements the three-way rule of plan B1: colour only on an
+// colorEnabled implements the three-way rule: colour only on an
 // interactive terminal, only without NO_COLOR, and only without --no-color.
 //
 // NO_COLOR must be set *and non-empty* to count (no-color.org): an empty

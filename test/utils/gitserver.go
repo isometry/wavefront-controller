@@ -257,14 +257,13 @@ func (r *Repo) CommitPush(files map[string]string, message string) (string, erro
 	return sha, nil
 }
 
-// PushFile is CommitPush for a single file (the brief's pushCommit).
+// PushFile is CommitPush for a single file.
 func (r *Repo) PushFile(path, content, message string) (string, error) {
 	return r.CommitPush(map[string]string{path: content}, message)
 }
 
 // Rewrite discards the local history, commits files onto a fresh root commit
-// and force-pushes it — a real history rewrite over whatever is pinned
-// (DESIGN §10).
+// and force-pushes it — a real history rewrite over whatever is pinned.
 func (r *Repo) Rewrite(files map[string]string, message string) (string, error) {
 	if err := r.init(); err != nil {
 		return "", err

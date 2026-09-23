@@ -30,10 +30,13 @@ no git state (it only reads ref advertisements, `git ls-remote`-style, never
 clones or checks out), admissibility is a pure function of live pins,
 observed refs and readiness, and at quiescence the fleet's pin set — plus
 its per-pin provenance annotations — *is* the release manifest. See
-[`DESIGN.md`](DESIGN.md) for the full design: topology and constraints
-(§1–2), the admission state machine and pin-ownership rules (§3), the API
-(§4), the decision log (§5), observability (§6), prerequisites (§8) and the
-rollout plan (§9).
+[`DESIGN.md`](DESIGN.md) for the full design: [topology and
+constraints](DESIGN.md#2-context), the [admission state machine and
+pin-ownership rules](DESIGN.md#3-design-overview), the
+[API](DESIGN.md#4-api), the [decision log](DESIGN.md#5-decision-log),
+[observability](DESIGN.md#6-observability-launch-requirements),
+[prerequisites](DESIGN.md#8-prerequisites) and the [rollout
+plan](DESIGN.md#9-rollout-plan).
 
 ## Getting started
 
@@ -45,11 +48,12 @@ rollout plan (§9).
 - access to a Kubernetes v1.11.3+ cluster running Flux v2 (`source-controller`,
   `kustomize-controller`) — the e2e suite targets Flux v2.9.4
 
-### Fleet prerequisites (DESIGN §8)
+### Fleet prerequisites
 
 Before enabling the controller against real flotillas, the surrounding
-catalog and RBAC must satisfy the following — the controller assumes these
-hold and does not itself enforce them:
+catalog and RBAC must satisfy the following (mirrored from
+[`DESIGN.md`'s prerequisites](DESIGN.md#8-prerequisites)) — the controller
+assumes these hold and does not itself enforce them:
 
 - [ ] **Catalog renders `spec.ref.name` only and omits `spec.ref.commit`** on
       every flotilla `GitRepository`, enforced by catalog CI. Required for
@@ -130,7 +134,8 @@ undeploy`.
 A single, cluster-scoped CRD (`wavefronts.wavefront.as-code.io/v1alpha1`)
 carries the controller's configuration and fleet-level status. It declares
 scope and policy only — never topology, which is discovered from
-`dependsOn` (DESIGN §3.2). Multiple `Wavefront`s are permitted (e.g. per
+`dependsOn` (see [how nodes, edges and roles are derived from the
+graph](DESIGN.md#32-the-graph-nodes-edges-roles)). Multiple `Wavefront`s are permitted (e.g. per
 context) but their node selectors must not overlap; overlap is reported as
 an error condition on both, and their per-Wavefront gauges (see
 [Metrics](#metrics)) are suppressed for as long as the overlap stands, so a
@@ -202,8 +207,10 @@ full per-node picture — every evaluated node, flotilla and gate alike, with
 its state, pin, observed SHA and blocking attribution — bounded only by
 `MembersCap` = 2000, past which `status.membersOmitted` counts the rest. It
 is what [`wfctl`](#wfctl) reads by default, and it is **write-only** output:
-the reconciler never reads it back, so admission never depends on it
-(DESIGN D9). `status.lastEvaluated` stamps when the picture was derived, and
+the reconciler never reads it back, so admission never depends on it — see
+[why rolling admission is a pure function of live
+inputs](DESIGN.md#d9--rolling-admission-not-cycle-coherent-admission-sets-reversed-from-v31-of-this-document).
+`status.lastEvaluated` stamps when the picture was derived, and
 advances at most once per `spec.poll.interval` so watch-triggered reconciles
 do not rewrite status on every pass — budget for that when judging staleness.
 
@@ -251,15 +258,15 @@ deleted. That means a cross-fleet `sum()` (e.g.
 series during an overlap window, and an absent series means "not currently
 measured", not zero — don't alert on `absent()` alone; pair it with the
 Wavefront's `Ready` condition (see the
-[runbook's safety alarms](docs/runbook.md#safety-alarms-6)).
+[runbook's safety alarms](docs/runbook.md#safety-alarms)).
 `wavefront_admissions_total` and `wavefront_admission_wait_seconds` are
 cumulative and attributed per Wavefront the same way, but are deleted only
 when their Wavefront is deleted — a pass never retires them.
 
 ## Shadow → Enforce rollout
 
-Per DESIGN §9, roll out in phases rather than flipping the whole fleet at
-once:
+Per [`DESIGN.md`'s rollout plan](DESIGN.md#9-rollout-plan), roll out in
+phases rather than flipping the whole fleet at once:
 
 1. **Phase 0 — Shadow.** Deploy with `mode: Shadow` against the intended
    selector; detection, graph derivation, and `ShadowAdmission` events run
@@ -286,7 +293,8 @@ and the break-glass pin-strip: see **[`docs/runbook.md`](docs/runbook.md)**.
 ## `wfctl`
 
 `wfctl` reports what a `Wavefront` is doing and why, and operates it when it
-is stuck — the CLI half of the observability surface (DESIGN §6). It is a
+is stuck — the CLI half of [`DESIGN.md`'s observability launch
+requirements](DESIGN.md#6-observability-launch-requirements). It is a
 separate binary; it is deliberately **not** shipped in the manager image,
 whose ServiceAccount is precisely the RBAC an exec into that pod should not
 reach.
@@ -371,8 +379,9 @@ node — flotilla and gate alike, including the closure gates reached through
 `status.blocked`/`status.held`; its only bound is `MembersCap` = 2000, past
 which `status.membersOmitted` counts the rest and wfctl says so. It is
 *write-only* output: the controller never reads it back, so a hand-edited or
-truncated list cannot change what the controller does (DESIGN D9) — it can
-only mislead a reader, which is what `--derive` is for.
+truncated list cannot change what the controller does — admissibility is
+always re-derived from live inputs — it can only mislead a reader, which is
+what `--derive` is for.
 
 ### Access tiers
 
@@ -418,7 +427,7 @@ Read commands honour `--derive`, `--poll` and `--from` and take
 | `nodes` | Every evaluated node with role, state, held flag, blocking attribution, source, pin, observed SHA and lag; `-o wide` adds wave, readiness and `dependsOn`. |
 | `sources` | Every managed `GitRepository` with pin, observed SHA, pending flag, hold, field-manager owners, artifact, admitted-at and referencing nodes; `-o wide` adds previous pin, observed ref, fetch health and URL. |
 | `source ns/name` | One source in full: pin, provenance annotations, owners, conditions, referencing nodes. |
-| `explain ns/name` | Walks a node's blocked chain to its root cause and names the fix (DESIGN §3.3). Accepts `Kind/ns/name`; `Kustomization` is the default kind. |
+| `explain ns/name` | Walks a node's blocked chain to its root cause and names the fix, per [the rolling-admission state machine](DESIGN.md#33-rolling-admission). Accepts `Kind/ns/name`; `Kustomization` is the default kind. |
 | `graph` | Dependency graph as waves (default), or `--tree` for a rooted tree; anything in or behind a cycle is listed unlayered. |
 | `snapshot` | Writes the whole snapshot as JSON (or `-o yaml`) to stdout or `-f FILE`, for replay with `--from`. Never contains secret data, credentials, kubeconfig or URL userinfo — it is meant to be attached to a ticket. |
 | `history` | The controller's and wfctl's own events for this Wavefront, filterable with `--source`, `--node`, `--reason`, `--since`, `--warnings`. Events are at-least-once and retained only for the API server's `--event-ttl` (1h by default); the durable ledger is the provenance annotations (`wfctl sources -o wide`) and log aggregation. |
@@ -434,7 +443,7 @@ record one is a warning, never a failed command.
 | `suspend` / `resume` | `spec.suspend` on the `Wavefront`, by merge patch so a GitOps applier keeps owning the spec — wfctl warns when it sees one, because Flux will revert the change. |
 | `mode Shadow\|Enforce` | `spec.mode`, same merge-patch rule. |
 | `pin ns/name --sha SHA` | Hand-pins one source under the `wfctl` field manager, which the controller reads as an external hold (`HoldDetected`, descendants `AncestorHeld`). The SHA must be checked (`--poll`) or explicitly not (`--unverified`); `--force` displaces a third-party owner of `spec.ref.commit`. |
-| `release ns/name` | Ends a hold on one source, **keeping the pinned value**: the controller re-applies the same SHA under its own field manager with provenance restored, then the holder's claim is relinquished. `--float` removes the pin instead, so the source floats until the controller initial-pins it (DESIGN §3.5.4). |
+| `release ns/name` | Ends a hold on one source, **keeping the pinned value**: the controller re-applies the same SHA under its own field manager with provenance restored, then the holder's claim is relinquished. `--float` removes the pin instead, so the source floats until the controller initial-pins it — see [initial pin on discovery](DESIGN.md#35-pin-ownership-provenance-and-coexistence). |
 | `pin-strip` | Break-glass: removes `spec.ref.commit` from every managed source. Sources the controller already treats as held — a hand-pin, or the source's own `spec.suspend` — are skipped unless `--include-held`; `--suspend` suspends the fleet first, in the same command, so the controller does not simply re-pin. |
 | `force-admit ns/name` | Admits one source past its gate, once: lists that one source's refs, takes the tracking ref's SHA (or `--sha`, verified unless `--unverified`), and writes it under the controller's own field manager with provenance. Refused when the source is held or suspended. |
 
@@ -475,8 +484,10 @@ PGP-based `--verify`/`.prov` mechanism, which this pipeline does not use.)
   pin-mirroring to git, webhook-based detection, and a starvation staleness
   bound** are all explicitly deferred — the extension seams
   (`selection.Strategy`, `adapter.Adapter`) exist, but these need operational
-  evidence before they're worth building. See `DESIGN.md` §3.6, §3.7, §9,
-  §10, D10, D13.
+  evidence before they're worth building. See the design doc's notes on
+  [pluggable candidate-selection strategies](DESIGN.md#36-candidate-selection-strategies-extension-point),
+  [rollback as a recorded but out-of-scope capability](DESIGN.md#37-rollback-recorded-capability-out-of-scope-for-v1),
+  and the [rollout plan's open questions](DESIGN.md#9-rollout-plan).
 
 See also [`docs/runbook.md`](docs/runbook.md#known-limitations-unsupported-git-auth)
 for the operational read on the auth limitation above.

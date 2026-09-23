@@ -309,9 +309,9 @@ func gaugePass(wavefront, node string, pendingSince time.Time) *pass {
 // TestFleetGaugesAreRetiredPerWavefront: the gauges are fleet-global
 // collectors recomputed wholesale on every pass, so a per-Wavefront Reset()
 // would erase a *co-resident* Wavefront's series until its own next pass —
-// and pin staleness is a D4 safety alarm that must never blink out. Every
-// series therefore carries the owning Wavefront, and a pass retires only its
-// own with DeletePartialMatch.
+// and pin staleness is the safety alarm operators rely on to catch a stuck
+// controller, so it must never blink out. Every series therefore carries the
+// owning Wavefront, and a pass retires only its own with DeletePartialMatch.
 func TestFleetGaugesAreRetiredPerWavefront(t *testing.T) {
 	now := time.Unix(2000, 0)
 	instr := metrics.Nop()
@@ -356,10 +356,10 @@ func TestFleetGaugesAreRetiredPerWavefront(t *testing.T) {
 	}
 }
 
-// TestSummariseAbortedPassRetiresItsGauges: findings #7 — an aborted pass has
-// proven nothing about the fleet, so a stale-but-plausible gauge value must
-// not freeze in place, where the D4 pin-staleness alarm would read it as
-// healthy. Its series must go absent, while status.Nodes (covered already by
+// TestSummariseAbortedPassRetiresItsGauges: an aborted pass has proven
+// nothing about the fleet, so a stale-but-plausible gauge value must not
+// freeze in place, where the pin-staleness alarm would read it as healthy.
+// Its series must go absent, while status.Nodes (covered already by
 // TestSummariseAbortedPassPreservesTheFleetPicture) keeps the last known-good
 // picture.
 func TestSummariseAbortedPassRetiresItsGauges(t *testing.T) {
@@ -399,13 +399,13 @@ func TestSummariseAbortedPassRetiresItsGauges(t *testing.T) {
 	}
 }
 
-// TestSummariseNodesOverlapPassSuppressesGauges: findings #8 — a selector
-// overlap (or a cycle) means the graph verdict is invalid and this pass's counts are
-// not authoritative for occupancy, so publishing its gauges alongside the
+// TestSummariseNodesOverlapPassSuppressesGauges: a selector overlap (or a
+// cycle) means the graph verdict is invalid and this pass's counts are not
+// authoritative for occupancy, so publishing its gauges alongside the
 // Wavefront it overlaps with would double-count the shared node. status.Nodes
-// stays live (overlap is not an abort — DESIGN's overlap rule), but the gauge
-// writes are suppressed, and any series a prior valid pass left behind are
-// still retired rather than left to go stale.
+// stays live (overlap is not an abort), but the gauge writes are suppressed,
+// and any series a prior valid pass left behind are still retired rather
+// than left to go stale.
 func TestSummariseNodesOverlapPassSuppressesGauges(t *testing.T) {
 	now := time.Unix(5000, 0)
 	instr := metrics.Nop()
@@ -442,8 +442,10 @@ func TestSummariseNodesOverlapPassSuppressesGauges(t *testing.T) {
 }
 
 // TestWavefrontDeletionRetiresItsMetricSeries: deletion carries no finalizer
-// by design (DESIGN D8), so Reconcile's IsNotFound branch is the only signal
-// that a Wavefront is gone. It must retire every series that Wavefront ever
+// by design — removing a Wavefront simply releases its fleet from
+// management and leaves pins where they are, rather than blocking on
+// cleanup — so Reconcile's IsNotFound branch is the only signal that a
+// Wavefront is gone. It must retire every series that Wavefront ever
 // contributed — both the per-pass gauges a pass recomputes wholesale and the
 // cumulative admission counters no pass ever reconciles — while leaving a
 // co-resident Wavefront's series standing.
@@ -641,8 +643,7 @@ func heldStatus(manager, reason string) []wavefrontv1alpha1.HeldNode {
 }
 
 // TestHoldEventsSuspendMessages covers the Suspend-flavoured detect/release
-// text (brief item 8): distinct from the HandPin wording, and naming no
-// field manager.
+// text: distinct from the HandPin wording, and naming no field manager.
 func TestHoldEventsSuspendMessages(t *testing.T) {
 	recorder := events.NewFakeRecorder(32)
 	r := &WavefrontReconciler{Recorder: recorder, Clock: time.Now, Metrics: metrics.Nop()}
@@ -759,7 +760,7 @@ func TestHoldEventsEmptyReasonDefaultsToHandPin(t *testing.T) {
 	}
 }
 
-// --- the capped-mirror contract (finding 8) ---------------------------------
+// --- the capped-mirror contract ---------------------------------------------
 
 // manyHoldSource returns the i-th of a deterministic, zero-padded run of
 // held-source names — sorted, by name, in index order — for exercising the
@@ -781,10 +782,10 @@ func manyHolds(n int) (map[types.NamespacedName]inputs.Hold, map[types.Namespace
 	return holds, nodeBySource
 }
 
-// TestHoldEventsCapMirrorsStatus is the regression finding 8 describes: with
-// more held sources than StatusListCap, holdEvents must fire exactly the
-// capped set (the same list summariseNodes writes to status.Held) and must
-// never refire for the truncated tail on a later, unchanged pass.
+// TestHoldEventsCapMirrorsStatus guards against a regression where, with more
+// held sources than StatusListCap, holdEvents fires exactly the capped set
+// (the same list summariseNodes writes to status.Held) and must never refire
+// for the truncated tail on a later, unchanged pass.
 func TestHoldEventsCapMirrorsStatus(t *testing.T) {
 	recorder := events.NewFakeRecorder(64)
 	r := &WavefrontReconciler{Recorder: recorder, Clock: time.Now, Metrics: metrics.Nop()}
@@ -819,7 +820,7 @@ func TestHoldEventsCapMirrorsStatus(t *testing.T) {
 
 // TestHoldEventsReleasePromotes21st: releasing an in-cap hold fires its
 // HoldReleased and, in the same pass, HoldDetected for the source promoted
-// into the freed cap slot — late but exactly once (D-C).
+// into the freed cap slot — late but exactly once.
 func TestHoldEventsReleasePromotes21st(t *testing.T) {
 	recorder := events.NewFakeRecorder(64)
 	r := &WavefrontReconciler{Recorder: recorder, Clock: time.Now, Metrics: metrics.Nop()}
@@ -864,7 +865,7 @@ func TestHoldEventsReleasePromotes21st(t *testing.T) {
 	}
 }
 
-// --- the shadow-admission ledger (WP5, finding 9, decision D-H) ------------
+// --- the shadow-admission ledger --------------------------------------------
 
 // admissionFor builds a minimal would-be admission for the shadowAdmissions
 // tests below; ObservedRef is fixed so the rendered event text is stable.
@@ -882,10 +883,10 @@ func manyAdmissions(n int) []engine.Admission {
 	return admissions
 }
 
-// TestShadowAdmissionsNoRefireOnIdenticalPass is finding 9's core regression:
-// the engine re-derives the identical would-be admission every reconcile, so
-// the edge-trigger has to live in the controller, against a status ledger,
-// not in the engine.
+// TestShadowAdmissionsNoRefireOnIdenticalPass guards against the engine
+// re-deriving the identical would-be admission every reconcile and
+// re-announcing it: the edge-trigger has to live in the controller, against
+// a status ledger, not in the engine.
 func TestShadowAdmissionsNoRefireOnIdenticalPass(t *testing.T) {
 	recorder := events.NewFakeRecorder(8)
 	instr := metrics.Nop()
@@ -946,9 +947,9 @@ func TestShadowAdmissionsNewToRefires(t *testing.T) {
 	}
 }
 
-// TestExecuteEnforceClearsStaleShadowLedger covers brief item 5(b): flipping
-// to Enforce must clear a stale status.Shadow ledger even on a pass with zero
-// admissions — the len(admissions)==0 shortcut must not bypass the clear.
+// TestExecuteEnforceClearsStaleShadowLedger: flipping to Enforce must clear a
+// stale status.Shadow ledger even on a pass with zero admissions — a
+// len(admissions)==0 shortcut must not bypass the clear.
 func TestExecuteEnforceClearsStaleShadowLedger(t *testing.T) {
 	recorder := events.NewFakeRecorder(8)
 	r := &WavefrontReconciler{Recorder: recorder, Clock: time.Now, Metrics: metrics.Nop()}
@@ -971,10 +972,10 @@ func TestExecuteEnforceClearsStaleShadowLedger(t *testing.T) {
 }
 
 // TestExecuteSkipAdmissionsLeavesShadowLedgerUntouched and
-// TestExecuteSuspendLeavesShadowLedgerUntouched cover brief item 4: the
-// skipAdmissions and Suspend early returns must leave the ledger exactly as
-// they found it, so a resumed Wavefront does not refire on unchanged
-// would-be admissions.
+// TestExecuteSuspendLeavesShadowLedgerUntouched cover the skipAdmissions and
+// Suspend early returns: they must leave the ledger exactly as they found
+// it, so a resumed Wavefront does not refire on unchanged would-be
+// admissions.
 func TestExecuteSkipAdmissionsLeavesShadowLedgerUntouched(t *testing.T) {
 	recorder := events.NewFakeRecorder(8)
 	r := &WavefrontReconciler{Recorder: recorder, Clock: time.Now, Metrics: metrics.Nop()}
@@ -996,7 +997,7 @@ func TestExecuteSkipAdmissionsLeavesShadowLedgerUntouched(t *testing.T) {
 		t.Fatalf("execute: %v", err)
 	}
 	if len(wf.Status.Shadow) != 1 || wf.Status.Shadow[0].To != shaA {
-		t.Errorf("status.shadow = %+v, want unchanged: selector overlap suppresses admissions entirely (DESIGN §4.1)", wf.Status.Shadow)
+		t.Errorf("status.shadow = %+v, want unchanged: selector overlap suppresses admissions entirely", wf.Status.Shadow)
 	}
 	if recorded := drain(recorder.Events); len(recorded) != 0 {
 		t.Errorf("events = %v, want none", recorded)
@@ -1022,18 +1023,18 @@ func TestExecuteSuspendLeavesShadowLedgerUntouched(t *testing.T) {
 		t.Fatalf("execute: %v", err)
 	}
 	if len(wf.Status.Shadow) != 1 || wf.Status.Shadow[0].To != shaA {
-		t.Errorf("status.shadow = %+v, want unchanged: Suspend freezes all writes (DESIGN §4.1)", wf.Status.Shadow)
+		t.Errorf("status.shadow = %+v, want unchanged: Suspend freezes all writes", wf.Status.Shadow)
 	}
 	if recorded := drain(recorder.Events); len(recorded) != 0 {
 		t.Errorf("events = %v, want none", recorded)
 	}
 }
 
-// TestShadowAdmissionsCapMirrorsStatus mirrors TestHoldEventsCapMirrorsStatus
-// (finding 8's Held pattern, reused per decision D-H): with more would-be
-// admissions than StatusListCap, shadowAdmissions must announce exactly the
-// capped set and never refire for the truncated tail on a later, unchanged
-// pass.
+// TestShadowAdmissionsCapMirrorsStatus mirrors TestHoldEventsCapMirrorsStatus,
+// reusing the same capped-mirror pattern for shadow admissions: with more
+// would-be admissions than StatusListCap, shadowAdmissions must announce
+// exactly the capped set and never refire for the truncated tail on a later,
+// unchanged pass.
 func TestShadowAdmissionsCapMirrorsStatus(t *testing.T) {
 	recorder := events.NewFakeRecorder(64)
 	instr := metrics.Nop()
@@ -1092,11 +1093,12 @@ func TestPollSetsCadenceDefaults(t *testing.T) {
 
 // --- status.lastEvaluated and the write-only member list ---------------------
 
-// TestSummariseStampsLastEvaluatedAtMostOncePerInterval: every pass re-derives
-// the same picture (DESIGN D9), so stamping a fresh timestamp on each one would
-// rewrite status — and wake every watcher of it — on every watch-triggered
-// reconcile while nothing about the fleet had changed. The poll interval is the
-// freshness the user asked for, so it bounds the rewrite rate too.
+// TestSummariseStampsLastEvaluatedAtMostOncePerInterval: every pass
+// re-derives the same picture, so stamping a fresh timestamp on each one
+// would rewrite status — and wake every watcher of it — on every
+// watch-triggered reconcile while nothing about the fleet had changed. The
+// poll interval is the freshness the user asked for, so it bounds the
+// rewrite rate too.
 func TestSummariseStampsLastEvaluatedAtMostOncePerInterval(t *testing.T) {
 	now := time.Unix(9000, 0)
 	r := &WavefrontReconciler{
@@ -1142,11 +1144,11 @@ func TestSummariseStampsLastEvaluatedAtMostOncePerInterval(t *testing.T) {
 	}
 }
 
-// TestStatusMembersAreWriteOnly enforces DESIGN D9 structurally: status.members
-// is output for humans and the CLI, never an input the reconciler steers on. A
-// pass that read it back would be carrying orchestration state in status, and a
-// hand-edited (or truncated, past MembersCap) list could then change what the
-// controller does.
+// TestStatusMembersAreWriteOnly enforces structurally that status.members is
+// output for humans and the CLI, never an input the reconciler steers on. A
+// pass that read it back would be carrying orchestration state in status, and
+// a hand-edited (or truncated, past MembersCap) list could then change what
+// the controller does.
 func TestStatusMembersAreWriteOnly(t *testing.T) {
 	writeOnly := []string{"Members", "MembersOmitted"}
 
@@ -1198,7 +1200,7 @@ func TestStatusMembersAreWriteOnly(t *testing.T) {
 				return true
 			}
 			if !assigned[ast.Expr(sel)] {
-				t.Errorf("%s:%d: reads status.%s; it is write-only output (DESIGN D9)",
+				t.Errorf("%s:%d: reads status.%s; it is write-only output",
 					name, fset.Position(sel.Pos()).Line, sel.Sel.Name)
 			}
 			return true

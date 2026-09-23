@@ -14,8 +14,8 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package graph is the pure, kind-agnostic dependsOn DAG (DESIGN §3.2): no
-// Kubernetes, no I/O. It derives strongly connected components (cycles),
+// Package graph is the pure, kind-agnostic dependsOn DAG: no Kubernetes, no
+// I/O. It derives strongly connected components (cycles),
 // transitive ancestors, and unknown (dangling) edge targets from a flat
 // edge map of adapter.NodeRef.
 package graph
@@ -56,7 +56,7 @@ type Graph struct {
 // Build constructs the DAG from nodes and their dependsOn edges.
 // Edges to refs absent from nodes are auto-registered as external nodes
 // (retrievable via Unknown()); the caller decides their semantics.
-// Build never fails: cycles are reported, not errors (DESIGN §3.2).
+// Build never fails: cycles are reported, not errors.
 func Build(nodes map[adapter.NodeRef][]adapter.NodeRef) *Graph {
 	edges := make(map[adapter.NodeRef][]adapter.NodeRef, len(nodes))
 	for ref, deps := range nodes {

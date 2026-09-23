@@ -178,7 +178,7 @@ var _ = BeforeSuite(func() {
 	lister = newFakeLister()
 	// One strategy instance, shared by the poller and reconciler exactly as
 	// main wires it: the two halves of one selection policy must never
-	// diverge (finding 10).
+	// diverge.
 	strategy := selection.TrackRef()
 	// Non-caching reader, exactly as main wires it: the poller must never
 	// start a cluster-wide Secret informer.

@@ -28,7 +28,7 @@ import (
 
 // missingState is what a dependsOn target with no node of its own is: a gate
 // the graph waits on and the cluster does not have. It layers at wave 0
-// because that is how it behaves — an unsatisfiable wave-0 blocker (plan B3).
+// because that is how it behaves — an unsatisfiable wave-0 blocker.
 const missingState = "MissingGate"
 
 // gateRole labels a dependency target the snapshot has no reading for.
@@ -109,8 +109,7 @@ func (m *graphModel) inCycle(ref adapter.NodeRef) bool {
 	return m.waves[ref] < 0
 }
 
-// Graph renders the default graph view: dependsOn depth layers, or "waves"
-// (plan B3).
+// Graph renders the default graph view: dependsOn depth layers, or "waves".
 //
 // Every node in a wave can advance concurrently with every other node in it,
 // which is the property the layering exists to show: the frontier is wide,

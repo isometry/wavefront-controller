@@ -31,7 +31,7 @@ import (
 const hopIndent = "  "
 
 // Explain walks a node's attribution chain to its root cause and names the
-// fix (plan B3, DESIGN §3.3).
+// fix.
 //
 // The walk is the engine's own attribution read backwards: each blocked node
 // names its nearest unsettled ancestor — or, for SharedSourceBlocked, the
@@ -105,7 +105,7 @@ func chainLine(node *snapshot.NodeView, o Options) string {
 // hopLabel names what the blocked node is pointing at. SharedSourceBlocked
 // is the one reason that names a sibling rather than an ancestor: a shared
 // source's pin is one commit, so a node can be blocked by a peer it does not
-// depend on at all (DESIGN §3.3, gateSharedSources).
+// depend on at all (the shared-source dedup, gateSharedSources).
 func hopLabel(reason string) string {
 	if engine.BlockedReason(reason) == engine.ReasonSharedSourceBlocked {
 		return "sibling"
@@ -127,7 +127,7 @@ func nextHop(s *snapshot.Snapshot, node *snapshot.NodeView) (*snapshot.NodeView,
 		return nil, ""
 	case engine.ReasonGraphCycle:
 		// Nothing in a cyclic component is admitted and an ancestor walk
-		// inside one would be arbitrary (DESIGN §3.2).
+		// inside one would be arbitrary.
 		return nil, ""
 	}
 
@@ -165,7 +165,8 @@ func rootCauseDetail(s *snapshot.Snapshot, node *snapshot.NodeView) []string {
 	return details
 }
 
-// fixPath names what to do about the root cause, in DESIGN §3.3's own terms.
+// fixPath names what to do about the root cause, in the rolling-admission
+// rules' own terms.
 //
 // The order is the order the reasons actually override each other: a cycle
 // admits nothing regardless of health, a hold is never advanced regardless
@@ -183,8 +184,8 @@ func fixPath(s *snapshot.Snapshot, node *snapshot.NodeView) string {
 
 	switch {
 	case node.Blocked != nil && engine.BlockedReason(node.Blocked.Reason) == engine.ReasonGraphCycle:
-		return "break the dependsOn cycle. Nothing in a cyclic component is ever admitted " +
-			"(DESIGN §3.2); `wfctl graph` names the cycle."
+		return "break the dependsOn cycle. Nothing in a cyclic component is ever admitted; " +
+			"`wfctl graph` names the cycle."
 
 	case held && hold != nil && hold.Kind == wavefrontv1alpha1.HoldReasonSuspend:
 		return fmt.Sprintf(
@@ -198,7 +199,7 @@ func fixPath(s *snapshot.Snapshot, node *snapshot.NodeView) string {
 
 	case engine.State(node.State) == engine.StateUnhealthy:
 		return fmt.Sprintf(
-			"fix %s and push to its tracking ref. A fix is not a special case (DESIGN §3.3): "+
+			"fix %s and push to its tracking ref. A fix is not a special case: "+
 				"it is that node's next admission and sits at the front of its own subtree, "+
 				"so its descendants unblock as it converges.",
 			nodeName(node.Ref))

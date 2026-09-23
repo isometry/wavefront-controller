@@ -14,11 +14,11 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package gitpoll implements ref-advertisement polling (DESIGN §3.1, D5): the
-// stateless, checkout-free protocol read that is both the controller's change
-// detection and the sole source of pin values. Credentials are parsed with the
-// very function source-controller uses, making §3.1's "credentials identical
-// by construction" literal rather than conventional (DESIGN §7.1).
+// Package gitpoll implements ref-advertisement polling: the stateless,
+// checkout-free protocol read that is both the controller's change detection
+// and the sole source of pin values. Credentials are parsed with the very
+// function source-controller uses, making "credentials identical by
+// construction" literal rather than conventional.
 package gitpoll
 
 import (
@@ -34,7 +34,7 @@ import (
 )
 
 // AuthFromSecret builds a go-git transport auth method from a GitRepository's
-// secret, using the same parser as source-controller (DESIGN §7.1).
+// secret, using the same parser as source-controller.
 // data may be nil (anonymous HTTP).
 func AuthFromSecret(repoURL string, data map[string][]byte) (transport.AuthMethod, error) {
 	u, err := url.Parse(repoURL)
@@ -51,10 +51,10 @@ func AuthFromSecret(repoURL string, data map[string][]byte) (transport.AuthMetho
 }
 
 // transportAuth converts AuthOptions to a go-git transport.AuthMethod. It
-// mirrors the gogit client's unexported transportAuth (DESIGN §7.2) with one
-// deliberate omission: there is no fallback to the machine's default SSH
-// known_hosts. The controller authenticates only with what a GitRepository's
-// secret carries, and touches no disk (§3.1.1).
+// mirrors the gogit client's own unexported transportAuth — which is not
+// importable — with one deliberate omission: there is no fallback to the
+// machine's default SSH known_hosts. The controller authenticates only with
+// what a GitRepository's secret carries, and touches no disk.
 func transportAuth(opts *git.AuthOptions) (transport.AuthMethod, error) {
 	if opts == nil {
 		return nil, nil
@@ -100,7 +100,8 @@ func transportAuth(opts *git.AuthOptions) (transport.AuthMethod, error) {
 // sshPublicKeys wraps go-git's PublicKeys to apply the host key material
 // parsed from a secret's known_hosts, plus the SSH algorithm overrides
 // fluxcd/pkg/git exposes. It is the in-controller equivalent of the gogit
-// client's CustomPublicKeys, whose fields are unexported (DESIGN §7.2).
+// client's CustomPublicKeys, whose fields are unexported and therefore not
+// reusable directly.
 type sshPublicKeys struct {
 	*gitssh.PublicKeys
 	callback     gossh.HostKeyCallback

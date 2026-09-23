@@ -26,10 +26,10 @@ import (
 	"github.com/isometry/wavefront-controller/internal/wfctl/snapshot"
 )
 
-// History renders one row per event (plan B3, `history`).
+// History renders one row per event, for `wfctl history`.
 //
 // TIME is how long ago the event last occurred — kubectl's own "LAST SEEN"
-// convention, collapsed to the one column B3 specifies — anchored on
+// convention, collapsed to a single column — anchored on
 // snapshot.EventTime, which already resolves eventTime, the series'
 // last-observed heartbeat, or the deprecated firstTimestamp in that order.
 // COUNT is the series' occurrence count, the recorder's own way of

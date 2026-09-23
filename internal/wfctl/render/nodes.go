@@ -28,7 +28,7 @@ import (
 // sits before wave 0.
 const cycleWave = "cycle"
 
-// Nodes renders one row per evaluated node (plan B3).
+// Nodes renders one row per evaluated node.
 //
 // The row is the fleet's per-node truth in the order an operator asks for
 // it: what it is, what state it reached, and — when it did not reach

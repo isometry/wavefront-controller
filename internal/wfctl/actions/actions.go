@@ -14,8 +14,8 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package actions implements wfctl's write commands (plan B4): the seven
-// operations that change a fleet, and nothing else.
+// Package actions implements wfctl's write commands: the seven operations
+// that change a fleet, and nothing else.
 //
 // Every action is two-phase. Plan reads the cluster and returns what the write
 // would do — the object, the fields, the field manager, the before/after
@@ -28,10 +28,10 @@ limitations under the License.
 // a write nobody would perform.
 //
 // The writes themselves are chosen for what they leave behind in managedFields,
-// because managedFields is what the controller reads (DESIGN §3.5.3): a hand-pin
-// is an SSA apply under the wfctl field manager precisely so pin.Hold sees it,
-// and a Wavefront spec change is a merge patch precisely so a GitOps applier
-// keeps owning the spec.
+// because managedFields is what the controller reads to detect a hold: a
+// hand-pin is an SSA apply under the wfctl field manager precisely so
+// pin.Hold sees it, and a Wavefront spec change is a merge patch precisely so
+// a GitOps applier keeps owning the spec.
 package actions
 
 import (
@@ -173,7 +173,7 @@ func describeOwners(owners []pin.Owner) string {
 }
 
 // holdOf reports the source-scoped hold the controller would see: a foreign
-// owner of spec.ref.commit, or the source's own suspension (DESIGN §3.5.3).
+// owner of spec.ref.commit, or the source's own suspension.
 func holdOf(repo *sourcev1.GitRepository) (string, bool) {
 	if manager, held := pin.Hold(repo); held {
 		return fmt.Sprintf("spec.ref.commit is held by field manager %q", manager), true
@@ -192,7 +192,7 @@ func holdOf(repo *sourcev1.GitRepository) (string, bool) {
 // only where a command's contract says it must.
 type Advertisement struct {
 	// Lister lists advertised refs; nil means the production go-git lister,
-	// which fetches no objects and touches no disk (DESIGN §3.1.1).
+	// which fetches no objects and touches no disk.
 	Lister gitpoll.Lister
 	// Strategy maps the source's ref spec to a tracking ref and picks the
 	// candidate; nil means the v1 default, TrackRef. It must be the strategy

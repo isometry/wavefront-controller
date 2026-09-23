@@ -29,7 +29,8 @@ import (
 // ParseNodeRef parses a node reference as typed on the command line:
 // "ns/name", where the kind defaults to Kustomization, or the explicit
 // "Kind/ns/name" (decision "Conventions"). The kind is spelled out from day
-// one so a future HelmRelease plane needs no new syntax (DESIGN D12).
+// one so that a future HelmRelease graph, reserved but not built in v1, needs
+// no new syntax.
 //
 // The kind is matched case-insensitively and returned in its canonical
 // spelling, so "kustomization/apps/web" and "Kustomization/apps/web" name the

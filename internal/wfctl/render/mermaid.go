@@ -27,7 +27,7 @@ import (
 	"github.com/isometry/wavefront-controller/internal/wfctl/snapshot"
 )
 
-// Mermaid stroke colours, matching the DOT palette (plan B3). Hex because
+// Mermaid stroke colours, matching the DOT palette. Hex because
 // Mermaid styles are CSS.
 const (
 	mmdSettled    = "#2e7d32"
@@ -45,8 +45,7 @@ const (
 	mmdNormWide  = "1px"
 )
 
-// Mermaid writes the graph as Mermaid flowchart source (plan B3,
-// `-o mermaid`).
+// Mermaid writes the graph as Mermaid flowchart source, for `-o mermaid`.
 //
 // The encoding is the DOT one restated for a renderer that lives in a pull
 // request or a runbook: colour is state, a hexagon is a gate, a dashed

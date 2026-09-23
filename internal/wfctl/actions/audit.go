@@ -29,7 +29,7 @@ import (
 	wavefrontv1alpha1 "github.com/isometry/wavefront-controller/api/v1alpha1"
 )
 
-// Audit reasons, one per write command (plan B4). They share the vocabulary of
+// Audit reasons, one per write command. They share the vocabulary of
 // the controller's own events so that `wfctl history` reads as one stream: the
 // controller says what it did, wfctl says what a human did.
 const (
@@ -47,7 +47,7 @@ const (
 	// reader can tell an operator's write from the controller's own.
 	auditController = "wfctl"
 	// auditNamespace is where events about a cluster-scoped object land: the
-	// same place the controller's own Wavefront events do (DESIGN §4.2).
+	// same place the controller's own Wavefront events do.
 	auditNamespace = "default"
 	// noteLimit is the apiserver's own cap on an event note.
 	noteLimit = 1024
@@ -81,14 +81,14 @@ func truncate(note string) string {
 
 // Audit records one completed write as an event on the Wavefront.
 //
-// Best-effort by contract (plan B4): an operator whose RBAC covers patching a
+// Best-effort by contract: an operator whose RBAC covers patching a
 // GitRepository but not creating events has still performed the write, and
 // failing the command afterwards would report a lie. The caller turns the
 // error into a warning; nothing here decides that.
 //
-// Events are at-least-once and expire with the apiserver's --event-ttl
-// (DESIGN §4.2) — this is a convenience trail, not the durable ledger. The
-// durable record of a pin change is the provenance annotations.
+// Events are at-least-once and expire with the apiserver's --event-ttl —
+// this is a convenience trail, not the durable ledger. The durable record of
+// a pin change is the provenance annotations.
 func Audit(
 	ctx context.Context,
 	c client.Client,

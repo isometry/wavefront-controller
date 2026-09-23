@@ -39,9 +39,9 @@ import (
 // record that a human, not the graph, let this through.
 //
 // Writing the pin is the whole point, and is why "just unpin it" is not the
-// same thing: an unpinned source is initial-pinned to its *artifact* SHA
-// (DESIGN §3.5.4), which during an incident is usually the stale revision the
-// operator is trying to get past.
+// same thing: an unpinned source is pinned on discovery to its *artifact* SHA,
+// which during an incident is usually the stale revision the operator is
+// trying to get past.
 type ForceAdmit struct {
 	Client client.Client
 	Source types.NamespacedName

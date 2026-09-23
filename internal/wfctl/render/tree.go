@@ -37,7 +37,7 @@ const (
 	missingMark = " (missing)"
 )
 
-// Tree renders the graph as rooted trees (plan B3, `graph --tree`).
+// Tree renders the graph as rooted trees, for `wfctl graph --tree`.
 //
 // Roots are wave 0 — the nodes nothing gates — and each is expanded depth
 // first. The DAG is not a tree, so a node with several parents is expanded

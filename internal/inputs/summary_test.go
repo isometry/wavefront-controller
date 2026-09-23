@@ -86,8 +86,8 @@ func mixedFleet(pendingSince time.Time) *Result {
 }
 
 // members below is the whole derived picture status.members carries, so a
-// reader needs no second pass over the cluster to explain a fleet
-// (DESIGN §4.1). One case per node shape.
+// reader needs no second pass over the cluster to explain a fleet.
+// One case per node shape.
 
 func mixedMembers(t *testing.T, pendingSince time.Time) []wavefrontv1alpha1.Member {
 	t.Helper()
@@ -226,8 +226,8 @@ func TestSummariseCountsPhaseAndLists(t *testing.T) {
 }
 
 // TestSummariseCapsMembers: status must stay a bounded object however large the
-// fleet grows, so the tail is dropped and counted rather than published
-// (DESIGN §4.1). The counts, not the list, stay authoritative.
+// fleet grows, so the tail is dropped and counted rather than published.
+// The counts, not the list, stay authoritative.
 func TestSummariseCapsMembers(t *testing.T) {
 	const overflow = 3
 

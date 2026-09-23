@@ -47,7 +47,7 @@ import (
 // Observations are opt-in. Without Poll (or an injected Observations map) the
 // evaluation runs with no observed SHAs at all, which is honest but blind:
 // nothing can be pending, so the snapshot says Observed=false and every
-// renderer marks the observed columns unknown rather than empty (plan B3).
+// renderer marks the observed columns unknown rather than empty.
 type DeriveSource struct {
 	Reader    client.Reader
 	Wavefront string
@@ -316,8 +316,8 @@ func admissionViews(admissions []engine.Admission) []AdmissionView {
 
 // structuralDiagnostics reports what the pass discovered about the
 // configuration itself: a selector overlap suppresses admissions fleet-wide,
-// and a source whose ref style v1 cannot sequence is silently demoted to a
-// gate unless someone says so (DESIGN D10).
+// and a source whose ref style v1 cannot sequence (anything beyond a tracked
+// branch or tag name) is silently demoted to a gate unless someone says so.
 func structuralDiagnostics(res *inputs.Result) []string {
 	var diags []string
 	if res.Overlap != "" {

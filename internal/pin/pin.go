@@ -14,15 +14,15 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package pin implements the pin mechanism (DESIGN §3.5): advancing a
+// Package pin implements the pin mechanism: advancing a
 // GitRepository's spec.ref.commit to an admitted SHA under the controller's
 // own field manager, and detecting hand-pins made by anyone else.
 //
 // The mechanism rests entirely on server-side apply co-ownership. The catalog
-// renders the tracking ref (spec.ref.name) and omits spec.ref.commit (§3.5.1),
+// renders the tracking ref (spec.ref.name) and omits spec.ref.commit,
 // so the controller can own the commit field alone without ever contending
 // with kustomize-controller. A commit owned by a third field manager is a
-// human override (§3.5.3): it is reported and never forced past — which is
+// human override: it is reported and never forced past — which is
 // why nothing here ever passes client.ForceOwnership.
 package pin
 
@@ -46,13 +46,13 @@ const (
 	// spec.ref.commit and its provenance annotations.
 	FieldManager = "wavefront-controller"
 
-	// ManagedLabel is the participation label (DESIGN §8.2). The controller
+	// ManagedLabel is the participation label. The controller
 	// only ever reads it: labels are the catalog's to write.
 	ManagedLabel = "wavefront.as-code.io/managed"
 
 	// AnnotAdmittedAt records when the pin was advanced, in RFC3339 UTC.
 	AnnotAdmittedAt = "wavefront.as-code.io/admitted-at"
-	// AnnotPreviousPin records the outgoing pin, enabling rollback (§3.7).
+	// AnnotPreviousPin records the outgoing pin, enabling rollback.
 	// It is set to the empty string on an initial pin so that the applied
 	// field set stays stable across advances.
 	AnnotPreviousPin = "wavefront.as-code.io/previous-pin"
@@ -60,7 +60,7 @@ const (
 	AnnotObservedRef = "wavefront.as-code.io/observed-ref"
 
 	// WfctlFieldManager is the SSA field manager wfctl uses for hand-pins, so
-	// the controller reports them as external holds (DESIGN §3.5.3).
+	// the controller reports them as external holds.
 	WfctlFieldManager = "wfctl"
 
 	// AnnotDisplacedPin records, on a wfctl hand-pin, the spec.ref.commit value
@@ -69,7 +69,7 @@ const (
 )
 
 // ErrHeld is returned when the SSA patch conflicts with a foreign field
-// manager — i.e. a human hand-pin. Never force past it (DESIGN §3.5.3).
+// manager — i.e. a human hand-pin. Never force past it.
 var ErrHeld = errors.New("spec.ref.commit is held by another field manager")
 
 // commitPath is the field-set path of the pin itself. In an entry's
@@ -113,8 +113,8 @@ func Owners(repo *sourcev1.GitRepository) []Owner {
 
 // Hold inspects managedFields and reports a foreign owner of spec.ref.commit.
 //
-// Ownership by anyone other than FieldManager means the pin was set by hand
-// (DESIGN §3.5.3): the node is held, and the controller must report it rather
+// Ownership by anyone other than FieldManager means the pin was set by hand:
+// the node is held, and the controller must report it rather
 // than advance it. The first foreign owner encountered wins; entries for
 // subresources (status) cannot own spec and are skipped.
 func Hold(repo *sourcev1.GitRepository) (manager string, held bool) {

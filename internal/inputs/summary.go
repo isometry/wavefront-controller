@@ -32,19 +32,24 @@ import (
 // Summary is the whole publishable picture of one resolved pass: everything
 // status carries, plus the uncapped by-reason tallies a caller may want for
 // gauges. Deriving it here rather than in the reconciler is what lets the CLI
-// re-derive byte-identical numbers from the same Result (DESIGN D9).
+// re-derive byte-identical numbers from the same Result: summarisation is a
+// pure function of the already-resolved evaluation, with no hidden state of
+// its own to diverge from a live pass.
 type Summary struct {
 	Counts wavefrontv1alpha1.NodeCounts
 	Phase  wavefrontv1alpha1.Phase
 	// Blocked and Held are the capped status lists; Held is exactly
-	// HeldSources(res), the ledger a caller both writes and edge-triggers
-	// against (decision D-C).
+	// HeldSources(res): the same capped, source-sorted list that both becomes
+	// status.held and is diffed pass-to-pass to edge-trigger the
+	// HoldDetected/HoldReleased events, rather than an unbounded internal
+	// ledger.
 	Blocked []wavefrontv1alpha1.BlockedNode
 	Held    []wavefrontv1alpha1.HeldNode
 	// Members is every evaluated node's derived state, sorted by
 	// kind/namespace/name and capped at MembersCap; MembersOmitted counts the
 	// remainder. Write-only output: nothing here or in the reconciler ever
-	// reads it back (DESIGN D9).
+	// reads it back — admissibility is re-derived from live cluster state on
+	// every pass, never from a previous status write.
 	Members        []wavefrontv1alpha1.Member
 	MembersOmitted int
 	// BlockedByReason is uncapped, unlike Blocked: a gauge must count every
@@ -97,8 +102,9 @@ func Summarise(res *Result, now time.Time) Summary {
 		blocked = append(blocked, blockedNode(ref, result, now))
 	}
 	// Holds covers both hand-pins and suspends, matching the engine's own
-	// NodeResult.Held semantics (finding 7) rather than undercounting
-	// suspended sources.
+	// NodeResult.Held semantics — which treats a suspended source as held
+	// too — rather than undercounting suspended sources by counting only
+	// field-manager hand-pins.
 	counts.Held = len(res.Holds)
 
 	slices.SortFunc(blocked, func(a, b wavefrontv1alpha1.BlockedNode) int {
@@ -115,7 +121,7 @@ func Summarise(res *Result, now time.Time) Summary {
 
 // members renders every evaluated node — pinned and gate alike — as one
 // status entry, so that status alone is enough to explain a fleet without
-// re-reading the cluster (DESIGN §4.1). Beyond MembersCap the tail is dropped
+// re-reading the cluster. Beyond MembersCap the tail is dropped
 // and counted: the counts, not the list, stay authoritative.
 func members(res *Result) ([]wavefrontv1alpha1.Member, int) {
 	refs := slices.SortedFunc(maps.Keys(res.Eval.Nodes), compareRefs)
@@ -138,7 +144,7 @@ func members(res *Result) ([]wavefrontv1alpha1.Member, int) {
 
 // member renders one node. A gate carries no source, pin or observation:
 // those are properties of a managed GitRepository, which by definition a gate
-// has none of (DESIGN §3.2).
+// has none of.
 func member(res *Result, ref adapter.NodeRef, result engine.NodeResult) wavefrontv1alpha1.Member {
 	input := res.Inputs[ref]
 
@@ -181,7 +187,8 @@ func member(res *Result, ref adapter.NodeRef, result engine.NodeResult) wavefron
 	return entry
 }
 
-// phaseOf summarises the fleet (DESIGN §4.1).
+// phaseOf derives status.phase — Quiescent, Advancing, or Blocked — from the
+// node counts and whether anything blocking is stalling the fleet.
 func phaseOf(counts wavefrontv1alpha1.NodeCounts, admissions int, stalled bool) wavefrontv1alpha1.Phase {
 	switch {
 	case stalled:

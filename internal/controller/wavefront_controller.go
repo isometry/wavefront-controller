@@ -17,7 +17,7 @@ limitations under the License.
 // Package controller hosts the Wavefront reconciler: the control loop that
 // wires detection (internal/gitpoll), discovery (internal/adapter), topology
 // (internal/graph), the rolling-admission core (internal/engine) and the pin
-// mechanism (internal/pin) into one stateless pass (DESIGN §3, §4).
+// mechanism (internal/pin) into one stateless pass.
 package controller
 
 import (
@@ -58,7 +58,8 @@ import (
 	"github.com/isometry/wavefront-controller/internal/selection"
 )
 
-// Event reasons (DESIGN §4.2).
+// Event reasons recorded on provenance events (pin advances, holds, shadow
+// admissions).
 const (
 	reasonInitialPin          = "InitialPin"
 	reasonPinAdvanced         = "PinAdvanced"
@@ -89,7 +90,7 @@ const (
 	actionDemote    = "Demote"
 )
 
-// wavefront_admissions_total result labels (DESIGN §6).
+// wavefront_admissions_total result labels.
 const (
 	resultAdmitted = "admitted"
 	resultInitial  = "initial"
@@ -105,14 +106,13 @@ const unknownManager = "unknown"
 //
 // Every pass is a full recalculation: discovery, source resolution, graph
 // derivation and admissibility are all derived from live cluster state plus
-// the poller's observations, never from stored orchestration state
-// (DESIGN D9). The only state status carries forward is edge-trigger
-// ledgers, each diffed against the exact capped, sorted mirror it itself
-// holds (decision D-C): the hold ledger (status.Held, against the pass's
-// derived holds) and the shadow-admission ledger (status.Shadow, against
-// this pass's admissions, decision D-H), never against the unbounded
-// live-derived set, so a restart replays at most StatusListCap detections
-// rather than an unbounded backlog.
+// the poller's observations, never from stored orchestration state. The only
+// state status carries forward is edge-trigger ledgers, each diffed against
+// the exact capped, sorted mirror it itself holds: the hold ledger
+// (status.Held, against the pass's derived holds) and the shadow-admission
+// ledger (status.Shadow, against this pass's admissions), never against the
+// unbounded live-derived set, so a restart replays at most StatusListCap
+// detections rather than an unbounded backlog.
 type WavefrontReconciler struct {
 	client.Client
 	Scheme    *runtime.Scheme
@@ -168,7 +168,7 @@ func (p *pass) resolved() bool {
 // controller's action was taken against, related is the secondary object the
 // action concerns (e.g. the GitRepository a Wavefront-regarding event is
 // about), eventtype is Normal/Warning, reason is the short UpperCamelCase
-// outcome (DESIGN §4.2), and action is the short UpperCamelCase verb for
+// outcome, and action is the short UpperCamelCase verb for
 // what was done or attempted (the action* consts above).
 //
 // The events.k8s.io/v1 recorder decides whether two events are "the same"
@@ -202,7 +202,7 @@ func sourceObject(p *pass, src types.NamespacedName) runtime.Object {
 // it derives.
 //
 // There is no finalizer by design: deleting a Wavefront releases the fleet
-// from management and leaves every pin exactly where it stands (DESIGN D8).
+// from management and leaves every pin exactly where it stands.
 func (r *WavefrontReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	wf := &wavefrontv1alpha1.Wavefront{}
 	if err := r.Get(ctx, req.NamespacedName, wf); err != nil {
@@ -247,7 +247,7 @@ func (r *WavefrontReconciler) evaluate(ctx context.Context, p *pass) error {
 	// One coherent snapshot for the whole pass, taken before updatePollSet's
 	// SetTargets prunes anything: every node is evaluated against the same
 	// sweep, which is what makes co-arrival ordering structural rather than a
-	// race the pass usually wins (DESIGN §3.3).
+	// race the pass usually wins.
 	res, err := inputs.Build(ctx, r.Client, inputs.Params{
 		Wavefront:    p.wf,
 		Adapter:      r.Adapter,
@@ -272,9 +272,10 @@ func (r *WavefrontReconciler) evaluate(ctx context.Context, p *pass) error {
 	return nil
 }
 
-// updatePollSet implements step 5. The Poller is shared fleet-wide, so this
-// Wavefront's contribution is merged with every other live Wavefront's and the
-// sets of deleted Wavefronts are dropped.
+// updatePollSet folds this Wavefront's poll targets into the shared,
+// fleet-wide Poller: this Wavefront's contribution is merged with every
+// other live Wavefront's, and the contributions of deleted Wavefronts are
+// dropped.
 func (r *WavefrontReconciler) updatePollSet(
 	wf *wavefrontv1alpha1.Wavefront,
 	targets []gitpoll.Target,
@@ -357,40 +358,38 @@ func unionOf(sets map[string]pollSet) []gitpoll.Target {
 	})
 }
 
-// execute implements step 7: initial pins first, then ancestor-gated
-// admissions, in the engine's deterministic order. No per-source dedup is
-// needed here: the engine emits at most one admission per Source across
-// Admissions and Initial combined (WP2, gateSharedSources).
+// execute applies initial pins first, then ancestor-gated admissions, in the
+// engine's deterministic order. No per-source dedup is needed here: the
+// engine emits at most one admission per Source across Admissions and
+// Initial combined — gateSharedSources already dedupes sources shared by
+// more than one selected node upstream of this call.
 func (r *WavefrontReconciler) execute(ctx context.Context, p *pass) error {
 	admissions := slices.Concat(p.res.Eval.Initial, p.res.Eval.Admissions)
 
-	// item 5: the old len(admissions)==0 shortcut ran before skipAdmissions,
-	// Suspend and the mode switch alike, so it would also have skipped an
-	// Enforce-mode ledger clear on a pass with nothing to admit. Both
-	// status.Shadow writes below are therefore unconditioned on admissions
-	// being non-empty and live inside their own branch instead: Shadow's
-	// shadowAdmissions call recomputes (and, on an empty pass, shrinks) the
-	// ledger from this pass's admissions like every other full recomputation
-	// in this reconciler (DESIGN D9); Enforce's clear fires on the mode
-	// switch itself, admissions or not. skipAdmissions and Suspend, below,
-	// return before either branch, leaving the ledger exactly as they found
-	// it (DESIGN §4.1).
+	// Both status.Shadow writes below run whether or not admissions is empty,
+	// each in its own branch rather than behind a shared "nothing to admit"
+	// shortcut: Shadow's shadowAdmissions call recomputes (and, on an empty
+	// pass, shrinks) the ledger from this pass's admissions, exactly like
+	// every other full recomputation in this reconciler; Enforce's clear
+	// fires on the mode switch itself, admissions or not. skipAdmissions and
+	// Suspend, below, return before either branch, leaving the ledger exactly
+	// as they found it.
 	switch {
 	case p.res.SkipAdmissions():
 		return nil
 	case p.wf.Spec.Suspend:
 		// The gentle fleet-level brake: writes freeze, visibility persists
-		// and no Flux resource is touched (DESIGN §4.1).
+		// and no Flux resource is touched.
 		return nil
 	case p.wf.Spec.Mode != wavefrontv1alpha1.ModeEnforce:
-		// Shadow suppresses every write, initial pins included (DESIGN §3.5.4).
+		// Shadow suppresses every write, initial pins included.
 		r.shadowAdmissions(p, admissions)
 		return nil
 	}
 
-	// Stale shadow entries must not survive a mode flip (DESIGN §3.5.4): a
-	// Wavefront that flips Shadow -> Enforce clears its ledger here, even on
-	// a pass with zero admissions.
+	// Stale shadow entries must not survive a mode flip: a Wavefront that
+	// flips Shadow -> Enforce clears its ledger here, even on a pass with
+	// zero admissions.
 	p.wf.Status.Shadow = nil
 
 	if len(admissions) == 0 {
@@ -406,11 +405,10 @@ func (r *WavefrontReconciler) execute(ctx context.Context, p *pass) error {
 	return errors.Join(errs...)
 }
 
-// shadowAdmissions implements the Shadow branch of execute (finding 9,
-// decision D-H): the engine re-derives the identical would-be admission
-// every reconcile regardless of mode, so the once-only announcement has to
-// be edge-triggered here, against status.Shadow, exactly as holdEvents
-// edge-triggers against status.Held (DESIGN §3.5.4, §4.2, §6).
+// shadowAdmissions implements the Shadow branch of execute: the engine
+// re-derives the identical would-be admission every reconcile regardless of
+// mode, so the once-only announcement has to be edge-triggered here, against
+// status.Shadow, exactly as holdEvents edge-triggers against status.Held.
 //
 // current is computed once — sorted and capped — and used both as the diff's
 // current side and as the value written to status.Shadow, so the ledger
@@ -457,13 +455,13 @@ func (r *WavefrontReconciler) shadowAdmissions(p *pass, admissions []engine.Admi
 
 // advance performs one pin write. A hold is never forced past: it is detected
 // before the write (an SSA apply of a value equal to a hand-pin raises no
-// conflict and would silently co-own it, DESIGN §3.5.3) and re-detected from
-// any conflict the apply does raise.
+// conflict and would silently co-own it) and re-detected from any conflict
+// the apply does raise.
 func (r *WavefrontReconciler) advance(ctx context.Context, p *pass, admission engine.Admission) error {
-	// Defense-in-depth: the engine no longer emits admissions for a held or
-	// suspended source at all (finding 7), so this lookup should never match
-	// in practice. It stays as the controller's own backstop against that
-	// invariant.
+	// Defense-in-depth: the engine already filters held and suspended
+	// sources out of the admissions it produces, so this lookup should never
+	// match in practice. It stays as the controller's own backstop against
+	// that invariant.
 	if _, held := p.res.Holds[admission.Source]; held {
 		return nil
 	}
@@ -498,9 +496,10 @@ func (r *WavefrontReconciler) holderOf(ctx context.Context, src types.Namespaced
 }
 
 // pinEvent records a successful advance on the GitRepository (where the
-// provenance lives) and mirrors it on the Wavefront (DESIGN §4.2), and
-// updates the admissions counter and the observed→admitted wait histogram
-// (DESIGN §6, D13).
+// provenance lives) and mirrors it on the Wavefront, and updates the
+// admissions counter and the observed→admitted wait histogram — the signal
+// that would show whether a never-quiescent ancestor is starving its
+// descendants.
 //
 // The two copies are mirror images: the GitRepository-regarding copy names
 // the Wavefront as related (so `kubectl describe gitrepository` and Flux
@@ -532,7 +531,7 @@ func (r *WavefrontReconciler) pinEvent(p *pass, admission engine.Admission) {
 // presence) in sorted key order, so that a caller's onNew/onGone fire in a
 // deterministic sequence: onNew for every key added or changed, onGone for
 // every key removed or changed. A key whose value is unchanged fires
-// neither. Shared with the shadow-admission ledger (WP5).
+// neither. Shared with the shadow-admission ledger.
 func diffLedger[V comparable](previous, current map[string]V, onNew, onGone func(key string, v V)) {
 	for _, key := range slices.Sorted(maps.Keys(current)) {
 		if was, ok := previous[key]; !ok || was != current[key] {
@@ -546,16 +545,16 @@ func diffLedger[V comparable](previous, current map[string]V, onNew, onGone func
 	}
 }
 
-// holdEvents implements step 8: status.held from the previous pass is the
-// ledger the hold transitions are edge-triggered against, which keeps the
+// holdEvents diffs status.held from the previous pass against this pass's
+// held set to fire the HoldDetected/HoldReleased transitions, keeping the
 // evaluation itself stateless.
 //
-// Events mirror the capped ledger (decision D-C), not the unbounded derived
-// hold set: current is built by inputs.HeldSources, the exact same capped,
+// Events mirror the capped ledger, not the unbounded derived hold set:
+// current is built by inputs.HeldSources, the exact same capped,
 // source-sorted list summariseNodes writes to status.Held. Beyond
-// StatusListCap a hold is counted (status.Nodes.Held, DESIGN §4.1) but not
-// individually announced until a released slot promotes it into the cap —
-// late but exactly once, never on every reconcile.
+// StatusListCap a hold is counted (status.Nodes.Held) but not individually
+// announced until a released slot promotes it into the cap — late but
+// exactly once, never on every reconcile.
 func (r *WavefrontReconciler) holdEvents(p *pass) {
 	if !p.resolved() {
 		// An aborted pass proves nothing about holds; claiming release would
@@ -565,9 +564,9 @@ func (r *WavefrontReconciler) holdEvents(p *pass) {
 
 	previous := make(map[string]inputs.Hold, len(p.wf.Status.Held))
 	for _, held := range p.wf.Status.Held {
-		// An empty Reason is status written by a pre-upgrade controller
-		// (field-manager holds only, R9): treat it as HandPin rather than
-		// as a spurious kind change against an unchanged hold.
+		// An empty Reason is status written by a pre-upgrade controller that
+		// only ever recorded field-manager holds: treat it as HandPin rather
+		// than as a spurious kind change against an unchanged hold.
 		kind := inputs.HoldKind(held.Reason)
 		if kind == "" {
 			kind = inputs.HoldHandPin
@@ -625,8 +624,8 @@ func holdSource(key string) types.NamespacedName {
 	return types.NamespacedName{Namespace: ns, Name: name}
 }
 
-// summarise implements step 9: fleet counts, capped exceptional-state lists,
-// phase and conditions.
+// summarise publishes fleet counts, capped exceptional-state lists, phase and
+// conditions.
 //
 // An aborted pass republishes conditions only. Overwriting the counts and
 // lists with the zero values a failed pass derived would not merely be
@@ -636,7 +635,7 @@ func holdSource(key string) types.NamespacedName {
 // HoldDetected for every still-held source on the next good pass. The last
 // known-good picture stands until a pass can prove a new one. Its gauges,
 // unlike status, are live measurements rather than a last-known-good record:
-// they are retired instead, per findings #7/#8 (see summariseNodes).
+// they are retired instead (see summariseNodes for why).
 func (r *WavefrontReconciler) summarise(p *pass, passErr error) {
 	if p.resolved() {
 		r.summariseNodes(p)
@@ -644,7 +643,8 @@ func (r *WavefrontReconciler) summarise(p *pass, passErr error) {
 	} else {
 		// An aborted pass can prove nothing about the fleet: its gauges are
 		// live measurements, so they go absent rather than freezing at a
-		// stale-but-plausible value the D4 alarm would read as healthy.
+		// stale-but-plausible value the pin-staleness alarm would read as
+		// healthy.
 		// Status below keeps the last known-good picture, as documented.
 		r.Metrics.Wavefront(p.wf.Name).Retire()
 	}
@@ -686,13 +686,13 @@ func (r *WavefrontReconciler) summarise(p *pass, passErr error) {
 
 // stampEvaluated advances status.lastEvaluated at most once per poll interval.
 //
-// Every pass re-derives the same picture (DESIGN D9), so a per-pass timestamp
-// would rewrite status — and wake every watcher of it — on every
-// watch-triggered reconcile while nothing about the fleet had changed. The
-// interval the user asked to be polled at is exactly the freshness they asked
-// for, so it bounds the rewrite rate too. It is written for readers (a CLI
-// judging whether status is stale, DESIGN §4.1); the reconciler never reads it
-// back for a decision of its own.
+// Every pass re-derives the same picture, so a per-pass timestamp would
+// rewrite status — and wake every watcher of it — on every watch-triggered
+// reconcile while nothing about the fleet had changed. The interval the user
+// asked to be polled at is exactly the freshness they asked for, so it
+// bounds the rewrite rate too. It is written for readers (a CLI judging
+// whether status is stale); the reconciler never reads it back for a
+// decision of its own.
 func (r *WavefrontReconciler) stampEvaluated(wf *wavefrontv1alpha1.Wavefront) {
 	now := r.Clock()
 	if last := wf.Status.LastEvaluated; last != nil && now.Sub(last.Time) < pollInterval(wf) {
@@ -705,23 +705,23 @@ func (r *WavefrontReconciler) stampEvaluated(wf *wavefrontv1alpha1.Wavefront) {
 // summariseNodes publishes one resolved pass: the derived counts, lists,
 // members and phase (all of them inputs.Summarise's, so a CLI re-deriving
 // from the same reads reports the same numbers), and the pin-lag,
-// blocked-nodes and pinned-fetch-failures gauges recomputed wholesale
-// (DESIGN §6): retire this Wavefront's series, then set, so a node that
-// dropped out of the fleet since the last pass does not linger.
+// blocked-nodes and pinned-fetch-failures gauges recomputed wholesale:
+// retire this Wavefront's series, then set, so a node that dropped out of
+// the fleet since the last pass does not linger.
 //
 // The retirement is DeletePartialMatch on this Wavefront's own label, never
 // Reset(): Wavefronts are cluster-scoped and several may be co-resident, and
 // a Reset would erase a *sibling's* pin-lag series until its next pass — and
-// pin staleness is a D4 safety alarm that must not blink out.
+// pin staleness is the safety alarm operators rely on to catch a stuck
+// controller, so it must not blink out.
 //
 // The gauges are published only when the graph verdict is valid: a selector
-// overlap or a dependsOn cycle (findings #7/#8) means this pass's counts are
-// not authoritative for occupancy — the very node driving them may be
-// double-counted against another Wavefront's pass — so publishing them
-// would let the fleet gauges lie even while status.Nodes, below, stays live
-// (overlap is not an abort; the counts are still the best available picture
-// for status, just not for a measurement other Wavefronts' series must not
-// double up on).
+// overlap or a dependsOn cycle means this pass's counts are not authoritative
+// for occupancy — the very node driving them may be double-counted against
+// another Wavefront's pass — so publishing them would let the fleet gauges
+// lie even while status.Nodes, below, stays live (overlap is not an abort;
+// the counts are still the best available picture for status, just not for
+// a measurement other Wavefronts' series must not double up on).
 func (r *WavefrontReconciler) summariseNodes(p *pass) {
 	status := &p.wf.Status
 	scope := r.Metrics.Wavefront(p.wf.Name)

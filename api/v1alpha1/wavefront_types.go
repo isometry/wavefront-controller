@@ -65,7 +65,7 @@ const (
 )
 
 // NodeReference identifies a graph node. Typed {kind, namespace, name} from
-// day one so HelmRelease nodes are a non-breaking addition (DESIGN D12).
+// day one so HelmRelease nodes are a non-breaking addition later.
 type NodeReference struct {
 	// +kubebuilder:validation:Enum=Kustomization
 	Kind      string `json:"kind"`
@@ -155,7 +155,7 @@ type BlockedRef struct {
 
 // Member is one evaluated node's derived state for the last evaluation
 // (selected nodes and the gate nodes reached through dependsOn).
-// Write-only output: the reconciler never reads it back (DESIGN D9).
+// Write-only output: the reconciler never reads it back.
 type Member struct {
 	Node NodeReference `json:"node"`
 	// +kubebuilder:validation:Enum=Pinned;Gate
@@ -207,11 +207,11 @@ type WavefrontStatus struct {
 	LastEvaluated *metav1.Time `json:"lastEvaluated,omitempty"`
 }
 
-// StatusListCap bounds the Blocked and Held status lists (DESIGN §4.1).
+// StatusListCap bounds the Blocked and Held status lists.
 const StatusListCap = 20
 
 // MembersCap bounds status.members; beyond it MembersOmitted counts the
-// rest (DESIGN §4.1).
+// rest.
 const MembersCap = 2000
 
 // +kubebuilder:object:root=true

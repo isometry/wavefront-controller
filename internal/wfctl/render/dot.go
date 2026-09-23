@@ -25,7 +25,7 @@ import (
 	"github.com/isometry/wavefront-controller/internal/wfctl/snapshot"
 )
 
-// Graphviz colours, one per state (plan B3). Named colours rather than hex:
+// Graphviz colours, one per state. Named colours rather than hex:
 // they render identically in every Graphviz build and read as themselves in
 // the source of the diagram.
 const (
@@ -37,13 +37,13 @@ const (
 )
 
 // Graphviz shapes: a gate is a health-only participant with no pin of its
-// own, and the hexagon says so at a glance (DESIGN §3.2).
+// own, and the hexagon says so at a glance.
 const (
 	dotNodeShape = "box"
 	dotGateShape = "hexagon"
 )
 
-// DOT writes the graph as Graphviz source (plan B3, `-o dot`).
+// DOT writes the graph as Graphviz source, for `-o dot`.
 //
 // State is carried by colour, role by shape, and the two exceptional
 // structures — a hold and a cycle — by border treatments, so a rendered

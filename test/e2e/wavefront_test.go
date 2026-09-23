@@ -313,7 +313,8 @@ var _ = Describe("Wavefront fleet", Ordered, func() {
 		fleet := getFleet(Default)
 		entry := blockedEntry(fleet, teamNode)
 		Expect(entry.Reason).To(Equal("AncestorUnhealthy"))
-		// Attribution is the *nearest* unsettled ancestor (DESIGN §3.3 rule 7).
+		// Attribution is the *nearest* unsettled ancestor, found by walking
+		// ancestors breadth-first from the blocked node.
 		// infra is the origin of the breakage, but Flux propagates
 		// DependencyNotReady to wave-gate on its next reconcile, at which
 		// point wave-gate becomes the nearer unsettled ancestor. Both are
@@ -454,7 +455,7 @@ var _ = Describe("Wavefront fleet", Ordered, func() {
 		// see — and on a quiescent fleet that is the whole graph — but they
 		// cannot agree on the *phase*, and it would be wrong to assert that
 		// they do: without --poll a derivation has no ref observations at all,
-		// and DESIGN §3.3 rule 2 makes an unobserved pinned node conservatively
+		// and the engine conservatively treats an unobserved pinned node as
 		// unsettled rather than let it pass for quiescent. --poll is no help
 		// from here either: the fixture sources are addressed by the git
 		// server's in-cluster Service name, which the host running wfctl
@@ -524,9 +525,9 @@ var _ = Describe("Wavefront fleet", Ordered, func() {
 		// survives a restart". So the kill is anchored to a witnessed
 		// mid-rollout state instead — infra pinned at shaI but not yet
 		// settled, which is precisely the window in which the engine may not
-		// admit team-a (DESIGN §3.3 rule 4). Polling starts before the pin is
-		// written, so the window cannot be missed, and minReadySeconds holds
-		// it open for ten seconds — two orders of magnitude more than the
+		// admit team-a. Polling starts before the pin is written, so the
+		// window cannot be missed, and minReadySeconds holds it open for ten
+		// seconds — two orders of magnitude more than the
 		// ~250ms it takes to observe the state and issue the kill.
 		By("waiting for infra to be admitted but not yet settled — the mid-rollout window")
 		Eventually(func(g Gomega) {
@@ -657,7 +658,7 @@ spec:
 }
 
 // pushRevision commits a fresh, valid manifest set and pushes it, returning
-// the new SHA (the brief's pushCommit).
+// the new SHA.
 func pushRevision(repo *utils.Repo) string {
 	GinkgoHelper()
 	revision++
@@ -727,8 +728,8 @@ func readyStatus(g Gomega, name string) string {
 }
 
 // nodeSettled is the suite's read of the engine's settledness rule: Ready at
-// the node's own generation, having applied exactly what its source is pinned
-// to (DESIGN §3.3 rule 1).
+// the node's own generation, having applied exactly what its source is
+// pinned to.
 func nodeSettled(g Gomega, name string) bool {
 	ks := getKustomization(g, name)
 	if ks.Status.ObservedGeneration != ks.Generation || readyStatus(g, name) != "True" {
@@ -746,9 +747,9 @@ func nodeSettled(g Gomega, name string) bool {
 	return applied == repo.Spec.Reference.Commit
 }
 
-// admittedAt reads the admission time the controller stamped on a source
-// (DESIGN §4.2). RFC3339, so second resolution — fine against the ten-second
-// separations the sequencing assertions rely on.
+// admittedAt reads the admission time the controller stamped on a source.
+// RFC3339, so second resolution — fine against the ten-second separations
+// the sequencing assertions rely on.
 func admittedAt(g Gomega, node string) time.Time {
 	repo := getRepo(g, node)
 	at, err := time.Parse(time.RFC3339, repo.Annotations[pin.AnnotAdmittedAt])
@@ -806,7 +807,7 @@ func expectEvent(ns, kind, name, reason, note string) {
 // --- cluster writes --------------------------------------------------------
 
 // handPin writes spec.ref.commit under a foreign field manager: the SSA
-// co-ownership a human `kubectl patch` creates (DESIGN §3.5.3).
+// co-ownership a human `kubectl patch` creates.
 func handPin(sha string) {
 	GinkgoHelper()
 	cmd := exec.Command("kubectl", "patch", "gitrepository", teamNode,
@@ -837,8 +838,10 @@ func setMode(mode wavefrontv1alpha1.Mode) {
 }
 
 // pruneServerHistory expires the rewritten-away objects so the pinned commit
-// is genuinely unreachable — the exposure DESIGN §10 describes. Best effort:
-// the scenario's assertion is self-healing, not the fetch failure itself.
+// is genuinely unreachable — the exposure a force-push creates, where
+// source-controller reports FetchFailed on a pinned commit it can no longer
+// fetch. Best effort: the scenario's assertion is self-healing, not the
+// fetch failure itself.
 func pruneServerHistory(repo string) {
 	script := fmt.Sprintf(
 		"cd /srv/git/%s.git && git reflog expire --expire=now --all && git gc --prune=now --quiet",

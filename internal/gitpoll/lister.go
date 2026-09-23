@@ -23,7 +23,7 @@ import (
 
 	// Imported for its init() side effect alone: it registers the multi_ack
 	// capabilities that protocol-v2-only hosts (Azure DevOps, AWS CodeCommit)
-	// require (DESIGN §7.3).
+	// require.
 	_ "github.com/fluxcd/pkg/git/gogit"
 	gogit "github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/config"
@@ -40,7 +40,7 @@ type Lister interface {
 
 // goGitLister reads ref advertisements with go-git's Remote.List. No git
 // objects are ever fetched and no disk is touched: the remote is backed by an
-// in-memory storer that the advertisement never writes to (DESIGN §3.1.1).
+// in-memory storer that the advertisement never writes to.
 type goGitLister struct {
 	timeout time.Duration
 }

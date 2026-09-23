@@ -56,7 +56,8 @@ const (
 	// field it renders through all of this.
 	catalogManager = "kustomize-controller"
 	// humanManager is `kubectl patch`: a third party, holding the pin through
-	// an Update operation, which is the case plan B4 calls experimental.
+	// an Update operation, the less common of the two ownership paths
+	// `release` has to unpick.
 	humanManager = "kubectl-patch"
 
 	// The literals the specs assert on often enough that the linter, rightly,
@@ -96,7 +97,7 @@ func uniqueName(prefix string) string {
 }
 
 // sourceSpec is the minimal GitRepository spec the catalog renders: the
-// tracking ref and no commit (DESIGN §3.5.1), with mutate applied on top.
+// tracking ref and no commit, with mutate applied on top.
 func sourceSpec(mutate ...func(spec map[string]any)) map[string]any {
 	spec := map[string]any{
 		"url":      repoURL,

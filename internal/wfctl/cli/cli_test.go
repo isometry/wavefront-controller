@@ -145,8 +145,8 @@ func TestExplain(t *testing.T) {
 }
 
 // TestEncodedPayloads pins which slice of the snapshot each command emits
-// under -o json (plan B3): a command that encoded the whole document would
-// look right and be wrong.
+// under -o json: a command that encoded the whole document would look right
+// and be wrong.
 func TestEncodedPayloads(t *testing.T) {
 	nodesJSON, err := run(t, append([]string{cmdNodes, "-o", outputJSON}, from(fxQuiescent)...)...)
 	if err != nil {
@@ -283,8 +283,8 @@ func TestStatusExitsTwoWhenBlocked(t *testing.T) {
 	}
 }
 
-// TestCaptureStampsTheCluster proves the Task-4 carry-over: no provider fills
-// Snapshot.Cluster, so the CLI must, and only for the cluster-backed origins.
+// TestCaptureStampsTheCluster proves that no provider fills Snapshot.Cluster,
+// so the CLI must stamp it itself, and only for the cluster-backed origins.
 //
 // The reader is a fake and the identity is injected, so the test depends on
 // neither an apiserver nor whatever kubeconfig the machine running it happens
@@ -492,7 +492,8 @@ func TestRenderOptionsAlwaysCarryAClock(t *testing.T) {
 	}
 }
 
-// TestColorEnabled covers the three-way rule of plan B1.
+// TestColorEnabled covers the three-way colour rule: interactive terminal,
+// NO_COLOR unset, and --no-color unset.
 func TestColorEnabled(t *testing.T) {
 	tty := func() bool { return true }
 
@@ -566,8 +567,8 @@ func TestHostOnly(t *testing.T) {
 	}
 }
 
-// TestPersistentFlagsAreDeclared pins the flag surface Task 7's writes and
-// Task 8's history will build on: they register commands, never flags.
+// TestPersistentFlagsAreDeclared pins the flag surface the write commands and
+// `history` build on: they register commands, never flags.
 func TestPersistentFlagsAreDeclared(t *testing.T) {
 	root := NewRootCommand(binaryName)
 	for _, name := range []string{

@@ -79,7 +79,7 @@ func eventsReader(events ...eventsv1.Event) client.Reader {
 }
 
 // TestListEventsFiltersByReasonAndWarnings proves the two field-selector
-// filters plan B3 names.
+// filters `wfctl history` supports: by reason and by warnings only.
 func TestListEventsFiltersByReasonAndWarnings(t *testing.T) {
 	now := time.Now()
 	reader := eventsReader(
@@ -226,9 +226,10 @@ func TestEventCountFromSeries(t *testing.T) {
 	}
 }
 
-// TestEventTimeFallback proves the three-way precedence plan B3 specifies:
-// eventTime, then the series' last-observed heartbeat, then the deprecated
-// firstTimestamp a converted core/v1 event carries instead of eventTime.
+// TestEventTimeFallback proves the three-way precedence used to time an
+// event: eventTime, then the series' last-observed heartbeat, then the
+// deprecated firstTimestamp a converted core/v1 event carries instead of
+// eventTime.
 func TestEventTimeFallback(t *testing.T) {
 	at := time.Now().Truncate(time.Second)
 

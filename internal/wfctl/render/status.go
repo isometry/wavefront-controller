@@ -33,7 +33,7 @@ import (
 // out the controller's published picture is not the cluster's.
 const differs = "≠ "
 
-// Status renders the fleet summary (plan B3): the Wavefront itself, the
+// Status renders the fleet summary: the Wavefront itself, the
 // phase and counts, the structural verdict, the exceptional-state lists, and
 // the diagnostics.
 //

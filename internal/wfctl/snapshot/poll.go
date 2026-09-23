@@ -32,7 +32,7 @@ import (
 	"github.com/isometry/wavefront-controller/internal/selection"
 )
 
-// DefaultPollTimeout bounds one ref listing (plan B3, --poll-timeout).
+// DefaultPollTimeout bounds one ref listing (the --poll-timeout default).
 const DefaultPollTimeout = 30 * time.Second
 
 // unknownHost groups targets whose URL yields no host, so they are still
@@ -43,8 +43,9 @@ const unknownHost = "unknown"
 //
 // Polling from a CLI is opt-in because it costs credentials: it reads each
 // source's Secret and speaks to every git host in the fleet from wherever the
-// operator is sitting (plan B3, the derive+poll RBAC tier). Without it the
-// derived picture is honest but blind — nothing can be pending.
+// operator is sitting, which is why it needs the wider derive+poll RBAC tier
+// rather than the read-only viewer one. Without it the derived picture is
+// honest but blind — nothing can be pending.
 type PollOptions struct {
 	// Timeout bounds one listing; <= 0 means DefaultPollTimeout.
 	Timeout time.Duration
@@ -53,7 +54,7 @@ type PollOptions struct {
 	// passes the Wavefront's own value.
 	PerHostConcurrency int
 	// Lister lists advertised refs; nil means the production go-git lister,
-	// which fetches no objects and touches no disk (DESIGN §3.1.1).
+	// which fetches no objects and touches no disk.
 	Lister gitpoll.Lister
 	// Strategy selects the candidate SHA from an advertisement; nil means the
 	// v1 default, TrackRef. It must be the same strategy the evaluation uses,
@@ -68,12 +69,12 @@ type PollOptions struct {
 // It never returns an error. A CLI that refuses to report anything because
 // one of forty sources has an expired deploy key is useless in the incident
 // it exists for: each failure becomes a Diagnostic and leaves that target
-// unobserved, which every renderer already knows how to mark (plan B3).
+// unobserved, which every renderer already knows how to mark.
 //
 // now stamps both ObservedAt and FirstObserved. There is no history to draw a
 // real first-observation from — this is a single sweep, not a running poller —
 // so a pending node's wait measures from this run, which is why derived LAG is
-// rendered as a lower bound (plan B3).
+// rendered as a lower bound.
 func Observe(
 	ctx context.Context,
 	r client.Reader,

@@ -63,7 +63,7 @@ func srcName(name string) types.NamespacedName {
 }
 
 // sourceNamed overrides a node's source identity so two or more nodes can
-// share one GitRepository (WP2: the standard Flux monorepo topology), in
+// share one GitRepository (the standard Flux monorepo topology), in
 // place of srcName's default of deriving it from the node's own name.
 func sourceNamed(src string) nodeOpt {
 	return func(in *engine.NodeInput) {
@@ -91,7 +91,7 @@ func pinnedNode(name string, opts ...nodeOpt) engine.NodeInput {
 	return in
 }
 
-// gateNode builds a health-only participant (DESIGN §3.2): no source.
+// gateNode builds a health-only participant: no source.
 func gateNode(name string, ready bool) engine.NodeInput {
 	return engine.NodeInput{
 		Ref:     ref(name),
@@ -142,7 +142,7 @@ func pendingFrom(from, to string) nodeOpt {
 	}
 }
 
-// unpinned is a freshly discovered source (DESIGN §3.5.4).
+// unpinned is a freshly discovered source.
 func unpinned(artifactSHA, observedSHA string) nodeOpt {
 	return func(in *engine.NodeInput) {
 		in.Source.ArtifactSHA = artifactSHA
@@ -165,7 +165,7 @@ func failing() nodeOpt {
 	}
 }
 
-// held marks the commit as owned by a foreign field manager (DESIGN §3.5.3).
+// held marks the commit as owned by a foreign field manager.
 // HeldBy is fixed rather than parameterized: no case asserts on it, and every
 // call site wants the same illustrative value.
 func held() nodeOpt {
@@ -389,7 +389,7 @@ func TestEvaluate(t *testing.T) {
 			},
 		},
 		{
-			// Finding 4 regression: the held/suspended branch of isSettled must
+			// Regression guard: the held/suspended branch of isSettled must
 			// require AppliedSHA == Pin like the normal branch does, or a freshly
 			// hand-pinned-but-still-converging ancestor counts settled and its
 			// descendant advances mid-rollout.
@@ -441,8 +441,8 @@ func TestEvaluate(t *testing.T) {
 			want:   map[string]engine.NodeResult{"b": {State: engine.StateConverging}},
 		},
 		{
-			// Finding 2 regression: initialPin must also refuse a held/suspended
-			// source (DESIGN §3.5.4, §10) even when it has an artifact to pin to.
+			// Regression guard: initialPin must also refuse a held/suspended
+			// source even when it has an artifact to pin to.
 			name:   "unpinned source that is suspended never initial-pins",
 			inputs: []engine.NodeInput{pinnedNode("a", unpinned("art", "obs"), suspended())},
 			want:   map[string]engine.NodeResult{"a": {State: engine.StateConverging, Held: true}},
@@ -453,10 +453,10 @@ func TestEvaluate(t *testing.T) {
 			want:   map[string]engine.NodeResult{"b": {State: engine.StateConverging, Held: true}},
 		},
 		{
-			// Decision D-E: a Ready, quiescent, suspended-unpinned source counts as
-			// settled despite never having been pinned. Since initialPin (fix 1)
-			// refuses it a pin while suspended, requiring AppliedSHA == Pin here too
-			// would leave it permanently unsettled and livelock every descendant.
+			// A Ready, quiescent, suspended-unpinned source counts as settled
+			// despite never having been pinned. Since initialPin refuses it a pin
+			// while suspended, requiring AppliedSHA == Pin here too would leave it
+			// permanently unsettled and livelock every descendant.
 			name: "suspended unpinned unobserved ready source is settled and unblocks its descendant",
 			deps: chain("s", "d"),
 			inputs: []engine.NodeInput{
@@ -527,8 +527,8 @@ func TestEvaluate(t *testing.T) {
 			want:   map[string]engine.NodeResult{"a": {State: engine.StateSettled}},
 		},
 		{
-			// Finding 3 (WP2): two admissible siblings sharing one
-			// GitRepository must advance it exactly once, not twice.
+			// Two admissible siblings sharing one GitRepository must advance
+			// it exactly once, not twice.
 			name: "two admissible sharers of one source admit exactly once",
 			inputs: []engine.NodeInput{
 				pinnedNode("a", pendingFrom("s1", "s2"), sourceNamed("shared")),
@@ -626,10 +626,9 @@ func TestEvaluate(t *testing.T) {
 	}
 }
 
-// checkInitialAdmissions asserts the invariants of every initial pin (rule 5):
+// checkInitialAdmissions asserts the invariants of every initial pin:
 // ungated (From == ""), Initial == true, its To matches the node's source,
-// and — Finding 2 / DESIGN §3.5.4, §10 — its source is neither Held nor
-// Suspended.
+// and its source is neither Held nor Suspended.
 func checkInitialAdmissions(t *testing.T, initial []engine.Admission, inputs map[adapter.NodeRef]engine.NodeInput) {
 	t.Helper()
 	for _, a := range initial {
@@ -651,7 +650,7 @@ func checkInitialAdmissions(t *testing.T, initial []engine.Admission, inputs map
 	}
 }
 
-// checkSharedSourceInvariants asserts WP2's shared-GitRepository gate holds
+// checkSharedSourceInvariants asserts the shared-GitRepository gate holds
 // for every generated graph, not just the tabled cases: at most one entry
 // per Source across Admissions+Initial combined, and — since pending-ness is
 // source-derived — a source with any non-Admissible pinned referencing node
@@ -701,8 +700,9 @@ func equalAdmissions(got, want []engine.Admission) bool {
 
 // TestEvaluateProperties exercises the invariants that must hold for every
 // acyclic graph and every combination of node states, not just the tabled
-// ones: the settled-ancestors rule (DESIGN D13), admissions being a subset of
-// pending nodes, and determinism (rule 8).
+// ones: the settled-ancestors rule, admissions being a subset of
+// pending nodes, and determinism (Admissions/Initial sorted by
+// NodeRef.String()).
 func TestEvaluateProperties(t *testing.T) {
 	const iterations = 300
 	base := seedFromName(t.Name())
@@ -721,7 +721,7 @@ func TestEvaluateProperties(t *testing.T) {
 
 			for _, a := range got.Admissions {
 				// (a) No admission for a node with any unsettled transitive
-				// ancestor (DESIGN D13).
+				// ancestor.
 				for _, ancestor := range g.TransitiveAncestors(a.Node) {
 					if state := got.Nodes[ancestor].State; state != engine.StateSettled {
 						t.Errorf("admitted %s whose ancestor %s is %s, not Settled", a.Node, ancestor, state)
@@ -808,7 +808,7 @@ func randomDAG(rng *rand.Rand) (map[adapter.NodeRef][]adapter.NodeRef, map[adapt
 		}
 		edges[ref(name)] = deps
 		in := randomInput(rng, name)
-		// WP2: draw source identity from a small pool with some probability,
+		// Draw source identity from a small pool with some probability,
 		// reusing an earlier node's source name, so shared-GitRepository
 		// collisions actually occur rather than being vanishingly rare.
 		if in.Role == engine.RolePinned && rng.Float64() < 0.5 {
@@ -841,13 +841,13 @@ func randomInput(rng *rand.Rand, name string) engine.NodeInput {
 	case 6:
 		return pinnedNode(name, unpinned("art", "obs"))
 	case 7:
-		// Finding 2 shape: unpinned + suspended.
+		// Unpinned + suspended: must never initial-pin.
 		return pinnedNode(name, unpinned("art", "obs"), suspended())
 	case 8:
-		// Finding 2 shape: unpinned + held.
+		// Unpinned + held: must never initial-pin.
 		return pinnedNode(name, unpinned("art", "obs"), held())
 	case 9:
-		// Finding 4 shape: held, pin observed, workload not yet applied.
+		// Held, pin observed, workload not yet applied: must not count settled.
 		return pinnedNode(name, atPin("s2"), appliedAt("s1"), held())
 	default:
 		return pinnedNode(name, pinnedUnobserved("s1"))

@@ -18,7 +18,7 @@ limitations under the License.
 // picture of a Wavefront that every command renders from, however it was
 // obtained.
 //
-// Three providers yield the same Snapshot (plan B1, decision "Truth model"):
+// Three providers yield the same Snapshot (decision "Truth model"):
 // StatusSource reads what the controller published (status.members — the
 // default, and the only tier a read-only viewer needs), DeriveSource
 // re-derives it live through the shared internal/inputs pipeline (which works
@@ -51,7 +51,7 @@ const (
 	KindSnapshot = "Snapshot"
 )
 
-// Snapshot origins (plan B2). A snapshot always names how it was obtained,
+// Snapshot origins. A snapshot always names how it was obtained,
 // because what it can prove differs: a status snapshot reports what the
 // controller last published, a derive snapshot what is true right now.
 //
@@ -88,7 +88,7 @@ type Snapshot struct {
 	Cluster ClusterIdent `json:"cluster"`
 	// Observed reports whether observed SHAs are meaningful. False means
 	// UNKNOWN, not "nothing pending": a renderer must say so rather than
-	// present an empty ObservedSHA as a fact (plan B3, `?` columns).
+	// present an empty ObservedSHA as a fact (renderers show `?` instead).
 	Observed bool `json:"observed"`
 	// Wavefront is the object itself, as the cluster holds it.
 	Wavefront WavefrontView `json:"wavefront"`
@@ -127,7 +127,7 @@ type WavefrontView struct {
 	Status     wavefrontv1alpha1.WavefrontStatus `json:"status"`
 	// SpecOwners maps "spec.mode" and "spec.suspend" to the field manager
 	// owning them, so a write command can warn that a GitOps applier will
-	// revert the change (plan B4). Derived from managedFields; the raw
+	// revert the change. Derived from managedFields; the raw
 	// managedFields never appear in a Snapshot.
 	SpecOwners map[string]string `json:"specOwners,omitempty"`
 }
@@ -182,7 +182,7 @@ type SourceView struct {
 	CommitOwners []pin.Owner `json:"commitOwners,omitempty"`
 	Hold         *HoldView   `json:"hold,omitempty"`
 	// Provenance carries the three wavefront.as-code.io pin annotations: the
-	// durable ledger events are not (DESIGN §4.2).
+	// durable ledger, unlike events, which the apiserver eventually expires.
 	Provenance    map[string]string  `json:"provenance,omitempty"`
 	ArtifactSHA   string             `json:"artifactSHA,omitempty"`
 	FetchFailing  bool               `json:"fetchFailing,omitempty"`
@@ -232,7 +232,7 @@ type DerivedStatus struct {
 	GraphReason  string `json:"graphReason,omitempty"`
 	GraphMessage string `json:"graphMessage,omitempty"`
 	// Admissions are the ancestor-gated pin advances this evaluation would
-	// perform; Initial the ungated initial pins (DESIGN §3.5.4).
+	// perform; Initial the ungated pins for sources seen for the first time.
 	Admissions []AdmissionView `json:"admissions,omitempty"`
 	Initial    []AdmissionView `json:"initial,omitempty"`
 }
@@ -249,7 +249,7 @@ type AdmissionView struct {
 	PendingSince *time.Time `json:"pendingSince,omitempty"`
 }
 
-// Waves layers nodes by dependsOn depth (plan B3, `wfctl graph`): 0 for a
+// Waves layers nodes by dependsOn depth, as `wfctl graph` renders them: 0 for a
 // node with no dependencies, otherwise 1 + the deepest dependency.
 //
 // It is Kahn's algorithm run over the snapshot's own edges rather than

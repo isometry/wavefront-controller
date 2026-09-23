@@ -26,7 +26,7 @@ import (
 	"github.com/isometry/wavefront-controller/internal/wfctl/snapshot"
 )
 
-// Source renders one managed GitRepository in detail (plan B3).
+// Source renders one managed GitRepository in detail.
 //
 // Unlike the table, this view prints full SHAs and the provenance
 // annotations verbatim: it is what an operator reads before writing to the
@@ -112,7 +112,7 @@ func sourcePending(s *snapshot.Snapshot, source *snapshot.SourceView, now time.T
 
 // ownersSection lists every field manager owning spec.ref.commit, with the
 // operation it owns under: `release` unpicks an Apply share and an Update
-// share by entirely different means (plan B4).
+// share by entirely different means.
 func ownersSection(w io.Writer, source *snapshot.SourceView) error {
 	if len(source.CommitOwners) == 0 {
 		return nil
@@ -131,8 +131,8 @@ func ownersSection(w io.Writer, source *snapshot.SourceView) error {
 	return table.Flush()
 }
 
-// provenanceSection prints the pin annotations — the durable ledger events
-// are not (DESIGN §4.2).
+// provenanceSection prints the pin annotations — the durable ledger, unlike
+// events, which the apiserver eventually expires.
 func provenanceSection(w io.Writer, source *snapshot.SourceView) error {
 	if len(source.Provenance) == 0 {
 		return nil
@@ -180,7 +180,7 @@ func conditionsSection(w io.Writer, source *snapshot.SourceView, now time.Time) 
 }
 
 // nodesSection lists the nodes this source backs — every one of which shares
-// its single pin (DESIGN §3.3, gateSharedSources).
+// its single pin (the shared-source dedup, gateSharedSources).
 func nodesSection(w io.Writer, source *snapshot.SourceView) error {
 	if len(source.Nodes) == 0 {
 		return nil

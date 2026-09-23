@@ -587,8 +587,7 @@ func TestPollerFailureRetainsLastGoodSHA(t *testing.T) {
 // healthy, an error that merely happens to wrap context.Canceled (e.g. an
 // HTTP/2 stream reset) must be treated as an ordinary listing failure: it
 // blips wavefront_ref_list_failures_total and freezes the last good
-// observation with Err stamped, exactly like any other failure (DESIGN §6,
-// D4).
+// observation with Err stamped, exactly like any other failure.
 func TestPollerWrappedCancelledErrorIsCountedFailure(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		lister := newFakeLister()
@@ -640,7 +639,7 @@ func TestPollerWrappedCancelledErrorIsCountedFailure(t *testing.T) {
 // transports surface cancellation as plain EOF/closed-connection errors that
 // never wrap context.Canceled. The poller must still recognise the shutdown —
 // by ctx.Err(), not the error chain — and discard the in-flight listing
-// outright: it must neither blip wavefront_ref_list_failures_total (a §6
+// outright: it must neither blip wavefront_ref_list_failures_total (a
 // safety alarm operators rate-alert on, which a rolling restart would
 // otherwise page) nor stamp a shutdown artefact over a good observation.
 func TestPollerShutdownDiscardsInFlightListing(t *testing.T) {
@@ -891,7 +890,7 @@ func TestPollerReadsSecretFreshEachSweep(t *testing.T) {
 	})
 }
 
-// TestPollerMissingSecretIsAFailure covers finding #3 (misattribution): a
+// TestPollerMissingSecretIsAFailure asserts that a
 // missing/unreadable credential Secret is an apiserver-side problem, not a
 // git-host one, so it must land on wavefront_credential_read_failures_total
 // and leave wavefront_ref_list_failures_total{host} untouched — while the
@@ -942,7 +941,7 @@ func TestPollerMissingSecretIsAFailure(t *testing.T) {
 	})
 }
 
-// TestPollerDedupsSecretReadsPerSweep covers finding #4 (no dedup): a fleet
+// TestPollerDedupsSecretReadsPerSweep asserts that a fleet
 // routinely shares one deploy-key Secret across hundreds of targets, and each
 // sweep must read it once per distinct SecretRef, not once per target. The
 // memo must not survive past the sweep it was built for, so rotated
@@ -998,8 +997,8 @@ func TestPollerDedupsSecretReadsPerSweep(t *testing.T) {
 	})
 }
 
-// TestPollerCredentialReadFailureCountedSeparately covers findings #3/#4
-// together: a Secret-read failure must land on
+// TestPollerCredentialReadFailureCountedSeparately asserts that a
+// Secret-read failure must land on
 // wavefront_credential_read_failures_total exactly once per distinct
 // SecretRef regardless of how many targets share it — never on
 // wavefront_ref_list_failures_total{host} — while every sharing target still
@@ -1182,8 +1181,8 @@ func TestPollerConfigureClampsNonPositiveValues(t *testing.T) {
 }
 
 // TestPollerObservationsNeverMixSweeps is the coherence contract that makes
-// strict ordering for co-arriving changes structural rather than probabilistic
-// (DESIGN §3.3). Two repositories receive new commits at the same moment, but
+// strict ordering for co-arriving changes structural rather than probabilistic.
+// Two repositories receive new commits at the same moment, but
 // their listings complete far apart. Every snapshot taken in between must be
 // entirely the old sweep or entirely the new one: a mixture would present the
 // slow repository at its previous SHA — equal to its pin, and therefore
@@ -1386,8 +1385,7 @@ func TestPollerStartBlocksUntilContextDone(t *testing.T) {
 // stubStrategy is a selection.Strategy whose Candidate always returns a
 // sentinel SHA (never the real advertised one) and records how many times it
 // was consulted. Used to prove NewPoller wires its injected strategy through
-// to the sweep, rather than hardcoding selection.TrackRef() (WP7, finding
-// 10).
+// to the sweep, rather than hardcoding selection.TrackRef().
 type stubStrategy struct {
 	mu    sync.Mutex
 	calls int
@@ -1415,7 +1413,7 @@ func (s *stubStrategy) callCount() int {
 // TestPollerUsesInjectedStrategy proves the strategy passed to NewPoller is
 // the one actually consulted during a sweep: a stub that never agrees with
 // the real advertisement must still win, and it must be invoked at least
-// once (WP7, finding 10 — no hardcoded selection.TrackRef() left behind).
+// once — no hardcoded selection.TrackRef() left behind.
 func TestPollerUsesInjectedStrategy(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		lister := newFakeLister()

@@ -31,8 +31,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-// kustomizationAdapter is the Adapter implementation for Kustomization nodes
-// (DESIGN §4.3, D12).
+// kustomizationAdapter is the Adapter implementation for Kustomization nodes.
 type kustomizationAdapter struct{}
 
 // NewKustomizationAdapter returns the Adapter for Kustomization nodes.
@@ -70,7 +69,7 @@ func (a kustomizationAdapter) Get(ctx context.Context, r client.Reader, ref Node
 }
 
 // kustomizationToNode maps a Kustomization to the adapter's uniform Node
-// representation (see implementation notes in task-3-brief.md).
+// representation.
 func kustomizationToNode(ks *kustomizev1.Kustomization) Node {
 	ref := NodeRef{Kind: kustomizev1.KustomizationKind, Namespace: ks.Namespace, Name: ks.Name}
 
