@@ -30,11 +30,11 @@ import (
 
 // Pin hand-pins one source: it sets spec.ref.commit under the wfctl field
 // manager, which is precisely how the controller comes to report the source as
-// held (DESIGN §3.5.3, docs/runbook.md "Hand-pin etiquette").
+// held (docs/runbook.md "Hand-pin etiquette").
 //
 // The write carries no provenance annotations. Those three annotations are the
 // controller's record of an *admission* it made, and forging them for a human
-// decision would corrupt the one durable ledger the fleet has (§4.2). What it
+// decision would corrupt the one durable ledger the fleet has. What it
 // does record is the displaced pin, so that `wfctl release` can hand the value
 // back to the controller with its history intact.
 type Pin struct {

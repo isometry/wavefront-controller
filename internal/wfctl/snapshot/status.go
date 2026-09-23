@@ -49,16 +49,16 @@ const staleGrace = 30 * time.Second
 
 // staleFactor doubles the interval-plus-grace budget, so a single missed
 // sweep does not cry wolf. Together: stale when the last evaluation is older
-// than 2 x (poll.interval + 30s) (plan B2).
+// than 2 x (poll.interval + 30s).
 const staleFactor = 2
 
 // StatusSource is the default provider: it reports what the controller
-// published, and needs nothing beyond get/list on wavefronts (plan B5's
-// viewer tier).
+// published, and needs nothing beyond get/list on wavefronts — the entire
+// footprint of the viewer RBAC tier.
 //
 // The Wavefront's status.members is a complete, self-contained picture of the
 // last evaluation — every node, its state, its edges, its pin and its
-// observed SHA (DESIGN §4.1) — so this is the exact inverse of
+// observed SHA — so this is the exact inverse of
 // inputs.Summarise's members mapping. What status cannot carry, it does not
 // invent: the Ready condition's message, the applied SHA and the
 // explicit-Failing distinction are left zero (see NodeView), and a snapshot
@@ -174,7 +174,7 @@ func statusGraph(nodes []NodeView) GraphView {
 // tracking ref, owners, provenance, conditions.
 //
 // A GitRepository that is forbidden or gone is not an error. The viewer RBAC
-// tier deliberately grants no access to them (plan B5), so a partial source
+// tier deliberately grants no access to them, so a partial source
 // list is the normal case for a flotilla team owner: the entry keeps what the
 // members already proved — its name, its pin, its observed SHA, the nodes
 // referencing it and its hold — is marked Partial, and earns one Diagnostic.
@@ -287,8 +287,9 @@ func describeRepo(view *SourceView, repo *sourcev1.GitRepository, strategy selec
 		// The name only: a Snapshot never carries a Secret's contents.
 		view.SecretRefName = repo.Spec.SecretRef.Name
 	}
-	// An unsupported ref style (semver, DESIGN D10) has no tracking ref to
-	// report; the source is a gate and is announced as such elsewhere.
+	// An unsupported ref style (semver tracking, which v1 does not select on)
+	// has no tracking ref to report; the source is a gate and is announced as
+	// such elsewhere.
 	if ref, err := strategy.TrackingRef(repo.Spec.Reference); err == nil {
 		view.TrackingRef = ref
 	}
@@ -334,7 +335,7 @@ func scrubURLs(text, repoURL string) string {
 
 // repoHold reports how a source is held, with the same precedence
 // inputs.resolve applies: a hand-pin outranks a suspend because it names an
-// actor and a suspend does not (decision D-B).
+// actor and a suspend does not.
 func repoHold(repo *sourcev1.GitRepository) *HoldView {
 	if manager, held := pin.Hold(repo); held {
 		return &HoldView{Kind: wavefrontv1alpha1.HoldReasonHandPin, Manager: manager}
@@ -346,7 +347,8 @@ func repoHold(repo *sourcev1.GitRepository) *HoldView {
 }
 
 // provenance extracts the three pin annotations — the durable ledger, since
-// events expire with the apiserver's --event-ttl (plan B3, `history`).
+// events expire with the apiserver's --event-ttl, which is why `history`
+// cannot be relied on as a record of pin advances past its retention window.
 func provenance(repo *sourcev1.GitRepository) map[string]string {
 	annotations := repo.GetAnnotations()
 	out := map[string]string{}
@@ -393,8 +395,8 @@ func artifactSHA(repo *sourcev1.GitRepository) string {
 
 // staleDiagnostics warns when the published picture may no longer describe the
 // cluster: either it is older than twice the cadence the user asked for, or
-// the controller is itself reporting failure. Both point at the same fix
-// (plan B2).
+// the controller is itself reporting failure. Both point at the same fix:
+// --derive.
 func staleDiagnostics(wf *wavefrontv1alpha1.Wavefront, now time.Time) []string {
 	var diags []string
 

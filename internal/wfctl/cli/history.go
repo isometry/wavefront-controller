@@ -32,14 +32,14 @@ import (
 // cmdHistory is the command name, shared with the tests that drive it.
 const cmdHistory = "history"
 
-// historyCaveat is B3's history row, printed verbatim on every invocation: an
+// historyCaveat is printed verbatim on every invocation of `history`: an
 // event stream is a convenience trail, not the durable ledger, and this is
 // the one place that has to say so every time.
-const historyCaveat = "Events are at-least-once (DESIGN §4.2) and retained only for the API " +
+const historyCaveat = "Events are at-least-once and retained only for the API " +
 	"server's --event-ttl (default 1h); the durable ledger is provenance annotations " +
 	"(`wfctl sources -o wide`) and log aggregation."
 
-// addHistoryCommand registers `history` the same way Task 7's writes did:
+// addHistoryCommand registers `history` the same way the write commands do:
 // against the existing Options, touching none of the persistent-flag wiring.
 func addHistoryCommand(root *cobra.Command, o *Options) {
 	root.AddCommand(newHistoryCommand(o))
@@ -47,7 +47,7 @@ func addHistoryCommand(root *cobra.Command, o *Options) {
 
 // newHistoryCommand lists the admission ledger: the controller's own events
 // and wfctl's audit trail, merged, because both are recorded regarding the
-// same Wavefront (plan B3).
+// same Wavefront.
 func newHistoryCommand(o *Options) *cobra.Command {
 	var (
 		source   string
@@ -111,7 +111,7 @@ after every listing says where the durable one lives.`,
 //
 // history always reads live: a Snapshot file carries no event data, so
 // --from is refused before anything is contacted, the same way the write
-// commands refuse it (plan B4).
+// commands refuse it.
 func (o *Options) listHistory(
 	cmd *cobra.Command, source, node, reason string, warnings bool, since time.Duration,
 ) ([]eventsv1.Event, error) {

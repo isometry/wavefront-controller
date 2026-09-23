@@ -48,7 +48,7 @@ const (
 	// scenario's Kustomizations, whatever order Ginkgo runs the containers in.
 	scenarioLabel = "wavefront.test/scenario"
 
-	// Field manager standing in for a human hand-pin (DESIGN §3.5.3).
+	// Field manager standing in for a human hand-pin.
 	humanManager = "kubectl-edit"
 
 	mainRef    = "refs/heads/main"
@@ -85,7 +85,8 @@ func makeNamespace(name string) {
 
 // makeGitRepo creates a GitRepository. managed stamps the participation label
 // the controller keys the Pinned role off; the commit is deliberately never
-// rendered (DESIGN §3.5.1).
+// rendered, since the catalog renders only the tracking ref and leaves
+// spec.ref.commit for the controller to own.
 func makeGitRepo(ns, name, url, refName string, managed bool) *sourcev1.GitRepository {
 	GinkgoHelper()
 	repo := &sourcev1.GitRepository{
@@ -161,7 +162,7 @@ func setKustomizationReady(obj *kustomizev1.Kustomization, revision string, read
 }
 
 // setArtifact hand-sets the GitRepository artifact source-controller would
-// publish, which is what an initial pin bootstraps from (DESIGN §3.5.4).
+// publish, which is what an initial pin bootstraps from.
 func setArtifact(repo *sourcev1.GitRepository, revision string) {
 	GinkgoHelper()
 	Eventually(func() error {
@@ -637,17 +638,18 @@ var _ = Describe("Wavefront reconciler", func() {
 				return getWavefront("wf-shadow").Status.Nodes
 			}).Should(And(HaveField("Observed", 1), HaveField("Pinned", 1)))
 
-			// finding 9 (decision D-H): the engine re-derives the identical
-			// would-be admission every reconcile, so the ShadowAdmission event
-			// and wavefront_admissions_total{result="shadow"} are edge-triggered
+			// The engine re-derives the identical would-be admission every
+			// reconcile, so the ShadowAdmission event and
+			// wavefront_admissions_total{result="shadow"} are edge-triggered
 			// against status.Shadow rather than fired once per pass (40+/hour
 			// on a pending change).
-			// Events are at-least-once, not exactly-once (DESIGN §4.2): the
-			// next reconcile can read the informer cache before it has
-			// absorbed this pass's status patch (client.MergeFrom carries
-			// no optimistic lock) and re-fire the edge-trigger once more.
-			// Assert >=1 then bound at <=2 so the finding-9 regression
-			// (re-fires on every pass, 10+ in this window) still fails.
+			// Events are at-least-once, not exactly-once: the next reconcile
+			// can read the informer cache before it has absorbed this pass's
+			// status patch (client.MergeFrom carries no optimistic lock) and
+			// re-fire the edge-trigger once more.
+			// Assert >=1 then bound at <=2 so a regression that re-fires the
+			// event on every pass (10+ occurrences in this window) still
+			// fails.
 			By("announcing the would-be admission at least once across repeated reconciles")
 			Eventually(func() int32 {
 				_, occurrences := recordedEvents("ShadowAdmission", "wf-shadow")
@@ -761,9 +763,9 @@ var _ = Describe("Wavefront reconciler", func() {
 			lister.advertise(url, releaseRef, shaB)
 			Consistently(func() string { return pinOf(ns, flotilla) }).Should(Equal(shaHand))
 
-			// Events are at-least-once, not exactly-once (DESIGN §4.2): a
-			// stale informer-cache read of this controller's own status
-			// patch (client.MergeFrom, no optimistic lock) can re-fire the
+			// Events are at-least-once, not exactly-once: a stale
+			// informer-cache read of this controller's own status patch
+			// (client.MergeFrom, no optimistic lock) can re-fire the
 			// edge-trigger once more on the next reconcile.
 			By("emitting HoldDetected at least once")
 			Eventually(func() int32 {
@@ -832,9 +834,9 @@ var _ = Describe("Wavefront reconciler", func() {
 			Expect(wf.Status.Held[0].Node.Name).To(Equal(flotilla))
 			Expect(wf.Status.Nodes.Held).To(Equal(1))
 
-			// Events are at-least-once, not exactly-once (DESIGN §4.2): a
-			// stale informer-cache read of this controller's own status
-			// patch (client.MergeFrom, no optimistic lock) can re-fire the
+			// Events are at-least-once, not exactly-once: a stale
+			// informer-cache read of this controller's own status patch
+			// (client.MergeFrom, no optimistic lock) can re-fire the
 			// edge-trigger once more on the next reconcile.
 			By("emitting HoldDetected at least once")
 			Eventually(func() int32 {

@@ -204,8 +204,8 @@ func main() {
 
 	// Instruments is constructed exactly once, against the manager's shared
 	// metrics registry, and threaded into every collaborator that records
-	// against it (DESIGN §6): the poller's ref-listing failures and the
-	// reconciler's admission, pin-lag and blocked-node metrics.
+	// against it: the poller's ref-listing failures and the reconciler's
+	// admission, pin-lag and blocked-node metrics.
 	instruments, err := metrics.New(ctrlmetrics.Registry)
 	if err != nil {
 		setupLog.Error(err, "Failed to register metrics")
@@ -213,7 +213,7 @@ func main() {
 	}
 
 	// The poller drives the loop between spec changes: each sweep notifies
-	// every Wavefront through a channel source (DESIGN §3.1).
+	// every Wavefront through a channel source.
 	events := make(chan event.GenericEvent, notifyBuffer)
 	// The poller reads credentials with the manager's *non-caching* API reader
 	// rather than its client: a caching Get on a Secret starts a cluster-wide
@@ -224,7 +224,7 @@ func main() {
 	// every sweep" literally true rather than "as fresh as the watch".
 	// One strategy instance, shared by the poller (which consults only
 	// Candidate) and the reconciler (which consults only TrackingRef): the
-	// two halves of one selection policy must never diverge (finding 10).
+	// two halves of one selection policy must never diverge.
 	strategy := selection.TrackRef()
 
 	poller := gitpoll.NewPoller(

@@ -51,7 +51,7 @@ var (
 
 // addReadCommands registers the commands that only read.
 //
-// Task 7's writes and Task 8's history register the same way, against the
+// The write commands and `history` register the same way, against the
 // same Options: every flag they share is already persistent on the root, so
 // neither has to touch the plumbing here.
 func addReadCommands(root *cobra.Command, o *Options) {

@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package adapter provides the node adapter seam (DESIGN §4.3, D12): a
+// Package adapter provides the node adapter seam: a
 // per-kind interpretation of graph members that keeps the graph, engine, and
 // reconciler kind-agnostic. v1alpha1 ships only the Kustomization adapter;
 // a future HelmRelease adapter is a non-breaking addition behind the same
@@ -42,7 +42,7 @@ func (r NodeRef) String() string {
 	return fmt.Sprintf("%s/%s/%s", r.Kind, r.Namespace, r.Name)
 }
 
-// Readiness is the uniform health signal (DESIGN D7).
+// Readiness is the uniform health signal.
 type Readiness struct {
 	Ready      bool   // Ready condition True AND status.observedGeneration == metadata.generation
 	Failing    bool   // Ready condition explicitly False (unhealthy, not merely converging)
@@ -59,7 +59,7 @@ type Node struct {
 	Labels    map[string]string
 }
 
-// Adapter interprets one node kind (DESIGN §4.3, D12).
+// Adapter interprets one node kind.
 type Adapter interface {
 	Kind() string
 	// List returns all nodes matching sel across all namespaces.

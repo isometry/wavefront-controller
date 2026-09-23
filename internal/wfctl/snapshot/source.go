@@ -115,7 +115,7 @@ func wavefrontView(wf *wavefrontv1alpha1.Wavefront) WavefrontView {
 
 // SpecOwners maps "spec.mode" and "spec.suspend" to their owning field
 // manager, so a write command can warn that a GitOps applier owns the field
-// and will revert the change (plan B4). It is exported because that warning
+// and will revert the change. It is exported because that warning
 // is built by internal/wfctl/actions, from a Wavefront it read itself.
 //
 // The first entry to claim a field wins: managedFields is returned in a

@@ -7,12 +7,12 @@ metadata:
     app.kubernetes.io/managed-by: kustomize
 spec:
   nodes:
-    kinds: [Kustomization]           # v1: only Kustomization; HelmRelease reserved (D12)
+    kinds: [Kustomization]           # v1: only Kustomization; HelmRelease is reserved for a future, non-breaking addition
     selector:
       matchLabels:
-        wavefront.as-code.io/managed: "true"   # the participation label (DESIGN §8.2/§4.1)
+        wavefront.as-code.io/managed: "true"   # the participation label marking a node/source as controller-managed
   mode: Shadow                       # start in Shadow: detect, derive, report — zero writes.
-                                      # Flip to Enforce once Phase 0 data looks right (see docs/runbook.md).
+                                      # Flip to Enforce once the data gathered from a period running in Shadow mode looks right (see docs/runbook.md).
   suspend: false
   poll:
     interval: 90s

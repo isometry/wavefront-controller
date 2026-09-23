@@ -14,8 +14,8 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package metrics is the single owner of the controller's launch metric set
-// (DESIGN §6): every Prometheus collector the reconciler and the poller
+// Package metrics is the single owner of the controller's launch metric set:
+// every Prometheus collector the reconciler and the poller
 // record against is created and registered here, exactly once, so that no
 // other package registers a metric of its own.
 package metrics
@@ -27,8 +27,8 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 )
 
-// admissionWaitBuckets spans the starvation-signal range DESIGN §6 asks for:
-// 30 seconds (a fast poll interval) to 2 hours (a long-idle upstream),
+// admissionWaitBuckets spans the starvation-signal range this histogram
+// exists to catch: 30 seconds (a fast poll interval) to 2 hours (a long-idle upstream),
 // exponentially spaced so both ends stay meaningfully resolved.
 var admissionWaitBuckets = prometheus.ExponentialBucketsRange(30, 7200, 10)
 
@@ -42,8 +42,8 @@ var admissionWaitBuckets = prometheus.ExponentialBucketsRange(30, 7200, 10)
 // spelled out; every collector puts it first.
 const LabelWavefront = "wavefront"
 
-// Instruments is the fixed set of collectors the controller records against
-// (DESIGN §6, names and labels verbatim).
+// Instruments is the fixed set of collectors the controller records against,
+// with names and labels kept stable for operators and dashboards to rely on.
 type Instruments struct {
 	// AdmissionsTotal counts pin admissions by owning Wavefront and result:
 	// "admitted" (an ancestor-gated advance), "initial"
@@ -61,7 +61,7 @@ type Instruments struct {
 	// rather than Reset()ting a co-resident Wavefront's series away.
 	PinLagSeconds *prometheus.GaugeVec // wavefront_node_pin_lag_seconds{wavefront,kind,namespace,name}
 	// AdmissionWaitSeconds is observed→admitted latency at the moment an
-	// admission actually executes (DESIGN D13, the starvation signal), by
+	// admission actually executes (the starvation signal), by
 	// owning Wavefront. Cumulative like AdmissionsTotal: a pass never
 	// retires its series, only Forget does (on Wavefront deletion).
 	AdmissionWaitSeconds *prometheus.HistogramVec // wavefront_admission_wait_seconds{wavefront}
@@ -73,7 +73,7 @@ type Instruments struct {
 	// (owned here; the poller only records against it).
 	RefListFailures *prometheus.CounterVec // wavefront_ref_list_failures_total{host}
 	// PinnedFetchFailures is the current count of pinned sources with a
-	// sourcev1 FetchFailed condition (§10 force-push detection), per
+	// sourcev1 FetchFailed condition (the force-push detection signal), per
 	// Wavefront. Recomputed wholesale every pass; a fleet total is sum()
 	// across the wavefront label.
 	PinnedFetchFailures *prometheus.GaugeVec // wavefront_pinned_fetch_failures{wavefront}

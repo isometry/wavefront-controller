@@ -14,11 +14,11 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package engine is the rolling-admission correctness core (DESIGN §3.3, D6,
-// D13): a pure, stateless derivation of every node's state and the admissible
-// set from live inputs (pins, observed refs, readiness). No clock, no I/O, no
-// Kubernetes. Restart-safe by construction (DESIGN D9) — every evaluation is
-// a full recalculation.
+// Package engine is the rolling-admission correctness core: a pure, stateless
+// derivation of every node's state and the admissible set from live inputs
+// (pins, observed refs, readiness). No clock, no I/O, no Kubernetes.
+// Restart-safe by construction — every evaluation is a full recalculation
+// from those live inputs, never from a previous evaluation's output.
 package engine
 
 import (
@@ -32,16 +32,15 @@ import (
 	"github.com/isometry/wavefront-controller/internal/graph"
 )
 
-// Role is how a node participates in admission (DESIGN §3.2).
+// Role is how a node participates in admission.
 type Role string
 
 const (
 	RolePinned Role = "Pinned" // selected node whose source is a managed GitRepository
-	RoleGate   Role = "Gate"   // health-only participant (DESIGN §3.2)
+	RoleGate   Role = "Gate"   // health-only participant
 )
 
-// State is a node's position in the rolling-admission state machine
-// (DESIGN §3.3).
+// State is a node's position in the rolling-admission state machine.
 type State string
 
 const (
@@ -52,7 +51,7 @@ const (
 	StateUnhealthy  State = "Unhealthy"
 )
 
-// BlockedReason attributes why a pending node was not admitted (DESIGN §6).
+// BlockedReason attributes why a pending node was not admitted.
 type BlockedReason string
 
 const (
@@ -102,7 +101,7 @@ type Admission struct {
 	From         string // previous pin ("" for initial pin)
 	To           string // the observed SHA being admitted
 	ObservedRef  string
-	Initial      bool // true = initial-pin-on-discovery (§3.5.4), not ancestor-gated
+	Initial      bool // true = initial-pin-on-discovery, not ancestor-gated
 	PendingSince time.Time
 }
 
@@ -130,7 +129,7 @@ type Evaluation struct {
 }
 
 // Evaluate derives all node states and the admissible set. Pure: same inputs,
-// same outputs; restart-safe by construction (DESIGN D9).
+// same outputs; restart-safe by construction.
 //
 // Only nodes present in inputs are evaluated; a graph member without an input
 // is never assigned a NodeResult, and — being unproven — counts as unsettled
@@ -143,7 +142,7 @@ type Evaluation struct {
 func Evaluate(g *graph.Graph, inputs map[adapter.NodeRef]NodeInput) Evaluation {
 	ev := Evaluation{Nodes: make(map[adapter.NodeRef]NodeResult, len(inputs))}
 
-	// Settledness is a per-node property (rule 1), so derive it once for the
+	// Settledness is a per-node property, so derive it once for the
 	// whole evaluation before any ancestor walk consults it.
 	settled := make(map[adapter.NodeRef]bool, len(inputs))
 	for ref, in := range inputs {
@@ -163,7 +162,7 @@ func Evaluate(g *graph.Graph, inputs map[adapter.NodeRef]NodeInput) Evaluation {
 
 	gateSharedSources(&ev, inputs)
 
-	// Rule 8: a deterministic order is part of the contract — the reconciler's
+	// A deterministic order is part of the contract — the reconciler's
 	// writes, events, and metrics must not depend on map iteration order.
 	slices.SortFunc(ev.Admissions, byNode)
 	slices.SortFunc(ev.Initial, byNode)
@@ -268,8 +267,8 @@ func byNodeRef(a, b adapter.NodeRef) int {
 	return cmp.Compare(a.String(), b.String())
 }
 
-// evaluateNode assigns one node's state (rule 6) and, when it is admissible
-// (rule 4), the pin advance to emit.
+// evaluateNode assigns one node's state and, when it is admissible,
+// the pin advance to emit.
 func evaluateNode(
 	g *graph.Graph,
 	ref adapter.NodeRef,
@@ -289,7 +288,7 @@ func evaluateNode(
 	}
 
 	// Held and Suspended are both external holds: reported identically and
-	// never advanced (DESIGN §3.5.3).
+	// never advanced.
 	res := NodeResult{Held: src.Held || src.Suspended}
 
 	if !isPending(in) {
@@ -304,8 +303,8 @@ func evaluateNode(
 		return res, nil
 	}
 
-	// Rule 4: pending ∧ ¬held ∧ ¬suspended ∧ ¬cycle ∧ every transitive
-	// ancestor settled (DESIGN D13).
+	// Admissible: pending ∧ ¬held ∧ ¬suspended ∧ ¬cycle ∧ every transitive
+	// ancestor settled.
 	res.PendingSince = src.FirstObserved
 	inCycle := g.InCycle(ref)
 	if !res.Held && !inCycle && ancestorsSettled(g, ref, settled) {
@@ -324,7 +323,7 @@ func evaluateNode(
 	return res, nil
 }
 
-// isSettled is the load-bearing predicate (rule 1, DESIGN §3.3): nothing
+// isSettled is the load-bearing predicate for ancestor-gating: nothing
 // pending, and Ready at the node's own pin.
 func isSettled(in NodeInput) bool {
 	src := in.Source
@@ -334,9 +333,9 @@ func isSettled(in NodeInput) bool {
 	if src.Held || src.Suspended {
 		// A held node is settled only while nothing is pending on its ref (an
 		// unobserved ref cannot contradict that, so it does not block) and its
-		// workload has actually converged to the pin ("Ready at that revision",
-		// DESIGN §3.3). The src.Pin == "" escape is deliberate (decision D-E):
-		// with initialPin (above) also refusing a held/suspended source, a
+		// workload has actually converged to the pin ("Ready at that revision").
+		// The src.Pin == "" escape is deliberate: with initialPin (above) also
+		// refusing a held/suspended source, a
 		// suspended never-pinned source can never acquire a pin while
 		// suspended; requiring AppliedSHA == Pin unconditionally would leave a
 		// Ready, quiescent, suspended-unpinned node permanently unsettled and
@@ -345,27 +344,26 @@ func isSettled(in NodeInput) bool {
 			(src.ObservedSHA == "" || src.ObservedSHA == src.Pin) &&
 			(src.Pin == "" || in.AppliedSHA == src.Pin)
 	}
-	// Rule 2: an unpinned or unobserved pinned node cannot prove quiescence,
+	// An unpinned or unobserved pinned node cannot prove quiescence,
 	// so it is conservatively unsettled (ObservedSHA "" never equals a pin).
 	return src.Pin != "" && src.ObservedSHA == src.Pin && in.Ready && in.AppliedSHA == src.Pin
 }
 
-// isPending reports an advertised SHA that differs from the current pin
-// (rule 3, DESIGN §3.1.3). An unpinned source is not pending — it is a
-// candidate for an initial pin instead (rule 5).
+// isPending reports an advertised SHA that differs from the current pin.
+// An unpinned source is not pending — it is a
+// candidate for an initial pin instead.
 func isPending(in NodeInput) bool {
 	src := in.Source
 	return in.Role == RolePinned && src != nil &&
 		src.Pin != "" && src.ObservedSHA != "" && src.ObservedSHA != src.Pin
 }
 
-// initialPin derives the ungated initial-pin-on-discovery admission
-// (rule 5, DESIGN §3.5.4): the current artifact's commit, or absent an
-// artifact the first observed SHA. With neither, there is nothing safe to
-// pin yet and the node waits for its first observation. A held or suspended
-// source is an external hold (DESIGN §3.5.4, §10: "Human hand-pins or
-// suspends a source → Controller treats it as an external hold and does not
-// advance it") and never receives an initial pin either.
+// initialPin derives the ungated initial-pin-on-discovery admission: the
+// current artifact's commit, or absent an artifact the first observed
+// SHA. With neither, there is nothing safe to pin yet and the node waits for
+// its first observation. A held or suspended source is an external hold —
+// the controller treats it as such and does not advance it — and never
+// receives an initial pin either.
 func initialPin(ref adapter.NodeRef, in NodeInput) (Admission, bool) {
 	src := in.Source
 	if in.Role != RolePinned || src == nil || src.Pin != "" || src.Held || src.Suspended {
@@ -386,9 +384,8 @@ func initialPin(ref adapter.NodeRef, in NodeInput) (Admission, bool) {
 }
 
 // ancestorsSettled reports whether every transitive dependsOn ancestor is
-// settled (DESIGN D13) — transitive, not merely direct, so an unhealthy node
-// blocks its whole descendant subtree even through quiescent intermediates
-// (D6).
+// settled — transitive, not merely direct, so an unhealthy node blocks its
+// whole descendant subtree even through quiescent intermediates.
 func ancestorsSettled(g *graph.Graph, ref adapter.NodeRef, settled map[adapter.NodeRef]bool) bool {
 	for _, ancestor := range g.TransitiveAncestors(ref) {
 		// A node inside a cycle lists itself among its ancestors; such nodes
@@ -403,7 +400,7 @@ func ancestorsSettled(g *graph.Graph, ref adapter.NodeRef, settled map[adapter.N
 	return true
 }
 
-// attribute explains a pending node's non-admission (rule 7).
+// attribute explains a pending node's non-admission.
 func attribute(
 	g *graph.Graph,
 	ref adapter.NodeRef,
@@ -416,7 +413,7 @@ func attribute(
 		return &Blocked{Reason: ReasonSelfHeld}
 	case inCycle:
 		// Nothing in a cyclic component is admitted; an ancestor walk there
-		// would be arbitrary (DESIGN §3.2).
+		// would be arbitrary.
 		return &Blocked{Reason: ReasonGraphCycle}
 	}
 	ancestor, found := nearestUnsettled(g, ref, settled)
@@ -456,8 +453,8 @@ func nearestUnsettled(g *graph.Graph, ref adapter.NodeRef, settled map[adapter.N
 	return adapter.NodeRef{}, false
 }
 
-// ancestorReason derives a blocked reason from the unsettled ancestor itself
-// (rule 7), most-actionable first.
+// ancestorReason derives a blocked reason from the unsettled ancestor itself,
+// most-actionable first.
 func ancestorReason(in NodeInput, known bool) BlockedReason {
 	src := in.Source
 	switch {
@@ -468,7 +465,7 @@ func ancestorReason(in NodeInput, known bool) BlockedReason {
 	case in.Failing:
 		return ReasonAncestorUnhealthy
 	case in.Role == RoleGate || src == nil:
-		// A gate is unsettled only by being unready (rule 6).
+		// A gate is unsettled only by being unready.
 		return ReasonAncestorUnhealthy
 	case src.Held || src.Suspended:
 		return ReasonAncestorHeld

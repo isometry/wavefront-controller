@@ -43,10 +43,10 @@ const EventNamespace = "default"
 // (wavefront_controller.go's pinEvent), but it mirrors the same event onto
 // the Wavefront in the same call — the two copies are mirror images, each
 // naming the other as its related object — so one selector on the Wavefront
-// already sees both streams (plan B3, `history`).
+// already sees both streams.
 const regardingKindWavefront = "Wavefront"
 
-// EventFilter narrows ListEvents (plan B3, `history`).
+// EventFilter narrows the events `history` lists.
 type EventFilter struct {
 	// Reason restricts to one event reason; empty means every reason.
 	Reason string

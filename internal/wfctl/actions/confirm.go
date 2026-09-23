@@ -30,7 +30,7 @@ import (
 //
 // A prompt written to a non-terminal is read by nobody and answered by
 // whatever happens to be on stdin, so the only safe reading of "no --yes and
-// no terminal" is that consent was never given (plan B4).
+// no terminal" is that consent was never given.
 var ErrNotATerminal = errors.New("refusing to prompt: stdin is not a terminal (use --yes)")
 
 // Confirmer prints a Plan and applies it if consent is given.

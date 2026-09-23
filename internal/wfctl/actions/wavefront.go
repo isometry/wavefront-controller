@@ -44,8 +44,7 @@ var gitOpsAppliers = []string{"kustomize-controller", "helm-controller"}
 // would make wfctl an *applier* of the Wavefront spec, and the next GitOps
 // reconcile would then have to fight it. A merge patch changes the value and
 // leaves the shape of ownership alone, which is what lets a GitOps-managed
-// Wavefront be suspended in an incident and then correctly reverted by git
-// (plan B4).
+// Wavefront be suspended in an incident and then correctly reverted by git.
 type WavefrontChange struct {
 	Client client.Client
 	// Wavefront is the object as it was read, and the optimistic-lock base.

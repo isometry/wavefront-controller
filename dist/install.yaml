@@ -168,7 +168,7 @@ spec:
                     ancestor:
                       description: |-
                         NodeReference identifies a graph node. Typed {kind, namespace, name} from
-                        day one so HelmRelease nodes are a non-breaking addition (DESIGN D12).
+                        day one so HelmRelease nodes are a non-breaking addition later.
                       properties:
                         kind:
                           enum:
@@ -186,7 +186,7 @@ spec:
                     node:
                       description: |-
                         NodeReference identifies a graph node. Typed {kind, namespace, name} from
-                        day one so HelmRelease nodes are a non-breaking addition (DESIGN D12).
+                        day one so HelmRelease nodes are a non-breaking addition later.
                       properties:
                         kind:
                           enum:
@@ -283,7 +283,7 @@ spec:
                     node:
                       description: |-
                         NodeReference identifies a graph node. Typed {kind, namespace, name} from
-                        day one so HelmRelease nodes are a non-breaking addition (DESIGN D12).
+                        day one so HelmRelease nodes are a non-breaking addition later.
                       properties:
                         kind:
                           enum:
@@ -329,7 +329,7 @@ spec:
                   description: |-
                     Member is one evaluated node's derived state for the last evaluation
                     (selected nodes and the gate nodes reached through dependsOn).
-                    Write-only output: the reconciler never reads it back (DESIGN D9).
+                    Write-only output: the reconciler never reads it back.
                   properties:
                     blocked:
                       description: BlockedRef attributes a blocked node to its nearest
@@ -338,7 +338,7 @@ spec:
                         ancestor:
                           description: |-
                             NodeReference identifies a graph node. Typed {kind, namespace, name} from
-                            day one so HelmRelease nodes are a non-breaking addition (DESIGN D12).
+                            day one so HelmRelease nodes are a non-breaking addition later.
                           properties:
                             kind:
                               enum:
@@ -365,7 +365,7 @@ spec:
                       items:
                         description: |-
                           NodeReference identifies a graph node. Typed {kind, namespace, name} from
-                          day one so HelmRelease nodes are a non-breaking addition (DESIGN D12).
+                          day one so HelmRelease nodes are a non-breaking addition later.
                         properties:
                           kind:
                             enum:
@@ -387,7 +387,7 @@ spec:
                     node:
                       description: |-
                         NodeReference identifies a graph node. Typed {kind, namespace, name} from
-                        day one so HelmRelease nodes are a non-breaking addition (DESIGN D12).
+                        day one so HelmRelease nodes are a non-breaking addition later.
                       properties:
                         kind:
                           enum:

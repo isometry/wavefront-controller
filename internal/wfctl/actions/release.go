@@ -54,13 +54,13 @@ var (
 //  1. pin.Writer.Advance under wavefront-controller with the *same* value.
 //     Applying a value identical to the live one is not a change, so the
 //     apiserver reports no conflict and simply adds the controller as a
-//     co-owner (DESIGN §3.5, plan B4).
+//     co-owner.
 //  2. relinquish the holder's share, so the controller is left sole owner and
 //     pin.Hold stops reporting a hold.
 //
 // --float takes the other road: delete the pin entirely and let the source
-// float on its tracking ref until the controller initial-pins it from the
-// artifact (§3.5.4).
+// float on its tracking ref until the controller next discovers it and pins
+// it from the artifact.
 type Release struct {
 	Client client.Client
 	Source types.NamespacedName
@@ -104,7 +104,7 @@ func (a *Release) floatPlan(repo *sourcev1.GitRepository, current string) (*Plan
 
 	warnings := []string{
 		fmt.Sprintf("%s floats on %s until the controller initial-pins it from its artifact SHA "+
-			"(DESIGN §3.5.4) — which it will do on the next sweep unless the fleet is suspended",
+			"— which it will do on the next sweep unless the fleet is suspended",
 			a.Source, trackingRef),
 	}
 	if displaced := annotationOf(repo, pin.AnnotDisplacedPin); displaced != "" {

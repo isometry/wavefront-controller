@@ -28,8 +28,7 @@ import (
 )
 
 // TestNewExpositionText scripts a representative sequence of calls against
-// every collector and compares the resulting exposition text verbatim
-// (DESIGN §6 names and labels).
+// every collector and compares the resulting exposition text verbatim.
 func TestNewExpositionText(t *testing.T) {
 	reg := prometheus.NewRegistry()
 	instr, err := metrics.New(reg)
@@ -175,7 +174,8 @@ func TestNewNameCollisionDifferentLabelsReturnsError(t *testing.T) {
 // *prometheus.CounterVec. Registering it first makes the registry return an
 // AlreadyRegisteredError for AdmissionsTotal whose ExistingCollector fails
 // the *prometheus.CounterVec type assertion inside register — the second
-// swallow path from the brief. Constructing this case turned out possible:
+// failure path register must surface rather than swallow. Constructing this
+// case turned out possible:
 // prometheus.Desc.id only depends on fqName and const label values (not the
 // collector's Go type or variable label names), so any Collector describing
 // itself with a matching Desc collides regardless of its concrete type.
@@ -213,8 +213,8 @@ func TestNewAlreadyRegisteredWrongTypeReturnsError(t *testing.T) {
 	}
 }
 
-// TestNewDoubleRegisterSameRegistryDoesNotPanic covers the brief's explicit
-// requirement: a second controller wiring against the same Registerer (e.g.
+// TestNewDoubleRegisterSameRegistryDoesNotPanic asserts that a second
+// controller wiring against the same Registerer (e.g.
 // the shared ctrlmetrics.Registry) must not panic, and must end up recording
 // against the very same series rather than a silently dropped duplicate.
 func TestNewDoubleRegisterSameRegistryDoesNotPanic(t *testing.T) {

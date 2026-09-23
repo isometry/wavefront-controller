@@ -73,8 +73,7 @@ var (
 // The two providers are one truth model or they are two, and only a fixture
 // that has been through the apiserver can tell the difference: status.members
 // is written under the CRD's own schema and read back with its own timestamp
-// precision, so parity has to be proven on the far side of a round trip
-// (plan B6).
+// precision, so parity has to be proven on the far side of a round trip.
 var _ = Describe("Snapshot provider parity", Ordered, func() {
 	var (
 		nodeA, nodeB adapter.NodeRef
@@ -510,7 +509,7 @@ func makeNamespace(name string) {
 // makeGitRepo creates a managed source and pins it the way the controller
 // does — through pin.Writer, under the controller's own field manager — so
 // the fixture is a normal pin rather than a hand-pin: the catalog renders the
-// tracking ref and never the commit (DESIGN §3.5.1).
+// tracking ref and never the commit.
 //
 // The URL deliberately embeds a credential, so every spec that reads a URL
 // back proves it was stripped.

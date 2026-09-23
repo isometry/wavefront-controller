@@ -25,7 +25,7 @@ limitations under the License.
 //   - "-" is an absent value: a gate has no source, a settled node has no
 //     pending age.
 //   - "?" is an unproven one: this snapshot cannot say. A table that prints
-//     any "?" also prints a footnote naming the fix (plan B3).
+//     any "?" also prints a footnote naming the fix.
 //
 // Colour is decided by the caller, never here: NO_COLOR, --no-color and TTY
 // detection all belong to the CLI, and a renderer that sniffed the
@@ -78,7 +78,7 @@ const (
 	// the source table and the status counts.
 	colObserved = "OBSERVED"
 	// atLeast prefixes an age measured from this run rather than from the
-	// controller's own first observation (plan B3: derive origin).
+	// controller's own first observation (under the derive origin).
 	atLeast = "≥"
 )
 
@@ -93,7 +93,7 @@ const (
 )
 
 // nodeName renders a node reference the way a user types it: "ns/name", with
-// the kind restored only when it is not the default (plan B3, ParseNodeRef).
+// the kind restored only when it is not the default (the inverse of ParseNodeRef).
 func nodeName(ref adapter.NodeRef) string {
 	if ref.Kind == "" || ref.Kind == defaultKind {
 		return ref.Namespace + "/" + ref.Name
@@ -168,7 +168,7 @@ func observationUnknown(snap *snapshot.Snapshot, node *snapshot.NodeView) bool {
 }
 
 // unknownFootnote names the fix for whichever kind of "?" this snapshot
-// produces (plan B3).
+// produces.
 func unknownFootnote(snap *snapshot.Snapshot) string {
 	if !snap.Observed {
 		return footnoteUnobservable
@@ -216,7 +216,7 @@ func sanitize(value string) string {
 }
 
 // holdCell renders a source's hold: kind plus the actor, when there is one.
-// A Suspend hold names no actor (DESIGN §3.5.3).
+// A Suspend hold names no actor.
 func holdCell(hold *snapshot.HoldView) string {
 	if hold == nil {
 		return absent

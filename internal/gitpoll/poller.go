@@ -62,8 +62,8 @@ type Observation struct {
 	Err           error     // last listing error, nil on success
 
 	// URL and TrackingRef record the plumbing the SHA was observed against,
-	// so a consumer can reject an observation that predates a repo edit
-	// (DESIGN §3.1: no stale candidate survives a plumbing change).
+	// so a consumer can reject an observation that predates a repo edit —
+	// no stale candidate survives a plumbing change.
 	URL         string
 	TrackingRef string
 }
@@ -121,7 +121,7 @@ func (s *sweepSecrets) get(ctx context.Context, ref types.NamespacedName) (map[s
 }
 
 // Poller periodically sweeps all targets, batched per git host with bounded
-// per-host concurrency (DESIGN §3.1, §4.1 poll.*). Implements manager.Runnable.
+// per-host concurrency. Implements manager.Runnable.
 type Poller struct {
 	secrets  client.Reader
 	lister   Lister
@@ -129,7 +129,7 @@ type Poller struct {
 	strategy selection.Strategy
 
 	// failures counts ref-listing failures per host
-	// (wavefront_ref_list_failures_total, DESIGN §6); nil when the caller
+	// (wavefront_ref_list_failures_total); nil when the caller
 	// supplied no counter, in which case nothing is recorded.
 	failures *prometheus.CounterVec
 	// credentialFailures counts credential Secret-read failures
@@ -162,7 +162,7 @@ type Poller struct {
 // targetRef is an observation's identity beyond its source: the same
 // GitRepository polled at a different URL or tracking ref yields an
 // observation that says something different, so the two must never be
-// confused (DESIGN §3.1, "no stale candidate can survive a plumbing change").
+// confused — no stale candidate can survive a plumbing change.
 type targetRef struct {
 	url         string
 	trackingRef string
@@ -181,8 +181,7 @@ type record struct {
 // withRef stamps rec's plumbing onto its Observation for external callers:
 // the internal record and public Observation disagree on where the ref
 // lives, and a consumer needs it on the Observation itself to judge
-// staleness against its own, possibly newer, view of the target
-// (DESIGN §3.1).
+// staleness against its own, possibly newer, view of the target.
 func withRef(rec record) Observation {
 	obs := rec.obs
 	obs.URL, obs.TrackingRef = rec.ref.url, rec.ref.trackingRef
@@ -206,10 +205,10 @@ var _ manager.Runnable = (*Poller)(nil)
 // WavefrontReconciler.Strategy consults only TrackingRef — the two halves of
 // one selection policy. The caller must construct a single strategy instance
 // and share it between both, or a non-TrackRef strategy injected at one site
-// would be silently half-applied (finding 10).
+// would be silently half-applied.
 //
 // failures is wavefront_ref_list_failures_total and credentialFailures is
-// wavefront_credential_read_failures_total (DESIGN §6), both already created
+// wavefront_credential_read_failures_total, both already created
 // and registered by the caller — internal/metrics owns every collector's
 // registration, so the poller only ever records against handles it is
 // given. Both may be nil, in which case nothing is recorded.
@@ -262,7 +261,7 @@ func (p *Poller) Configure(interval time.Duration, perHostConcurrency int) {
 // plumbing changed: a GitRepository flipped from refs/heads/main to
 // refs/tags/v2 (or repointed at another URL) must not present main's HEAD as a
 // current observation, because that SHA would be pinned under the
-// observed-SHAs-only invariant (DESIGN §3.1).
+// observed-SHAs-only invariant.
 func (p *Poller) SetTargets(targets []Target) {
 	live := make(map[types.NamespacedName]targetRef, len(targets))
 	for _, t := range targets {
@@ -297,7 +296,7 @@ func (p *Poller) Observation(src types.NamespacedName) (Observation, bool) {
 // compare sources against one another depend on this: under the rolling
 // admission rule a descendant is admitted when its ancestors are *settled*,
 // and an ancestor whose observation lagged a sweep behind would look settled
-// when it is not, mis-sequencing co-arriving changes (DESIGN §3.3). Reading
+// when it is not, mis-sequencing co-arriving changes. Reading
 // source by source with Observation cannot provide that guarantee.
 func (p *Poller) Observations() map[types.NamespacedName]Observation {
 	p.mu.RLock()
@@ -421,7 +420,7 @@ func (p *Poller) sweepHost(ctx context.Context, host string, targets []Target, p
 // one that is not ours (e.g. an HTTP/2 stream reset). ctx.Err() is the only
 // authority. A cancelled context is the manager shutting the poller down, not
 // a detection failure: it must neither blip wavefront_ref_list_failures_total
-// (a §6 safety alarm operators rate-alert on) nor stamp a shutdown artefact
+// (a safety alarm operators rate-alert on) nor stamp a shutdown artefact
 // onto the observation. Such a listing is discarded outright, exactly as a
 // superseded target's is in publish — it answers no question anyone is still
 // asking, and the last good observation stands untouched. This does not
@@ -463,7 +462,7 @@ func (p *Poller) publish(results <-chan result) {
 
 		if res.err != nil {
 			// Never clear the last good SHA: a frozen-at-known-good
-			// observation is the fail-closed behaviour (DESIGN D4).
+			// observation is the fail-closed behaviour.
 			rec.obs.ObservedAt, rec.obs.Err = res.at, res.err
 		} else {
 			if rec.obs.SHA != res.sha {

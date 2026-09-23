@@ -43,8 +43,9 @@ import (
 )
 
 // The source-resolution, observation-plumbing and hold coverage below moved
-// here with the code it exercises (WP2/WP3/WP6): these are properties of the
-// pure derivation, not of the reconciler that publishes it. The fake adapter
+// here with the code it exercises — shared-source resolution, observation
+// plumbing, and hold unification: these are properties of the pure
+// derivation, not of the reconciler that publishes it. The fake adapter
 // stands in for the Kustomization reads discovery would otherwise perform, so
 // each case still states its node topology directly.
 
@@ -56,7 +57,7 @@ const (
 	teamBName         = "team-b"
 
 	managedLabelValue = "true"
-	// Field manager standing in for a human hand-pin (DESIGN §3.5.3).
+	// Field manager standing in for a human hand-pin.
 	humanManager = "kubectl-edit"
 
 	mainRef = "refs/heads/main"
@@ -96,9 +97,9 @@ func (f *fakeAdapter) Get(_ context.Context, _ client.Reader, ref adapter.NodeRe
 	return node, found, nil
 }
 
-// countingReader counts GitRepository reads, which is how the memoization
-// decision (D-A) is observable from outside: one read per source per pass, not
-// one per referencing node.
+// countingReader counts GitRepository reads, which is how the memoization of
+// a shared source's resolution is observable from outside: one read per
+// source per pass, not one per referencing node.
 type countingReader struct {
 	client.Reader
 	repoGets int
@@ -162,12 +163,13 @@ func buildFor(
 	return res
 }
 
-// --- shared-source resolution (WP2) -----------------------------------------
+// --- shared-source resolution ------------------------------------------------
 
-// TestBuildMemoizesASharedSource is decision D-A's counterpart to the engine's
-// gateSharedSources: two Kustomizations sharing one GitRepository must see one
-// read, one *engine.SourceState and one poll Target, and NodeBySource must list
-// both referencing nodes rather than silently keeping only the last writer.
+// TestBuildMemoizesASharedSource is the input-resolution counterpart to the
+// engine's own gateSharedSources memoization: two Kustomizations sharing one
+// GitRepository must see one read, one *engine.SourceState and one poll
+// Target, and NodeBySource must list both referencing nodes rather than
+// silently keeping only the last writer.
 func TestBuildMemoizesASharedSource(t *testing.T) {
 	src := types.NamespacedName{Namespace: fluxNamespace, Name: "shared"}
 	repo := managedRepo(src.Name, "https://git.example.com/org/shared.git",
@@ -208,9 +210,9 @@ func TestBuildMemoizesASharedSource(t *testing.T) {
 	}
 }
 
-// TestBuildSkipsASourceReferencedOnlyByNonSelectedNodes is the fix for the
-// WP2 review finding: a source with no selected referencing node must never
-// register a poll Target or report an unsupported ref style — that would leak a
+// TestBuildSkipsASourceReferencedOnlyByNonSelectedNodes asserts that a source
+// with no selected referencing node must never register a poll Target or
+// report an unsupported ref style — that would leak a
 // source this Wavefront has zero selected interest in into its pollSet
 // contribution (and misattribute the warning) purely because a
 // dependency-closure gate happens to reference it. The source's ref style is
@@ -298,9 +300,10 @@ func TestBuildMixedSelectedAndGateSharersOfOneSource(t *testing.T) {
 }
 
 // TestBuildRecordsAnUnsupportedSourceOncePerSource is the positive counterpart:
-// a selected node's source whose ref style v1 cannot sequence is demoted to a
-// gate and recorded exactly once, however many selected nodes reference it, so
-// the caller announces it exactly once (UnsupportedRefStyle, DESIGN D10).
+// a selected node's source whose ref style (semver) selection.TrackRef cannot
+// resolve is demoted to a gate and recorded exactly once, however many
+// selected nodes reference it, so the caller announces it exactly once
+// (UnsupportedRefStyle).
 func TestBuildRecordsAnUnsupportedSourceOncePerSource(t *testing.T) {
 	src := types.NamespacedName{Namespace: fluxNamespace, Name: "semver"}
 	repo := managedRepo(src.Name, "https://git.example.com/org/semver.git",
@@ -335,7 +338,7 @@ func TestBuildRecordsAnUnsupportedSourceOncePerSource(t *testing.T) {
 	}
 }
 
-// --- observation plumbing (WP6, DESIGN §3.1) --------------------------------
+// --- observation plumbing ----------------------------------------------------
 //
 // Params.Observations is the caller's snapshot, taken before anything prunes
 // stale records for this pass, so an Observation surviving from a
@@ -438,9 +441,9 @@ func TestBuildAcceptsObservationMatchingPlumbing(t *testing.T) {
 	}
 }
 
-// --- holds (WP3): suspended sources unify with hand-pins -------------------
+// --- holds: suspended sources unify with hand-pins ---------------------------
 
-// TestBuildSuspendedSourceYieldsSuspendHold covers finding 7: a suspended
+// TestBuildSuspendedSourceYieldsSuspendHold asserts that a suspended
 // source must land in Holds (kind Suspend, no manager), not just in the
 // engine's Held/Blocked signal.
 func TestBuildSuspendedSourceYieldsSuspendHold(t *testing.T) {
@@ -470,7 +473,7 @@ func TestBuildSuspendedSourceYieldsSuspendHold(t *testing.T) {
 
 // TestBuildHandPinAndSuspendYieldsHandPin: a source both hand-pinned and
 // suspended reports HandPin — it names an actor, so it wins over the
-// actor-less Suspend (decision D-B).
+// actor-less Suspend.
 func TestBuildHandPinAndSuspendYieldsHandPin(t *testing.T) {
 	src := types.NamespacedName{Namespace: fluxNamespace, Name: "both"}
 	repo := managedRepo(src.Name, "https://git.example.com/org/both.git",
@@ -516,7 +519,7 @@ func TestBuildHandPinAndSuspendYieldsHandPin(t *testing.T) {
 // TestGraphVerdictOverlapOutranksCycles pins the precedence and the exact
 // message strings: a Wavefront reporting a cycle while another Wavefront is
 // double-managing its nodes would hide the more urgent, admission-suppressing
-// configuration error (DESIGN §4.1).
+// configuration error.
 func TestGraphVerdictOverlapOutranksCycles(t *testing.T) {
 	cycle := [][]adapter.NodeRef{{teamARef(), teamBRef()}}
 

@@ -14,8 +14,8 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package selection implements the candidate-selection seam (DESIGN §3.6,
-// D10): the pluggable answer to "which SHA is the candidate?", decoupled
+// Package selection implements the candidate-selection seam: the pluggable
+// answer to "which SHA is the candidate?", decoupled
 // from the pin mechanism itself (which is uniform across all ref styles).
 // v1 ships only TrackRef; a future SemverWindow strategy is a non-breaking
 // addition behind the same Strategy interface.
@@ -31,7 +31,7 @@ import (
 // ErrUnsupportedRef marks ref styles v1 cannot sequence (semver).
 var ErrUnsupportedRef = errors.New("unsupported ref style for candidate selection")
 
-// Strategy answers "which SHA is the candidate?" (DESIGN §3.6).
+// Strategy answers "which SHA is the candidate?"
 type Strategy interface {
 	// TrackingRef maps a GitRepository ref spec to the advertised ref name to observe.
 	TrackingRef(ref *sourcev1.GitRepositoryRef) (string, error)
@@ -40,10 +40,10 @@ type Strategy interface {
 	Candidate(advertised map[string]string, trackingRef string) (sha string, ok bool)
 }
 
-// trackRef is the v1 default and only strategy (DESIGN D10).
+// trackRef is the v1 default and only strategy.
 type trackRef struct{}
 
-// TrackRef is the v1 default and only strategy (DESIGN D10).
+// TrackRef is the v1 default and only strategy.
 func TrackRef() Strategy {
 	return trackRef{}
 }
@@ -61,9 +61,10 @@ func (trackRef) TrackingRef(ref *sourcev1.GitRepositoryRef) (string, error) {
 	if ref == nil {
 		return defaultBranchRef, nil
 	}
-	// Precedence follows Flux's verified clone dispatch order (DESIGN §7.4,
-	// Implementation Notes item 4): commit → refName → tag → semver →
-	// branch. TrackingRef ignores Commit (see above), so: Name > Tag >
+	// Precedence follows Flux's own verified clone dispatch order — the
+	// gogit client's Clone dispatches strictly commit → refName → tag →
+	// semver → branch (confirmed against git/gogit/client.go).
+	// TrackingRef ignores Commit (see above), so: Name > Tag >
 	// SemVer > Branch. A ref with both Tag and SemVer set tracks the tag.
 	switch {
 	case ref.Name != "":

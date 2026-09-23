@@ -16,14 +16,14 @@ limitations under the License.
 
 // Package inputs assembles one Wavefront evaluation from live cluster state:
 // discovery, selector-overlap detection, source resolution, graph derivation
-// and the engine evaluation over them (DESIGN §3, §4).
+// and the engine evaluation over them.
 //
 // It is read-only and side-effect free — no writes, no events, no metrics, no
 // poller — so the reconciler and the CLI derive the *same* picture from the
 // same reads: the reconciler adds execution, status and telemetry on top,
 // while the CLI renders the Result directly. Every pass is a full
-// recalculation from live inputs (DESIGN D9); nothing here reads back
-// previously published status.
+// recalculation from live inputs; nothing here reads back previously
+// published status.
 package inputs
 
 import (
@@ -54,7 +54,8 @@ import (
 )
 
 // managedOptIn is the only value of pin.ManagedLabel that opts a
-// GitRepository into pin management (DESIGN §8.2).
+// GitRepository into pin management: the catalog renders this label onto
+// every flotilla GitRepository as the managed-source marker.
 const managedOptIn = "true"
 
 // Params is everything Build needs beyond the cluster reader.
@@ -64,16 +65,16 @@ type Params struct {
 	Strategy  selection.Strategy
 	// Observations is the caller's own coherent snapshot of the poller; nil
 	// (or a missing entry) means unobserved. Strict ordering for co-arriving
-	// changes (DESIGN §3.3) is only structural if every node is evaluated
-	// against the same sweep, so the snapshot is taken by the caller — once,
-	// before anything reconfigures the poller — never re-read per source here.
+	// changes is only structural if every node is evaluated against the same
+	// sweep, so the snapshot is taken by the caller — once, before anything
+	// reconfigures the poller — never re-read per source here.
 	Observations map[types.NamespacedName]gitpoll.Observation
 }
 
-// HoldKind distinguishes how a source is held (DESIGN §3.5.3, §10): a foreign
-// field manager owning spec.ref.commit, or spec.suspend. Both are reported
-// identically by the engine (NodeResult.Held, engine.go SelfHeld/AncestorHeld)
-// and must be reported identically by consumers.
+// HoldKind distinguishes how a source is held: a foreign field manager owning
+// spec.ref.commit, or spec.suspend. Both are reported identically by the
+// engine (NodeResult.Held, engine.go SelfHeld/AncestorHeld) and must be
+// reported identically by consumers.
 type HoldKind string
 
 const (
@@ -81,8 +82,9 @@ const (
 	HoldSuspend HoldKind = wavefrontv1alpha1.HoldReasonSuspend
 )
 
-// Hold is one source's entry in the unified hold ledger (decision D-B):
-// Manager is "" for a Suspend hold, which names no owning actor.
+// Hold is one source's entry in the unified ledger that treats a hand-pin
+// and a suspend alike: Manager is "" for a Suspend hold, which names no
+// owning actor.
 type Hold struct {
 	Manager string
 	Kind    HoldKind
@@ -112,22 +114,23 @@ type Result struct {
 	Inputs map[adapter.NodeRef]engine.NodeInput
 	Repos  map[types.NamespacedName]*sourcev1.GitRepository
 	// NodeBySource lists every selected, pinned node referencing a source,
-	// each slice in compareRefs order (decision D-D): a shared source's
-	// events and status attribution need every referencing node, not just
-	// whichever last overwrote a single value.
+	// each slice in compareRefs order: a shared source's events and status
+	// attribution need every referencing node, not just whichever last
+	// overwrote a single value.
 	NodeBySource map[types.NamespacedName][]adapter.NodeRef
-	// Holds is the unified hold ledger (decision D-B): every source the
-	// engine reports Held for, whether a hand-pin (a foreign field manager
-	// owns spec.ref.commit) or a suspend (spec.suspend). It feeds
-	// counts.Held, status.held[], the HoldDetected/HoldReleased edge-trigger
-	// and the admission gate alike. A caller that discovers a further hold
-	// while executing (an SSA conflict, pin.ErrHeld) may add to it after
-	// Build returns.
+	// Holds is the unified hold ledger: every source the engine reports Held
+	// for, whether a hand-pin (a foreign field manager owns spec.ref.commit)
+	// or a suspend (spec.suspend). It feeds counts.Held, status.held[], the
+	// HoldDetected/HoldReleased edge-trigger and the admission gate alike. A
+	// caller that discovers a further hold while executing (an SSA conflict,
+	// pin.ErrHeld) may add to it after Build returns.
 	Holds   map[types.NamespacedName]Hold
 	Targets []gitpoll.Target
-	// UnsupportedSources lists managed sources whose ref style v1 cannot
-	// sequence (DESIGN D10), demoted to gates. Recorded once per source and
-	// sorted, so a caller can announce each exactly once.
+	// UnsupportedSources lists managed sources whose ref style (currently:
+	// semver tracking, which only a future SemverWindow strategy could
+	// sequence) selection.TrackRef cannot resolve, demoted to gates.
+	// Recorded once per source and sorted, so a caller can announce each
+	// exactly once.
 	UnsupportedSources []types.NamespacedName
 
 	// fleet
@@ -148,7 +151,7 @@ type Result struct {
 
 // GraphVerdict renders the structural verdict. A selector overlap outranks a
 // cycle: overlap suppresses admissions fleet-wide and is the more urgent
-// configuration error to report (DESIGN §4.1).
+// configuration error to report.
 func (res *Result) GraphVerdict() GraphVerdict {
 	switch {
 	case res == nil:
@@ -172,7 +175,7 @@ const graphValidMessage = "no dependsOn cycles and no selector overlap"
 
 // SkipAdmissions reports whether every write must be suppressed for the pass,
 // without suppressing status: selector overlap is a configuration error, not a
-// reason to go blind (DESIGN §4.1).
+// reason to go blind.
 func (res *Result) SkipAdmissions() bool {
 	return res != nil && res.Overlap != ""
 }
@@ -198,15 +201,15 @@ type builder struct {
 	params Params
 	res    *Result
 
-	// resolvedSources memoizes each GitRepository's resolution (decision
-	// D-A): two or more nodes sharing one source (a standard Flux monorepo
-	// topology) see one Get, one trackingRef computation and one
-	// *engine.SourceState, rather than a separate — and possibly
-	// disagreeing — read per referencing node.
+	// resolvedSources memoizes each GitRepository's resolution: two or more
+	// nodes sharing one source (a standard Flux monorepo topology) see one
+	// Get, one trackingRef computation and one *engine.SourceState, rather
+	// than a separate — and possibly disagreeing — read per referencing
+	// node.
 	resolvedSources map[types.NamespacedName]*resolvedSource
 }
 
-// resolvedSource is one GitRepository's memoized resolution (decision D-A).
+// resolvedSource is one GitRepository's memoized resolution.
 // state != nil means the source itself is eligible (managed, resolvable ref
 // style) — not that any node was pinned to it: only resolve's caller, gated
 // on Selected, decides whether a given referencing node becomes RolePinned.
@@ -235,8 +238,8 @@ func (b *builder) run(ctx context.Context) error {
 	return nil
 }
 
-// discover implements step 3: the selected node set, closed transitively over
-// dependsOn targets that fall outside the selector.
+// discover builds the selected node set, closed transitively over dependsOn
+// targets that fall outside the selector.
 func (b *builder) discover(ctx context.Context) error {
 	selector, err := metav1.LabelSelectorAsSelector(&b.params.Wavefront.Spec.Nodes.Selector)
 	if err != nil {
@@ -261,7 +264,7 @@ func (b *builder) discover(ctx context.Context) error {
 	}
 
 	// Breadth-first until no new refs: an out-of-selector dependency is still
-	// a health gate, and its own dependencies gate it in turn (DESIGN §3.2).
+	// a health gate, and its own dependencies gate it in turn.
 	for len(queue) > 0 {
 		ref := queue[0]
 		queue = queue[1:]
@@ -289,10 +292,9 @@ func (b *builder) discover(ctx context.Context) error {
 	return nil
 }
 
-// detectOverlap implements step 2 (DESIGN §4.1): another Wavefront whose
-// selector matches any of this one's selected nodes. It records the full
-// Wavefront list too, which poll-set maintenance needs to prune deleted
-// Wavefronts' contributions.
+// detectOverlap finds another Wavefront whose selector matches any of this
+// one's selected nodes. It records the full Wavefront list too, which
+// poll-set maintenance needs to prune deleted Wavefronts' contributions.
 func (b *builder) detectOverlap(ctx context.Context) error {
 	all := &wavefrontv1alpha1.WavefrontList{}
 	if err := b.reader.List(ctx, all); err != nil {
@@ -324,7 +326,7 @@ func (b *builder) detectOverlap(ctx context.Context) error {
 	return nil
 }
 
-// resolve implements step 4: each node's role and, for pinned nodes, the
+// resolve determines each node's role and, for pinned nodes, the
 // GitRepository reading the engine evaluates against.
 func (b *builder) resolve(ctx context.Context) error {
 	res := b.res
@@ -351,7 +353,7 @@ func (b *builder) resolve(ctx context.Context) error {
 		// source with a pinned sibling, or when its own source is managed only
 		// by another Wavefront — and must never register a poll Target or
 		// report UnsupportedRefStyle for a source this Wavefront has no
-		// selected interest in (WP2 review finding).
+		// selected interest in.
 		if node.SourceRef != nil && res.Selected[ref] {
 			rs, err := b.resolveSource(ctx, *node.SourceRef)
 			if err != nil {
@@ -365,7 +367,7 @@ func (b *builder) resolve(ctx context.Context) error {
 				res.NodeBySource[*node.SourceRef] = append(res.NodeBySource[*node.SourceRef], ref)
 				// A source can be both hand-pinned and suspended at once;
 				// HandPin wins because it names an actor and Suspend does
-				// not (decision D-B, finding 7).
+				// not.
 				switch {
 				case rs.state.Held:
 					res.Holds[*node.SourceRef] = Hold{Manager: rs.state.HeldBy, Kind: HoldHandPin}
@@ -388,8 +390,8 @@ func (b *builder) resolve(ctx context.Context) error {
 	return nil
 }
 
-// resolveSource returns src's memoized resolution (decision D-A, WP2). Only
-// called for a selected node (the caller's guard): the first selected node
+// resolveSource returns src's memoized resolution. Only called for a
+// selected node (the caller's guard): the first selected node
 // to reference a GitRepository triggers resolveSourceOnce; every later
 // selected referencing node in this pass reuses the result without a second
 // read, a second trackingRef resolution, or a second UnsupportedSources
@@ -410,8 +412,8 @@ func (b *builder) resolveSource(ctx context.Context, src types.NamespacedName) (
 
 // resolveSourceOnce reads one GitRepository. It returns a zero-value
 // resolvedSource — nil state, nil target — for every gate source: absent,
-// unmanaged, or a ref style v1 cannot sequence (DESIGN D10), which is what
-// the engine requires of a gate.
+// unmanaged, or a ref style (semver) that only a future SemverWindow
+// strategy could sequence, which is what the engine requires of a gate.
 func (b *builder) resolveSourceOnce(ctx context.Context, src types.NamespacedName) (*resolvedSource, error) {
 	repo := &sourcev1.GitRepository{}
 	if err := b.reader.Get(ctx, src, repo); err != nil {
@@ -422,8 +424,8 @@ func (b *builder) resolveSourceOnce(ctx context.Context, src types.NamespacedNam
 	}
 	b.res.Repos[src] = repo
 
-	// Opted in by the catalog's participation label (DESIGN §8.2); the
-	// per-node selected check is applied by the caller.
+	// Opted in by the catalog's participation label; the per-node selected
+	// check is applied by the caller.
 	if repo.Labels[pin.ManagedLabel] != managedOptIn {
 		return &resolvedSource{}, nil
 	}
@@ -456,8 +458,7 @@ func (b *builder) resolveSourceOnce(ctx context.Context, src types.NamespacedNam
 	// GitRepository's *previous* URL or tracking ref can still be present
 	// here. Presence alone is not enough: verify it against the plumbing just
 	// resolved, or a one-pass window lets an edit's old SHA get pinned under
-	// the new ref (DESIGN §3.1, "no stale candidate can survive a plumbing
-	// change").
+	// the new ref — no stale candidate can survive a plumbing change.
 	if observation, ok := b.params.Observations[src]; ok &&
 		observedCurrentPlumbing(observation, repo.Spec.URL, trackingRef) {
 		state.ObservedSHA, state.FirstObserved = observation.SHA, observation.FirstObserved
@@ -471,8 +472,8 @@ func (b *builder) resolveSourceOnce(ctx context.Context, src types.NamespacedNam
 	if repo.Spec.SecretRef != nil {
 		target.SecretRef = &types.NamespacedName{Namespace: repo.Namespace, Name: repo.Spec.SecretRef.Name}
 	}
-	// Once per source (WP2): every other referencing node reuses this same
-	// Target via resolvedSources rather than appending a duplicate.
+	// Once per source: every other referencing node reuses this same Target
+	// via resolvedSources rather than appending a duplicate.
 	b.res.Targets = append(b.res.Targets, *target)
 
 	return &resolvedSource{state: state, target: target}, nil
@@ -480,12 +481,12 @@ func (b *builder) resolveSourceOnce(ctx context.Context, src types.NamespacedNam
 
 // observedCurrentPlumbing reports whether obs was observed against exactly
 // the plumbing now in effect: a URL change carries the same one-pass stale
-// window as a tracking-ref change, so both are checked (DESIGN §3.1).
+// window as a tracking-ref change, so both are checked.
 func observedCurrentPlumbing(obs gitpoll.Observation, url, trackingRef string) bool {
 	return obs.URL == url && obs.TrackingRef == trackingRef
 }
 
-// derive implements step 6: the dependsOn DAG and one full evaluation over it.
+// derive builds the dependsOn DAG and runs one full evaluation over it.
 func (b *builder) derive() {
 	res := b.res
 	edges := make(map[adapter.NodeRef][]adapter.NodeRef, len(res.Nodes)+len(res.Missing))
@@ -500,14 +501,14 @@ func (b *builder) derive() {
 	res.GraphChecked = true
 
 	// A cycle would deadlock Flux itself; it is surfaced rather than admitted
-	// into (DESIGN §3.2). Nodes outside the cyclic component keep advancing —
-	// the engine excludes only the component itself.
+	// into. Nodes outside the cyclic component keep advancing — the engine
+	// excludes only the component itself.
 	res.Cycles = res.Graph.Cycles()
 
 	res.Eval = engine.Evaluate(res.Graph, res.Inputs)
 }
 
-// HeldSources builds the capped, source-sorted hold ledger (decision D-C).
+// HeldSources builds the capped, source-sorted hold ledger.
 // It is the ONE list: consumers write exactly this to status.held and
 // edge-trigger against exactly this, so the ledger written and the ledger
 // diffed are byte-identical. A source beyond StatusListCap is counted in
@@ -519,9 +520,9 @@ func HeldSources(res *Result) []wavefrontv1alpha1.HeldNode {
 	}
 	held := make([]wavefrontv1alpha1.HeldNode, 0, len(res.Holds))
 	for src, h := range res.Holds {
-		// A held source shared by more than one node (WP2) is attributed to
-		// the first referencing node in compareRefs order — deterministic,
-		// not an arbitrary map read.
+		// A held source shared by more than one node is attributed to the
+		// first referencing node in compareRefs order — deterministic, not
+		// an arbitrary map read.
 		var node wavefrontv1alpha1.NodeReference
 		if refs := res.NodeBySource[src]; len(refs) > 0 {
 			node = nodeReference(refs[0])
@@ -539,8 +540,7 @@ func HeldSources(res *Result) []wavefrontv1alpha1.HeldNode {
 	return Capped(held)
 }
 
-// Capped bounds an exceptional-state list; the counts stay authoritative
-// (DESIGN §4.1).
+// Capped bounds an exceptional-state list; the counts stay authoritative.
 func Capped[T any](list []T) []T {
 	if len(list) > wavefrontv1alpha1.StatusListCap {
 		return list[:wavefrontv1alpha1.StatusListCap]
@@ -586,7 +586,7 @@ func currentPin(repo *sourcev1.GitRepository) string {
 }
 
 // artifactSHA extracts the commit of the last successful reconciliation, which
-// is what an initial pin bootstraps from (DESIGN §3.5.4).
+// is what an initial pin bootstraps from.
 func artifactSHA(repo *sourcev1.GitRepository) string {
 	if repo.Status.Artifact == nil {
 		return ""

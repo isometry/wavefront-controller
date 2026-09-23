@@ -30,8 +30,9 @@ import (
 	"github.com/isometry/wavefront-controller/internal/pin"
 )
 
-// Strip is the break-glass procedure of docs/runbook.md §8.5: remove every
-// managed source's spec.ref.commit, restoring plain floating-ref Flux.
+// Strip is the break-glass procedure documented in docs/runbook.md's
+// "Break-glass: pin-strip" section: remove every managed source's
+// spec.ref.commit, restoring plain floating-ref Flux.
 //
 // It is the runbook's own loop, made safe. The shell one-liner strips whatever
 // it finds; this refuses to touch a source somebody is holding by hand unless
@@ -78,8 +79,8 @@ func (a *Strip) Plan(ctx context.Context) (*Plan, error) {
 		key := types.NamespacedName{Namespace: repo.Namespace, Name: repo.Name}
 
 		// The same hold the controller sees, which is a hand-pin *or* the
-		// source's own suspension (DESIGN §3.5.3): stripping a suspended
-		// source's pin silently would undo somebody's brake.
+		// source's own suspension: stripping a suspended source's pin
+		// silently would undo somebody's brake.
 		if reason, held := holdOf(repo); held && !a.IncludeHeld {
 			warnings = append(warnings, fmt.Sprintf(
 				"skipping %s: %s (--include-held strips it too)", key, reason))
@@ -134,7 +135,7 @@ func (a *Strip) summary(targets int) string {
 		suspend, targets, plural(targets, "source", "sources"))
 }
 
-// consequences is the warning block plan B4 requires on every strip.
+// consequences is the warning block every strip must show.
 func (a *Strip) consequences(targets int) []string {
 	warnings := []string{fmt.Sprintf(
 		"the controller re-pins every stripped source on its next sweep unless the fleet is "+

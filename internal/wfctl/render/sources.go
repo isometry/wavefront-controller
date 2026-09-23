@@ -34,11 +34,12 @@ const (
 	fetchFailing = "failing"
 )
 
-// Sources renders one row per managed GitRepository (plan B3).
+// Sources renders one row per managed GitRepository.
 //
 // This is the pin ledger: the pin, what the ref actually advertises, and who
 // owns the field. `-o wide` adds the provenance of the last advance, which
-// is the durable record events are not (DESIGN §4.2).
+// is the durable record, unlike events, which the apiserver eventually
+// expires.
 func Sources(w io.Writer, s *snapshot.Snapshot, o Options) error {
 	header := []string{"SOURCE", "PIN", colObserved, "PENDING", "HOLD", "OWNERS", "ARTIFACT", "ADMITTED", "NODES"}
 	if o.Wide {

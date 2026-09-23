@@ -65,7 +65,7 @@ func (p Palette) paint(colour, text string) string {
 	return b.String()
 }
 
-// stateColour maps a node state to its colour (plan B3): Settled green,
+// stateColour maps a node state to its colour: Settled green,
 // Pending and Admissible yellow, Converging blue, Unhealthy red.
 func stateColour(state string) string {
 	switch engine.State(state) {

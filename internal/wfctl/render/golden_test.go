@@ -62,7 +62,7 @@ const fxHandPin = "hand-pin-hold"
 // arguments the two node- and source-scoped commands need. Between them they
 // cover a quiescent fleet, a blocked subtree, a hand-pin, Shadow mode, a
 // cycle, an unobservable derive run, stale status with an unreadable source,
-// and a shared source (plan B6).
+// and a shared source.
 var fixtures = []struct {
 	name string
 	// explain names the nodes `wfctl explain` is run against.
@@ -189,7 +189,7 @@ func TestGoldenColour(t *testing.T) {
 	}
 }
 
-// TestColumnHeaders pins the column lists to plan B3 independently of the
+// TestColumnHeaders pins the expected column lists independently of the
 // goldens, so `-update` cannot quietly absorb a renamed, dropped or reordered
 // column.
 func TestColumnHeaders(t *testing.T) {
@@ -228,7 +228,7 @@ func TestColumnHeaders(t *testing.T) {
 			}
 			header, _, _ := strings.Cut(out.String(), "\n")
 			if got := strings.Join(strings.Fields(header), " "); got != tc.want {
-				t.Errorf("columns are not plan B3's\n want: %s\n  got: %s", tc.want, got)
+				t.Errorf("columns changed unexpectedly\n want: %s\n  got: %s", tc.want, got)
 			}
 		})
 	}
