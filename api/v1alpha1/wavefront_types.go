@@ -155,7 +155,8 @@ type BlockedRef struct {
 
 // Member is one evaluated node's derived state for the last evaluation
 // (selected nodes and the gate nodes reached through dependsOn).
-// Write-only output: the reconciler never reads it back.
+// The reconciler reads it back only as the pin-release ledger: the sources
+// it lists as pinned have their pins relinquished once no longer claimed.
 type Member struct {
 	Node NodeReference `json:"node"`
 	// +kubebuilder:validation:Enum=Pinned;Gate

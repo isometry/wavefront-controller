@@ -30,14 +30,18 @@ import (
 	"testing"
 	"time"
 
+	sourcev1 "github.com/fluxcd/source-controller/api/v1"
 	"github.com/prometheus/client_golang/prometheus/testutil"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	wavefrontv1alpha1 "github.com/isometry/wavefront-controller/api/v1alpha1"
 	"github.com/isometry/wavefront-controller/internal/adapter"
@@ -45,6 +49,7 @@ import (
 	"github.com/isometry/wavefront-controller/internal/gitpoll"
 	"github.com/isometry/wavefront-controller/internal/inputs"
 	"github.com/isometry/wavefront-controller/internal/metrics"
+	"github.com/isometry/wavefront-controller/internal/pin"
 )
 
 // Unit coverage for the two shared-state hazards the reconciler has to get
@@ -441,10 +446,9 @@ func TestSummariseNodesOverlapPassSuppressesGauges(t *testing.T) {
 	}
 }
 
-// TestWavefrontDeletionRetiresItsMetricSeries: deletion carries no finalizer
-// by design — removing a Wavefront simply releases its fleet from
-// management and leaves pins where they are, rather than blocking on
-// cleanup — so Reconcile's IsNotFound branch is the only signal that a
+// TestWavefrontDeletionRetiresItsMetricSeries: the release-pins finalizer
+// gives the fleet's pins back before the object goes, and Reconcile's
+// IsNotFound branch on the follow-up reconcile is then the signal that a
 // Wavefront is gone. It must retire every series that Wavefront ever
 // contributed — both the per-pass gauges a pass recomputes wholesale and the
 // cumulative admission counters no pass ever reconciles — while leaving a
@@ -1145,10 +1149,12 @@ func TestSummariseStampsLastEvaluatedAtMostOncePerInterval(t *testing.T) {
 }
 
 // TestStatusMembersAreWriteOnly enforces structurally that status.members is
-// output for humans and the CLI, never an input the reconciler steers on. A
-// pass that read it back would be carrying orchestration state in status, and
-// a hand-edited (or truncated, past MembersCap) list could then change what
-// the controller does.
+// output for humans and the CLI, never an input admission steers on. A pass
+// that read it back would be carrying orchestration state in status, and a
+// hand-edited (or truncated, past MembersCap) list could then change what the
+// controller admits. The one sanctioned read is pinnedSources, the pin-release
+// ledger: the worst a hand-edit can do there is relinquish a pin this
+// Wavefront owns on a source it no longer claims.
 func TestStatusMembersAreWriteOnly(t *testing.T) {
 	writeOnly := []string{"Members", "MembersOmitted"}
 
@@ -1195,6 +1201,9 @@ func TestStatusMembersAreWriteOnly(t *testing.T) {
 		}
 
 		ast.Inspect(file, func(n ast.Node) bool {
+			if fn, ok := n.(*ast.FuncDecl); ok && fn.Name.Name == "pinnedSources" {
+				return false
+			}
 			sel, ok := n.(*ast.SelectorExpr)
 			if !ok || !slices.Contains(writeOnly, sel.Sel.Name) || !onStatus(sel.X) {
 				return true
@@ -1205,5 +1214,182 @@ func TestStatusMembersAreWriteOnly(t *testing.T) {
 			}
 			return true
 		})
+	}
+}
+
+// --- the pin-release ledger -------------------------------------------------
+
+func sourceKey(name string) types.NamespacedName {
+	return types.NamespacedName{Namespace: fluxNamespace, Name: name}
+}
+
+// repoOwnedBy is a GitRepository whose spec.ref.commit is owned by manager.
+func repoOwnedBy(name, manager string) *sourcev1.GitRepository {
+	return &sourcev1.GitRepository{
+		Namespace: fluxNamespace, Name: name,
+		ManagedFields: []metav1.ManagedFieldsEntry{{
+			Manager:   manager,
+			Operation: metav1.ManagedFieldsOperationApply,
+			FieldsV1:  metav1.NewFieldsV1(`{"f:spec":{"f:ref":{"f:commit":{}}}}`),
+		}},
+	}
+}
+
+// pinnedMember is a status.members entry for a pinned node on source name.
+func pinnedMember(name string) wavefrontv1alpha1.Member {
+	return wavefrontv1alpha1.Member{
+		Node:   wavefrontv1alpha1.NodeReference{Kind: kindKustomization, Namespace: fluxNamespace, Name: name},
+		Role:   string(engine.RolePinned),
+		Source: fluxNamespace + "/" + name,
+	}
+}
+
+// releaseReconciler serves repos from Get (NotFound otherwise) and records
+// every source Release applies to, failing each apply with applyErr.
+func releaseReconciler(t *testing.T, applyErr error, repos ...*sourcev1.GitRepository) (
+	*WavefrontReconciler, *[]string, *events.FakeRecorder) {
+	t.Helper()
+	scheme := runtime.NewScheme()
+	if err := sourcev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme: %v", err)
+	}
+	byKey := map[types.NamespacedName]*sourcev1.GitRepository{}
+	for _, repo := range repos {
+		byKey[client.ObjectKeyFromObject(repo)] = repo
+	}
+	var applied []string
+	c := interceptor.NewClient(fake.NewClientBuilder().WithScheme(scheme).Build(), interceptor.Funcs{
+		Get: func(_ context.Context, _ client.WithWatch, key client.ObjectKey, obj client.Object, _ ...client.GetOption) error {
+			repo, ok := byKey[key]
+			if !ok {
+				return apierrors.NewNotFound(sourcev1.GroupVersion.WithResource("gitrepositories").GroupResource(), key.Name)
+			}
+			repo.DeepCopyInto(obj.(*sourcev1.GitRepository))
+			return nil
+		},
+		Apply: func(_ context.Context, _ client.WithWatch, obj runtime.ApplyConfiguration, _ ...client.ApplyOption) error {
+			applied = append(applied, obj.(interface{ GetName() string }).GetName())
+			return applyErr
+		},
+	})
+	recorder := events.NewFakeRecorder(16)
+	return &WavefrontReconciler{
+		Client: c, Recorder: recorder, Clock: time.Now, Metrics: metrics.Nop(),
+		PinWriter: &pin.Writer{Client: c},
+	}, &applied, recorder
+}
+
+// TestExecuteShadowReleasesOwnedPins: Shadow gives back every pin the last
+// members recorded that this controller owns, and leaves a hand-pin, a gate
+// and a vanished source alone.
+func TestExecuteShadowReleasesOwnedPins(t *testing.T) {
+	r, applied, recorder := releaseReconciler(t, nil,
+		repoOwnedBy(alphaSource, pin.FieldManager), repoOwnedBy(betaSource, humanManager))
+
+	gate := wavefrontv1alpha1.Member{Node: wavefrontv1alpha1.NodeReference{Name: gateNode}, Role: string(engine.RoleGate)}
+	wf := &wavefrontv1alpha1.Wavefront{
+		Name: fleetName,
+		Spec: wavefrontv1alpha1.WavefrontSpec{Mode: wavefrontv1alpha1.ModeShadow},
+		Status: wavefrontv1alpha1.WavefrontStatus{Members: []wavefrontv1alpha1.Member{
+			pinnedMember(alphaSource), pinnedMember(betaSource), pinnedMember("gone"), gate,
+		}},
+	}
+	p := &pass{wf: wf, res: &inputs.Result{}}
+	if err := r.execute(context.Background(), p); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if !slices.Equal(*applied, []string{alphaSource}) {
+		t.Errorf("released = %v, want only %s: beta is hand-pinned, gone is gone", *applied, alphaSource)
+	}
+	recorded := drain(recorder.Events)
+	if len(recorded) != 2 || !strings.Contains(recorded[0], reasonPinReleased) || !strings.Contains(recorded[0], "mode is Shadow") {
+		t.Errorf("events = %v, want a %s pair naming the cause", recorded, reasonPinReleased)
+	}
+	if p.unreleased {
+		t.Error("unreleased = true, want false after a clean release")
+	}
+}
+
+// TestExecuteEnforceReleasesOnlyDescopedPins: Enforce releases previous
+// members minus the sources this pass still selects.
+func TestExecuteEnforceReleasesOnlyDescopedPins(t *testing.T) {
+	r, applied, _ := releaseReconciler(t, nil,
+		repoOwnedBy(alphaSource, pin.FieldManager), repoOwnedBy(betaSource, pin.FieldManager))
+
+	wf := &wavefrontv1alpha1.Wavefront{
+		Name: fleetName,
+		Spec: wavefrontv1alpha1.WavefrontSpec{Mode: wavefrontv1alpha1.ModeEnforce},
+		Status: wavefrontv1alpha1.WavefrontStatus{Members: []wavefrontv1alpha1.Member{
+			pinnedMember(alphaSource), pinnedMember(betaSource),
+		}},
+	}
+	p := &pass{wf: wf, res: &inputs.Result{NodeBySource: map[types.NamespacedName][]adapter.NodeRef{
+		sourceKey(betaSource): {{Kind: kindKustomization, Namespace: fluxNamespace, Name: betaSource}},
+	}}}
+	if err := r.execute(context.Background(), p); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if !slices.Equal(*applied, []string{alphaSource}) {
+		t.Errorf("released = %v, want only the de-scoped %s", *applied, alphaSource)
+	}
+}
+
+// TestExecuteSuspendAndSkipAdmissionsReleaseNothing: Suspend is the brake
+// that freezes pins in place, and a suppressed pass proves nothing about
+// scope.
+func TestExecuteSuspendAndSkipAdmissionsReleaseNothing(t *testing.T) {
+	for name, res := range map[string]*inputs.Result{
+		"suspend":        {},
+		"skipAdmissions": {Overlap: otherWavefront},
+	} {
+		t.Run(name, func(t *testing.T) {
+			r, applied, _ := releaseReconciler(t, nil, repoOwnedBy(alphaSource, pin.FieldManager))
+			wf := &wavefrontv1alpha1.Wavefront{
+				Name: fleetName,
+				Spec: wavefrontv1alpha1.WavefrontSpec{Mode: wavefrontv1alpha1.ModeShadow, Suspend: name == "suspend"},
+				Status: wavefrontv1alpha1.WavefrontStatus{
+					Members: []wavefrontv1alpha1.Member{pinnedMember(alphaSource)},
+				},
+			}
+			if err := r.execute(context.Background(), &pass{wf: wf, res: res}); err != nil {
+				t.Fatalf("execute: %v", err)
+			}
+			if len(*applied) != 0 {
+				t.Errorf("released = %v, want nothing", *applied)
+			}
+		})
+	}
+}
+
+// TestFailedReleaseHoldsMembersBack: a failed release must not advance the
+// ledger, or the next pass would no longer know to retry it.
+func TestFailedReleaseHoldsMembersBack(t *testing.T) {
+	r, applied, _ := releaseReconciler(t, errors.New("apiserver unavailable"),
+		repoOwnedBy(alphaSource, pin.FieldManager))
+
+	previous := []wavefrontv1alpha1.Member{pinnedMember(alphaSource)}
+	wf := &wavefrontv1alpha1.Wavefront{
+		Name:   fleetName,
+		Spec:   wavefrontv1alpha1.WavefrontSpec{Mode: wavefrontv1alpha1.ModeShadow},
+		Status: wavefrontv1alpha1.WavefrontStatus{Members: slices.Clone(previous), MembersOmitted: 3},
+	}
+	p := &pass{wf: wf, res: &inputs.Result{Resolved: true, GraphChecked: true}}
+	if err := r.execute(context.Background(), p); err == nil {
+		t.Fatal("execute = nil, want the release failure surfaced")
+	}
+	if len(*applied) != 1 || !p.unreleased {
+		t.Fatalf("released = %v, unreleased = %v; want one attempt and the pass marked unreleased", *applied, p.unreleased)
+	}
+
+	r.summariseNodes(p)
+	if len(wf.Status.Members) != 1 || wf.Status.Members[0].Source != previous[0].Source || wf.Status.MembersOmitted != 3 {
+		t.Errorf("members = %+v (omitted %d), want the previous ledger kept", wf.Status.Members, wf.Status.MembersOmitted)
+	}
+
+	// Teeth: a clean pass does advance the ledger.
+	p.unreleased = false
+	r.summariseNodes(p)
+	if len(wf.Status.Members) != 0 || wf.Status.MembersOmitted != 0 {
+		t.Errorf("members = %+v (omitted %d), want this pass's empty picture", wf.Status.Members, wf.Status.MembersOmitted)
 	}
 }

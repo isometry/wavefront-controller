@@ -80,6 +80,11 @@ func (a *WavefrontChange) Plan(_ context.Context) (*Plan, error) {
 		plan.Warnings = append(plan.Warnings,
 			fmt.Sprintf("no change: %s is already %s", field, shown(after)))
 	}
+	if a.Mode != nil && *a.Mode == wavefrontv1alpha1.ModeShadow && wf.Spec.Mode != wavefrontv1alpha1.ModeShadow {
+		plan.Warnings = append(plan.Warnings,
+			"the controller relinquishes every pin it owns; sources float to their tracking refs "+
+				"(use `suspend` to freeze in place)")
+	}
 	if owner := snapshot.SpecOwners(wf)[field]; slices.Contains(gitOpsAppliers, owner) {
 		plan.Warnings = append(plan.Warnings, fmt.Sprintf(
 			"%s is GitOps-owned (field manager %q); Flux will revert this — change it in git", field, owner))

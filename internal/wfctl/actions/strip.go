@@ -139,8 +139,8 @@ func (a *Strip) summary(targets int) string {
 func (a *Strip) consequences(targets int) []string {
 	warnings := []string{fmt.Sprintf(
 		"the controller re-pins every stripped source on its next sweep unless the fleet is "+
-			"suspended — Wavefront %s is currently suspend=%t",
-		a.Wavefront.Name, a.Wavefront.Spec.Suspend)}
+			"suspended or in Shadow mode — Wavefront %s is currently suspend=%t, mode=%s",
+		a.Wavefront.Name, a.Wavefront.Spec.Suspend, a.Wavefront.Spec.Mode)}
 
 	if a.Suspend {
 		warnings = append(warnings, fmt.Sprintf(

@@ -30,6 +30,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 
 	sourcev1 "github.com/fluxcd/source-controller/api/v1"
@@ -127,6 +128,25 @@ func Hold(repo *sourcev1.GitRepository) (manager string, held bool) {
 	return "", false
 }
 
+// Owned reports whether FieldManager owns spec.ref.commit.
+func Owned(repo *sourcev1.GitRepository) bool {
+	return slices.ContainsFunc(Owners(repo), func(o Owner) bool { return o.Manager == FieldManager })
+}
+
+// Relinquish gives up manager's share of src: an apply of identity alone drops
+// every field manager owned alone, while a value another manager co-owns survives.
+func Relinquish(ctx context.Context, c client.Client, src types.NamespacedName, manager string) error {
+	empty := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": sourcev1.GroupVersion.String(),
+		"kind":       sourcev1.GitRepositoryKind,
+		"metadata": map[string]any{
+			"name":      src.Name,
+			"namespace": src.Namespace,
+		},
+	}}
+	return c.Apply(ctx, client.ApplyConfigurationFromUnstructured(empty), client.FieldOwner(manager))
+}
+
 // Writer advances pins via server-side apply.
 type Writer struct{ Client client.Client }
 
@@ -166,4 +186,13 @@ func (w *Writer) Advance(ctx context.Context, repo types.NamespacedName, prev, s
 	default:
 		return fmt.Errorf("advancing pin of %s to %s: %w", repo, sha, err)
 	}
+}
+
+// Release relinquishes the controller's share of repo's pin: spec.ref.commit
+// and the provenance annotations go unless another manager co-owns them.
+func (w *Writer) Release(ctx context.Context, repo types.NamespacedName) error {
+	if err := Relinquish(ctx, w.Client, repo, FieldManager); err != nil {
+		return fmt.Errorf("releasing pin of %s: %w", repo, err)
+	}
+	return nil
 }

@@ -76,6 +76,7 @@ var _ = Describe("suspend, resume and mode", func() {
 		plan := planOf(&actions.WavefrontChange{Client: k8sClient, Wavefront: wf, Mode: &shadow})
 		Expect(plan.Before).To(HaveKeyWithValue(snapshot.FieldMode, string(wavefrontv1alpha1.ModeEnforce)))
 		Expect(plan.After).To(HaveKeyWithValue(snapshot.FieldMode, string(wavefrontv1alpha1.ModeShadow)))
+		Expect(plan.Warnings).To(ContainElement(ContainSubstring("relinquishes every pin it owns")))
 		run(plan)
 
 		updated := getWavefront(wf.Name)
@@ -89,6 +90,7 @@ var _ = Describe("suspend, resume and mode", func() {
 		mode := wavefrontv1alpha1.ModeEnforce
 		plan := planOf(&actions.WavefrontChange{Client: k8sClient, Wavefront: wf, Mode: &mode})
 		Expect(plan.Warnings).To(ContainElement(ContainSubstring("already")))
+		Expect(plan.Warnings).NotTo(ContainElement(ContainSubstring("relinquishes")))
 		run(plan)
 	})
 

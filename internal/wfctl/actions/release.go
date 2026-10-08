@@ -284,17 +284,7 @@ func (a *Release) relinquish(ctx context.Context, holder pin.Owner) error {
 
 // relinquishApply gives up the wfctl apply share.
 func (a *Release) relinquishApply(ctx context.Context) error {
-	empty := &unstructured.Unstructured{Object: map[string]any{
-		"apiVersion": sourcev1.GroupVersion.String(),
-		"kind":       sourcev1.GitRepositoryKind,
-		"metadata": map[string]any{
-			"name":      a.Source.Name,
-			"namespace": a.Source.Namespace,
-		},
-	}}
-
-	if err := a.Client.Apply(ctx, client.ApplyConfigurationFromUnstructured(empty),
-		client.FieldOwner(pin.WfctlFieldManager)); err != nil {
+	if err := pin.Relinquish(ctx, a.Client, a.Source, pin.WfctlFieldManager); err != nil {
 		return fmt.Errorf("relinquishing the %q hold on %s: %w", pin.WfctlFieldManager, a.Source, err)
 	}
 	return nil

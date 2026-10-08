@@ -124,7 +124,7 @@ derived from `git describe` that generally does not exist in the registry.
 kubectl apply -k config/samples/
 ```
 
-The sample starts in `mode: Shadow` (detect and report, zero writes) — see
+The sample starts in `mode: Shadow` (detect and report, admit nothing) — see
 [Shadow → Enforce rollout](#shadow--enforce-rollout) below before flipping
 it. To remove: `kubectl delete -k config/samples/`, `make uninstall`, `make
 undeploy`.
@@ -163,7 +163,7 @@ spec:
 |---|---|---|---|
 | `spec.nodes.kinds` | `[]string`, 1–1 items | *(required)* | Must be exactly `[Kustomization]` — CEL-validated (`self.all(k, k == 'Kustomization')`); `HelmRelease` is reserved for a future, non-breaking addition (v1 nodes: Kustomization only). |
 | `spec.nodes.selector` | `metav1.LabelSelector` | *(required)* | Selects graph-member `Kustomization`s across all namespaces; also the boundary for cross-`Wavefront` overlap detection. |
-| `spec.mode` | `Shadow` \| `Enforce` | `Shadow` | `Shadow`: full detection, graph derivation, admissibility evaluation, status/metrics, `ShadowAdmission` events — **zero writes**. `Enforce`: pins are actually advanced. |
+| `spec.mode` | `Shadow` \| `Enforce` | `Shadow` | `Shadow`: full detection, graph derivation, admissibility evaluation, status/metrics, `ShadowAdmission` events — **no admissions**; flipping to Shadow relinquishes every pin the controller owns (sources float to their tracking refs; `suspend` holds them in place instead). `Enforce`: pins are actually advanced. A source de-scoped from the selector, or a deleted `Wavefront` (finalizer `wavefront.as-code.io/release-pins`), likewise has the controller's own pins relinquished; a hand-pin co-owned by another field manager survives. |
 | `spec.suspend` | `bool` | `false` | Freezes all pin *writes* fleet-wide; detection and status keep running. The gentle brake, orthogonal to `mode` and to Flux's own `spec.suspend`. |
 | `spec.poll.interval` | `metav1.Duration` | `90s` | Interval between ref-advertisement polling sweeps. Each sweep is anchored to the *end* of the previous one, not a fixed clock tick, so the **effective poll period observed by the fleet is `interval + sweep duration`**, not `interval` alone — budget for that when setting a pin-staleness alarm threshold. |
 | `spec.poll.perHostConcurrency` | `int`, min 1 | `4` | Bounds concurrent ref listings per git host. |
@@ -223,6 +223,7 @@ API), attached to the `Wavefront` object:
 |---|---|---|---|
 | `InitialPin` | Normal | `Pin` | First pin of a newly discovered/matched source |
 | `PinAdvanced` | Normal | `Pin` | A subsequent pin advance |
+| `PinReleased` | Normal | `Unpin` | The controller relinquished its pin: the Wavefront flipped to Shadow, the source was de-scoped, or the Wavefront was deleted |
 | `ShadowAdmission` | Normal | `ShadowPin` | Would-be admission while `mode: Shadow` (no write performed) |
 | `HoldDetected` | Warning | `Hold` | `spec.ref.commit` is owned by a field manager other than the controller |
 | `HoldReleased` | Normal | `Release` | A previously-held source's foreign ownership was removed; controller resumes |
@@ -270,7 +271,7 @@ phases rather than flipping the whole fleet at once:
 
 1. **Phase 0 — Shadow.** Deploy with `mode: Shadow` against the intended
    selector; detection, graph derivation, and `ShadowAdmission` events run
-   with zero writes. Validates credential reuse, poll load, participation
+   with no admissions. Validates credential reuse, poll load, participation
    labelling, and graph shape, and produces real admission-wait data against
    the starvation caveat below.
 2. **Phase 1 — Pilot.** Label a small subset spanning at least one
