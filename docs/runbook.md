@@ -327,7 +327,9 @@ On deletion the controller relinquishes every pin it owns on the sources the
 avoids overlapping/piling-up sweeps if listing ever gets slow). So the
 effective poll period observed by the fleet is `poll.interval + sweep
 duration`, not `poll.interval` alone. Budget for that when reasoning about
-detection latency or setting a pin-staleness alarm threshold.
+detection latency or setting a pin-staleness alarm threshold. A source with
+no observation yet (newly targeted, or every source after a controller
+restart) triggers an immediate sweep rather than waiting out the interval.
 
 ## Events
 

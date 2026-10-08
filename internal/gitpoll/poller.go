@@ -144,6 +144,10 @@ type Poller struct {
 	// Buffered and signalled without blocking: a pending wake is as good as
 	// two, and Configure must never wait on the sweep loop.
 	reconfigured chan struct{}
+	// sweepNow asks Start for an immediate sweep when SetTargets adds a target
+	// with no observation yet, so a new source is not left unpolled for a whole
+	// interval. Buffered and non-blocking, like reconfigured.
+	sweepNow chan struct{}
 
 	mu                 sync.RWMutex
 	interval           time.Duration
@@ -223,6 +227,7 @@ func NewPoller(secrets client.Reader, lister Lister, notify func(), strategy sel
 		interval:           DefaultInterval,
 		perHostConcurrency: DefaultPerHostConcurrency,
 		reconfigured:       make(chan struct{}, 1),
+		sweepNow:           make(chan struct{}, 1),
 		live:               map[types.NamespacedName]targetRef{},
 		observations:       map[types.NamespacedName]record{},
 	}
@@ -269,13 +274,39 @@ func (p *Poller) SetTargets(targets []Target) {
 	}
 
 	p.mu.Lock()
-	defer p.mu.Unlock()
 	p.targets = slices.Clone(targets)
 	p.live = live
 	maps.DeleteFunc(p.observations, func(src types.NamespacedName, rec record) bool {
 		current, ok := live[src]
 		return !ok || current != rec.ref
 	})
+	unobserved := p.unobservedLocked()
+	p.mu.Unlock()
+
+	// A failed listing still leaves a record, so a broken source cannot keep
+	// this firing.
+	if unobserved {
+		select {
+		case p.sweepNow <- struct{}{}:
+		default:
+		}
+	}
+}
+
+// hasUnobserved reports whether any live target has no observation yet.
+func (p *Poller) hasUnobserved() bool {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.unobservedLocked()
+}
+
+func (p *Poller) unobservedLocked() bool {
+	for src := range p.live {
+		if _, ok := p.observations[src]; !ok {
+			return true
+		}
+	}
+	return false
 }
 
 // Observation returns the latest observation for a source, if any.
@@ -331,6 +362,14 @@ func (p *Poller) Start(ctx context.Context) error {
 		case <-p.reconfigured:
 			// Re-arm against the new cadence.
 			timer.Stop()
+		case <-p.sweepNow:
+			timer.Stop()
+			// A signal left buffered by a sweep that already observed
+			// everything must not trigger a redundant one.
+			if p.hasUnobserved() {
+				p.sweep(ctx)
+				last = time.Now()
+			}
 		case <-timer.C:
 			p.sweep(ctx)
 			last = time.Now()
