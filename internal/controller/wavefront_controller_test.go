@@ -33,6 +33,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -667,6 +668,127 @@ var _ = Describe("Wavefront reconciler", func() {
 			Consistently(func() float64 {
 				return testutil.ToFloat64(instruments.AdmissionsTotal.WithLabelValues("wf-shadow", resultShadow))
 			}).Should(BeNumerically("<=", 2))
+		})
+	})
+
+	Describe("pin release", func() {
+		// pinnedNames reads the source names in the Wavefront's status.pinned.
+		pinnedNames := func(wfName string) []string {
+			var names []string
+			if inv := getWavefront(wfName).Status.Pinned; inv != nil {
+				for _, ref := range inv.Entries {
+					src, _ := sourceOf(ref)
+					names = append(names, src.Name)
+				}
+			}
+			return names
+		}
+		// pinnedFleet stands up one managed, selected source per name and an
+		// Enforce Wavefront over them, returning once every source is pinned.
+		pinnedFleet := func(ns, wfName string, names ...string) map[string]*kustomizev1.Kustomization {
+			GinkgoHelper()
+			makeNamespace(ns)
+			nodes := map[string]*kustomizev1.Kustomization{}
+			for _, name := range names {
+				url := repoURLFor(ns, name)
+				lister.advertise(url, mainRef, shaA)
+				repo := makeGitRepo(ns, name, url, mainRef, true)
+				setArtifact(repo, revisionOf(shaA))
+				nodes[name] = makeKustomization(ns, name,
+					types.NamespacedName{Namespace: ns, Name: name}, nil,
+					map[string]string{scenarioLabel: ns})
+			}
+			makeWavefront(wfName, ns, wavefrontv1alpha1.ModeEnforce)
+			for _, name := range names {
+				Eventually(func() string { return pinOf(ns, name) }).Should(Equal(shaA))
+			}
+			Eventually(func() []string { return pinnedNames(wfName) }).Should(ConsistOf(names))
+			return nodes
+		}
+		setMode := func(wfName string, mode wavefrontv1alpha1.Mode) {
+			GinkgoHelper()
+			Eventually(func() error {
+				wf := getWavefront(wfName)
+				wf.Spec.Mode = mode
+				return k8sClient.Update(ctx, wf)
+			}).Should(Succeed())
+		}
+
+		It("relinquishes every owned pin on a flip to Shadow", func() {
+			const ns, wfName = "release-shadow", "wf-release-shadow"
+			pinnedFleet(ns, wfName, flotilla)
+			Expect(getWavefront(wfName).Finalizers).To(ContainElement(releasePinsFinalizer))
+
+			setMode(wfName, wavefrontv1alpha1.ModeShadow)
+
+			Eventually(func() string { return pinOf(ns, flotilla) }).Should(BeEmpty())
+			Expect(getRepo(ns, flotilla).GetAnnotations()).NotTo(HaveKey(pin.AnnotObservedRef))
+			Eventually(func() []string { return pinnedNames(wfName) }).Should(BeEmpty())
+			Eventually(func() []eventsv1.Event {
+				return rawEvents(reasonPinReleased, "GitRepository", flotilla)
+			}).ShouldNot(BeEmpty())
+			Eventually(func() []string {
+				messages, _ := recordedEvents(reasonPinReleased, wfName)
+				return messages
+			}).Should(ContainElement(ContainSubstring("mode is Shadow")))
+		})
+
+		It("relinquishes the pin of a source that drops out of the selector", func() {
+			const ns, wfName = "release-descope", "wf-release-descope"
+			nodes := pinnedFleet(ns, wfName, "descope-a", "descope-b")
+
+			By("relabelling descope-a out of the selector")
+			Eventually(func() error {
+				ks := &kustomizev1.Kustomization{}
+				if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(nodes["descope-a"]), ks); err != nil {
+					return err
+				}
+				ks.Labels = nil
+				return k8sClient.Update(ctx, ks)
+			}).Should(Succeed())
+
+			Eventually(func() string { return pinOf(ns, "descope-a") }).Should(BeEmpty())
+			Consistently(func() string { return pinOf(ns, "descope-b") }).Should(Equal(shaA))
+			Eventually(func() []string { return pinnedNames(wfName) }).Should(Equal([]string{"descope-b"}))
+			Eventually(func() []string {
+				messages, _ := recordedEvents(reasonPinReleased, wfName)
+				return messages
+			}).Should(ContainElement(ContainSubstring("no longer selected")))
+		})
+
+		It("relinquishes every owned pin before a deleted Wavefront goes", func() {
+			const ns, wfName = "release-delete", "wf-release-delete"
+			pinnedFleet(ns, wfName, flotilla)
+
+			Expect(k8sClient.Delete(ctx, getWavefront(wfName))).To(Succeed())
+
+			Eventually(func() bool {
+				err := k8sClient.Get(ctx, client.ObjectKey{Name: wfName}, &wavefrontv1alpha1.Wavefront{})
+				return apierrors.IsNotFound(err)
+			}).Should(BeTrue())
+			Expect(pinOf(ns, flotilla)).To(BeEmpty())
+		})
+
+		It("leaves a hand-pin it co-owns in place, giving up only its own share", func() {
+			const ns, wfName = "release-coowned", "wf-release-coowned"
+			pinnedFleet(ns, wfName, flotilla)
+
+			By("hand-pinning the same value under wfctl's apply manager")
+			handPin := &unstructured.Unstructured{Object: map[string]any{
+				"apiVersion": sourcev1.GroupVersion.String(),
+				"kind":       sourcev1.GitRepositoryKind,
+				"metadata":   map[string]any{"name": flotilla, "namespace": ns},
+				"spec":       map[string]any{"ref": map[string]any{"commit": shaA}},
+			}}
+			Expect(k8sClient.Apply(ctx, client.ApplyConfigurationFromUnstructured(handPin),
+				client.FieldOwner(pin.WfctlFieldManager))).To(Succeed())
+
+			setMode(wfName, wavefrontv1alpha1.ModeShadow)
+
+			Eventually(func() bool { return pin.Owned(getRepo(ns, flotilla)) }).Should(BeFalse())
+			Expect(pinOf(ns, flotilla)).To(Equal(shaA), "the co-owned hand-pin survives")
+			Expect(getRepo(ns, flotilla).GetAnnotations()).NotTo(HaveKey(pin.AnnotObservedRef))
+			Eventually(func() []string { return pinnedNames(wfName) }).Should(BeEmpty())
 		})
 	})
 

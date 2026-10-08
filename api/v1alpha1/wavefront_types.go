@@ -201,10 +201,31 @@ type WavefrontStatus struct {
 	Members []Member `json:"members,omitempty"`
 	// +optional
 	MembersOmitted int `json:"membersOmitted,omitempty"`
+	// Pinned is the release ledger: every source this Wavefront has a claim
+	// on, i.e. every in-scope source while in Enforce, plus any whose release
+	// has not yet succeeded. Uncapped.
+	// +optional
+	Pinned *ResourceInventory `json:"pinned,omitempty"`
 	// LastEvaluated is advanced at most once per spec.poll.interval so that
 	// watch-triggered reconciles do not rewrite status every pass.
 	// +optional
 	LastEvaluated *metav1.Time `json:"lastEvaluated,omitempty"`
+}
+
+// ResourceInventory has the shape of Flux's status.inventory.
+type ResourceInventory struct {
+	// +listType=map
+	// +listMapKey=id
+	Entries []ResourceRef `json:"entries"`
+}
+
+// ResourceRef locates one object, as in Flux's inventory.
+type ResourceRef struct {
+	// ID is "<namespace>_<name>_<group>_<kind>",
+	// e.g. "flotillas_team-a-repo_source.toolkit.fluxcd.io_GitRepository".
+	ID string `json:"id"`
+	// Version is the object's API version, e.g. "v1".
+	Version string `json:"v"`
 }
 
 // StatusListCap bounds the Blocked and Held status lists.

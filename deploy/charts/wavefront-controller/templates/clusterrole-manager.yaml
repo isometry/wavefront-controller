@@ -54,7 +54,14 @@ rules:
   verbs:
   - get
   - list
+  - patch
   - watch
+- apiGroups:
+  - wavefront.as-code.io
+  resources:
+  - wavefronts/finalizers
+  verbs:
+  - update
 - apiGroups:
   - wavefront.as-code.io
   resources:

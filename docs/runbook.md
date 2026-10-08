@@ -31,7 +31,7 @@ The controller exposes three levers, from gentlest to most drastic:
 
 | Lever | Effect | Touches Flux resources? |
 |---|---|---|
-| `spec.mode: Shadow` | Full detection, graph derivation, admissibility evaluation, status and metrics, `ShadowAdmission` events — **zero writes**. | No |
+| `spec.mode: Shadow` | Full detection, graph derivation, admissibility evaluation, status and metrics, `ShadowAdmission` events — **no admissions**. Flipping *to* Shadow relinquishes every pin the controller owns, so the fleet floats to its tracking refs. | **Yes** — strips the controller's own pins |
 | `spec.suspend: true` | Freezes all pin *writes* fleet-wide; detection and status keep running. The gentle brake — flip back to `false` to resume. | No |
 | Break-glass pin-strip (below) | Removes every controller-managed `spec.ref.commit`, restoring plain floating-ref Flux behaviour. | **Yes** — mutates `GitRepository` objects |
 
@@ -210,8 +210,8 @@ The `kubectl` loop above
 strips them regardless, since it cannot tell the difference. Per-source
 errors are reported and the run continues rather than abandoning the fleet
 half-stripped. The plan always warns that the controller re-pins everything on
-its next sweep unless the fleet is suspended, and names the Wavefront's
-current `suspend` value.
+its next sweep unless the fleet is suspended or in Shadow mode, and names the
+Wavefront's current `suspend` and `mode`.
 
 Effects:
 
@@ -221,8 +221,10 @@ Effects:
   any source that has no `spec.ref.commit` set, e.g. one still on its initial
   unpinned state or already stripped.
 - This does **not** stop the controller from re-pinning on its next
-  reconcile unless you also suspend it (`spec.suspend: true`) or scale the
-  deployment to zero. Strip-and-leave-running will simply re-pin everything
+  reconcile unless you also suspend it (`spec.suspend: true`), flip it to
+  `Shadow` (a durable, controller-driven strip: it relinquishes every pin it
+  owns and writes none), or scale the deployment to zero. A source de-scoped
+  from the selector is released the same way. Strip-and-leave-running will simply re-pin everything
   back on the next poll (each such source looks exactly like [initial pin on
   discovery](../DESIGN.md#35-pin-ownership-provenance-and-coexistence) — a
   no-op-effect re-pin to the currently observed SHA). For a durable
@@ -280,9 +282,11 @@ Effects:
    note](../DESIGN.md#9-rollout-plan)) — so flipping is risk-free even
    against already-running flotillas.
 4. Watch `PinAdvanced`/`InitialPin` events and `status.phase` return to
-   `Quiescent`. Roll back by flipping `mode` back to `Shadow` (writes stop;
-   already-written pins are untouched) or by the break-glass procedure above
-   if you need pins actively reverted.
+   `Quiescent`. Flipping back to `Shadow` is **not** a safe rollback: the
+   controller relinquishes every pin it owns (`PinReleased` events) and the
+   whole fleet floats to its tracking refs. To hold pins where they are, set
+   `spec.suspend: true` instead — it is the brake. Use `Shadow` (or the
+   break-glass procedure above) only when you want pins actively reverted.
 
 Per [`DESIGN.md`'s rollout plan](../DESIGN.md#9-rollout-plan), prefer ramping
 by dependency depth (infrastructure flotillas first) rather than flipping
@@ -292,24 +296,29 @@ over time.
 
 ## Deleting a `Wavefront`
 
-Deleting a `Wavefront` resource has **no finalizer**: it simply stops that
-object's management. Concretely:
+Every `Wavefront` carries the finalizer `wavefront.as-code.io/release-pins`.
+On deletion the controller relinquishes every pin it owns on the sources the
+`Wavefront` last recorded (`status.pinned`) before letting the object go:
 
-- The controller stops reconciling against that selector — no more polling,
-  no more admissions, no more status/metrics for those nodes.
-- **Pins already written are left exactly as they are.** `spec.ref.commit`
-  values and the controller's provenance annotations on managed
-  `GitRepository`s are *not* reverted or cleaned up. The fleet keeps running
-  on its last-admitted pins, forever, until something else touches them.
-- This is functionally equivalent to the break-glass pin-strip's "controller
-  goes away" half, minus the un-pinning — if you actually want floating refs
-  back, run the pin-strip one-liner separately (before or after deleting the
-  `Wavefront`; it operates on `GitRepository` labels, not on the `Wavefront`
-  object).
-- If you intend to fully decommission Wavefront management of a set of
-  sources, do the pin-strip *first*, then delete the `Wavefront` (or narrow
-  its selector) — otherwise you're left with permanently stale pins with no
-  controller to advance them.
+- Only the controller's own share is dropped: `spec.ref.commit` and the
+  provenance annotations are removed unless another field manager co-owns the
+  value, so a hand-pin (foreign field manager) survives. Sources revert to
+  their tracking refs.
+- Deletion strips even when the fleet is `suspend`ed.
+- A source another `Wavefront` still lists in its own `status.pinned` (a
+  shared `GitRepository`) is left pinned for that `Wavefront` to manage.
+- **Delete `Wavefront`s *before* uninstalling the controller.** With the
+  controller gone nothing removes the finalizer, and the `Wavefront` hangs in
+  `Terminating`.
+- Escape hatch, if the controller is already gone (pins then stay as written;
+  strip them with the break-glass procedure if you want floating refs):
+
+  ```sh
+  kubectl patch wavefront X --type=merge -p '{"metadata":{"finalizers":null}}'
+  ```
+
+- Narrowing the selector releases too: a de-scoped source loses the
+  controller's pin on the next pass (unless the fleet is suspended).
 
 ## Poll tuning
 
@@ -355,6 +364,7 @@ Reasons emitted, all attached to the `Wavefront` object:
 |---|---|---|---|
 | `InitialPin` | Normal | `Pin` | First pin of a newly discovered/matched source |
 | `PinAdvanced` | Normal | `Pin` | A subsequent pin advance |
+| `PinReleased` | Normal | `Unpin` | The controller relinquished its pin: the Wavefront flipped to Shadow, the source was de-scoped, or the Wavefront was deleted |
 | `ShadowAdmission` | Normal | `ShadowPin` | Would-be admission while `mode: Shadow` (no write performed) |
 | `HoldDetected` | Warning | `Hold` | `spec.ref.commit` is owned by a field manager other than the controller |
 | `HoldReleased` | Normal | `Release` | A previously-held source's foreign ownership was removed; controller resumes |

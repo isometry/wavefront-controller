@@ -75,7 +75,8 @@ var _ = Describe("pin-strip", func() {
 		Expect(plan.Before).NotTo(HaveKey(held.String()))
 		Expect(plan.Before).NotTo(HaveKey(clean.String()))
 		Expect(plan.Warnings).To(ContainElement(ContainSubstring("skipping " + held.String())))
-		Expect(plan.Warnings).To(ContainElement(ContainSubstring("re-pins")))
+		Expect(plan.Warnings).To(ContainElement(And(
+			ContainSubstring("re-pins"), ContainSubstring("or in Shadow mode"), ContainSubstring("suspend=false"))))
 
 		By("treating a suspended source as held too, the way the controller does")
 		Expect(plan.Before).NotTo(HaveKey(suspendedSource.String()))

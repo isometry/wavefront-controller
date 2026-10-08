@@ -203,4 +203,42 @@ var _ = Describe("Writer", Ordered, func() {
 		Expect(fieldOwners(repo, "metadata", "labels", pin.ManagedLabel)).To(Equal([]string{catalogManager}))
 		Expect(fieldOwners(repo, "spec", "ref", "name")).To(Equal([]string{catalogManager}))
 	})
+
+	It("releases a sole-owned pin together with its provenance", func() {
+		Expect(pin.Owned(get())).To(BeTrue())
+		Expect(writer.Release(ctx, key)).To(Succeed())
+
+		repo := get()
+		Expect(repo.Spec.Reference.Commit).To(BeEmpty())
+		Expect(repo.GetAnnotations()).NotTo(HaveKey(pin.AnnotAdmittedAt))
+		Expect(repo.GetAnnotations()).NotTo(HaveKey(pin.AnnotPreviousPin))
+		Expect(repo.GetAnnotations()).NotTo(HaveKey(pin.AnnotObservedRef))
+		Expect(pin.Owned(repo)).To(BeFalse())
+
+		By("leaving the catalog's tracking ref in place")
+		Expect(repo.Spec.Reference.Name).To(Equal(trackingRef))
+	})
+
+	It("releases only its own share of a value wfctl co-owns", func() {
+		Expect(writer.Advance(ctx, key, "", shaA, trackingRef, admitA)).To(Succeed())
+
+		By("co-owning the same value under wfctl's apply manager")
+		handPin := &unstructured.Unstructured{}
+		handPin.SetGroupVersionKind(sourcev1.GroupVersion.WithKind(sourcev1.GitRepositoryKind))
+		handPin.SetNamespace(key.Namespace)
+		handPin.SetName(key.Name)
+		Expect(unstructured.SetNestedField(handPin.Object, shaA, "spec", "ref", "commit")).To(Succeed())
+		Expect(k8sClient.Apply(ctx, client.ApplyConfigurationFromUnstructured(handPin),
+			client.FieldOwner(pin.WfctlFieldManager))).To(Succeed())
+		Expect(fieldOwners(get(), "spec", "ref", "commit")).To(
+			Equal([]string{pin.FieldManager, pin.WfctlFieldManager}))
+
+		Expect(writer.Release(ctx, key)).To(Succeed())
+
+		repo := get()
+		Expect(repo.Spec.Reference.Commit).To(Equal(shaA), "the co-owned hand-pin survives")
+		Expect(fieldOwners(repo, "spec", "ref", "commit")).To(Equal([]string{pin.WfctlFieldManager}))
+		Expect(repo.GetAnnotations()).NotTo(HaveKey(pin.AnnotObservedRef))
+		Expect(pin.Owned(repo)).To(BeFalse())
+	})
 })

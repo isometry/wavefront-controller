@@ -562,27 +562,33 @@ var _ = Describe("Wavefront fleet", Ordered, func() {
 		expectQuiescent()
 	})
 
-	It("writes nothing in Shadow mode, and admits again in Enforce", func() {
-		infraBefore := pinOf(Default, infraNode)
-
+	It("relinquishes every pin in Shadow mode, and re-pins in Enforce", func() {
 		By("switching the fleet to Shadow")
 		setMode(wavefrontv1alpha1.ModeShadow)
+
+		By("checking every owned pin is relinquished")
+		Eventually(func(g Gomega) {
+			g.Expect(pinOf(g, infraNode)).To(BeEmpty())
+			g.Expect(pinOf(g, teamNode)).To(BeEmpty())
+		}, waitConverge, pollFast).Should(Succeed())
+		expectEvent(fleetEventNamespace, "Wavefront", fleetName, "PinReleased", "mode is Shadow")
 
 		By("pushing to infra")
 		shaS := pushRevision(repos[infraNode])
 
 		By("checking no pin is written")
 		Consistently(func(g Gomega) {
-			g.Expect(pinOf(g, infraNode)).To(Equal(infraBefore))
+			g.Expect(pinOf(g, infraNode)).To(BeEmpty())
 		}, holdWindow, pollFast).Should(Succeed())
 
 		By("checking the would-be admission was reported")
 		expectEvent(fleetEventNamespace, "Wavefront", fleetName, "ShadowAdmission", shaS)
 
-		By("switching back to Enforce and checking the admission lands")
+		By("switching back to Enforce and checking the fleet is pinned again")
 		setMode(wavefrontv1alpha1.ModeEnforce)
 		Eventually(func(g Gomega) {
 			g.Expect(pinOf(g, infraNode)).To(Equal(shaS))
+			g.Expect(pinOf(g, teamNode)).NotTo(BeEmpty())
 		}, waitConverge, pollFast).Should(Succeed())
 
 		expectQuiescent()
