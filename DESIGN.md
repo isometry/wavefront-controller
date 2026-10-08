@@ -267,13 +267,17 @@ status:
       pendingSince: "2026-08-27T09:14:03Z"
       ready: true
       blocked: { reason: AncestorUnhealthy, ancestor: { kind: Kustomization, namespace: waves, name: wave-2-gate } }
+  pinned:                                 # release ledger: sources this Wavefront has a claim on (uncapped)
+    entries:
+      - id: flotillas_team-x-repo_source.toolkit.fluxcd.io_GitRepository
+        v: v1
   lastEvaluated: "2026-08-27T09:15:11Z"   # advanced at most once per spec.poll.interval
   conditions:
     - type: Ready
     - type: GraphValid                    # False on dependsOn cycles or selector overlap
 ```
 
-Status carries summary counts, *exceptional-state* lists (blocked, held, shadow) with a size cap (`StatusListCap` = 20), and — since v4.2 — `status.members`: the whole evaluated graph, one entry per node, in the state the pass derived. `status.shadow` is Shadow mode's own edge-trigger ledger (`shadowAdmissions`) — the capped, source-sorted list of would-be admissions already announced this pass, recomputed wholesale every pass and cleared outright on a flip to `Enforce` — mirroring `status.held`'s (`heldSources`) role for hold events (decision D-C).
+Status carries summary counts, *exceptional-state* lists (blocked, held, shadow) with a size cap (`StatusListCap` = 20), and — since v4.2 — `status.members`: the whole evaluated graph, one entry per node, in the state the pass derived. `status.shadow` is Shadow mode's own edge-trigger ledger (`shadowAdmissions`) — the capped, source-sorted list of would-be admissions already announced this pass, recomputed wholesale every pass and cleared outright on a flip to `Enforce` — mirroring `status.held`'s (`heldSources`) role for hold events (decision D-C). `status.pinned` is the pin-release ledger, in the shape of Flux's own `status.inventory` (`entries[]` of `{id, v}`, `id` = `<namespace>_<name>_<group>_<kind>`): every source this `Wavefront` has a claim on — each in-scope source while in `Enforce`, plus any whose release has not yet succeeded. A source that leaves it (de-scope, flip to `Shadow`, deletion) has the controller's pin relinquished unless another `Wavefront`'s `status.pinned` still claims it; a failed release keeps just that entry for the next pass. It is seeded from the in-scope sources, so a `Wavefront` that predates it needs no migration. At ~90 bytes an entry it is uncapped.
 
 **`status.members` is a per-node list, deliberately not capped at `StatusListCap`.** The v4.0 position was that at 300 flotillas enumerating every node in status is neither useful nor kind to etcd; the shipped position is narrower. It is useful — it is what makes a viewer-tier `wfctl` (§6) answer "what is every node doing and why" from one `GET`, with no read access to Flux's own resources — and it is affordable on three counts:
 

@@ -27,6 +27,7 @@ import (
 	"fmt"
 	"maps"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -120,9 +121,8 @@ const unknownManager = "unknown"
 // (status.Held, against the pass's derived holds) and the shadow-admission
 // ledger (status.Shadow, against this pass's admissions), never against the
 // unbounded live-derived set, so a restart replays at most StatusListCap
-// detections rather than an unbounded backlog. status.Members doubles as the
-// release ledger: the sources it listed as pinned, less those this pass still
-// claims, have their pins relinquished (see releasePins).
+// detections rather than an unbounded backlog. status.Pinned is the release
+// ledger: every source this Wavefront has a claim on, rewritten by settlePins.
 type WavefrontReconciler struct {
 	client.Client
 	Scheme    *runtime.Scheme
@@ -159,9 +159,6 @@ type pollSet struct {
 type pass struct {
 	wf  *wavefrontv1alpha1.Wavefront
 	res *inputs.Result
-	// unreleased is set when releasePins failed for some source: status.members
-	// is then left unadvanced so the next pass retries against the same ledger.
-	unreleased bool
 }
 
 // resolved reports whether the pass got far enough to have proven anything
@@ -234,7 +231,12 @@ func (r *WavefrontReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		if !controllerutil.ContainsFinalizer(wf, releasePinsFinalizer) {
 			return ctrl.Result{}, nil
 		}
-		if err := r.releasePins(ctx, &pass{wf: wf}, "Wavefront deleted", nil); err != nil {
+		others := &wavefrontv1alpha1.WavefrontList{}
+		if err := r.List(ctx, others); err != nil {
+			return ctrl.Result{}, fmt.Errorf("listing Wavefronts: %w", err)
+		}
+		// Status is not written on deletion: a failure simply re-runs this.
+		if err := r.settlePins(ctx, &pass{wf: wf}, "Wavefront deleted", nil, others); err != nil {
 			return ctrl.Result{}, err
 		}
 		return ctrl.Result{}, r.patchFinalizers(ctx, wf, controllerutil.RemoveFinalizer)
@@ -404,9 +406,9 @@ func unionOf(sets map[string]pollSet) []gitpoll.Target {
 }
 
 // execute applies initial pins first, then ancestor-gated admissions, in the
-// engine's deterministic order, then releases every pin the last published
-// members held that this pass no longer claims: all of them in Shadow, the
-// de-scoped ones in Enforce. No per-source dedup is needed here: the
+// engine's deterministic order, then settles the release ledger: every pin
+// this Wavefront owns and no longer claims is relinquished — all of them in
+// Shadow, the de-scoped ones in Enforce. No per-source dedup is needed here: the
 // engine emits at most one admission per Source across Admissions and
 // Initial combined — gateSharedSources already dedupes sources shared by
 // more than one selected node upstream of this call.
@@ -436,7 +438,7 @@ func (r *WavefrontReconciler) execute(ctx context.Context, p *pass) error {
 		// Shadow suppresses every pin write, initial pins included, and gives
 		// back every pin this Wavefront owns.
 		r.shadowAdmissions(p, admissions)
-		return r.releasePins(ctx, p, "mode is Shadow", nil)
+		return r.settlePins(ctx, p, "mode is Shadow", nil, p.res.Wavefronts)
 	}
 
 	// Stale shadow entries must not survive a mode flip: a Wavefront that
@@ -450,39 +452,74 @@ func (r *WavefrontReconciler) execute(ctx context.Context, p *pass) error {
 			errs = append(errs, err)
 		}
 	}
-	errs = append(errs, r.releasePins(ctx, p, "no longer selected", p.res.NodeBySource))
+	errs = append(errs, r.settlePins(ctx, p, "no longer selected", p.res.NodeBySource, p.res.Wavefronts))
 	return errors.Join(errs...)
 }
 
-// releasePins relinquishes this Wavefront's pin on every source its last
-// published members pinned that keep no longer claims. A source this
-// Wavefront does not own the pin of (gone, never pinned, or hand-pinned away)
-// is skipped; a value another manager co-owns survives the release.
+// settlePins relinquishes this Wavefront's pin on every source in its ledger
+// (status.pinned, plus this pass's in-scope sources) that keep does not claim,
+// and rewrites the ledger to what it still has a claim on: every kept source,
+// and any source whose release failed (retried next pass). A source that is
+// gone, not owned by this controller, or still claimed by another Wavefront's
+// ledger leaves the ledger without being released; a value another manager
+// co-owns survives the release.
 //
-// Any failure sets p.unreleased, holding status.members back so the next pass
-// retries against the same ledger.
+// Seeding from the in-scope sources means a Wavefront with no ledger yet (the
+// first pass after an upgrade) needs no migration.
 //
-// ponytail: the ledger is status.members, so a node past MembersCap is never
-// released, and a source shared by two Wavefronts is stripped by whichever
-// de-scopes it. Both need a per-pin attribution annotation to fix.
-func (r *WavefrontReconciler) releasePins(ctx context.Context, p *pass, cause string,
-	keep map[types.NamespacedName][]adapter.NodeRef) error {
+// ponytail: two Wavefronts that de-scope a shared source in the same instant
+// each see the other's stale claim, and neither releases it.
+func (r *WavefrontReconciler) settlePins(ctx context.Context, p *pass, cause string,
+	keep map[types.NamespacedName][]adapter.NodeRef, others *wavefrontv1alpha1.WavefrontList) error {
+	candidates := map[string]types.NamespacedName{}
+	if p.wf.Status.Pinned != nil {
+		for _, ref := range p.wf.Status.Pinned.Entries {
+			// An entry that does not parse names nothing we can release.
+			if src, ok := sourceOf(ref); ok {
+				candidates[refOf(src).ID] = src
+			}
+		}
+	}
+	if p.res != nil {
+		for src := range p.res.NodeBySource {
+			candidates[refOf(src).ID] = src
+		}
+	}
+
+	claimed := map[string]bool{}
+	if others != nil {
+		for i := range others.Items {
+			other := &others.Items[i]
+			if other.Name == p.wf.Name || other.Status.Pinned == nil {
+				continue
+			}
+			for _, ref := range other.Status.Pinned.Entries {
+				claimed[ref.ID] = true
+			}
+		}
+	}
+
+	var retained []wavefrontv1alpha1.ResourceRef
 	var errs []error
-	for _, src := range pinnedSources(p.wf) {
+	for _, id := range slices.Sorted(maps.Keys(candidates)) {
+		src := candidates[id]
 		if _, kept := keep[src]; kept {
+			retained = append(retained, refOf(src))
 			continue
 		}
 		repo := &sourcev1.GitRepository{}
 		if err := r.Get(ctx, src, repo); err != nil {
 			if !apierrors.IsNotFound(err) {
+				retained = append(retained, refOf(src))
 				errs = append(errs, fmt.Errorf("getting GitRepository %s: %w", src, err))
 			}
 			continue
 		}
-		if !pin.Owned(repo) {
+		if !pin.Owned(repo) || claimed[id] {
 			continue
 		}
 		if err := r.PinWriter.Release(ctx, src); err != nil {
+			retained = append(retained, refOf(src))
 			errs = append(errs, err)
 			continue
 		}
@@ -490,25 +527,32 @@ func (r *WavefrontReconciler) releasePins(ctx context.Context, p *pass, cause st
 		r.event(repo, p.wf, corev1.EventTypeNormal, reasonPinReleased, actionUnpin, "%s", message)
 		r.event(p.wf, repo, corev1.EventTypeNormal, reasonPinReleased, actionUnpin, "%s", message)
 	}
-	if len(errs) > 0 {
-		p.unreleased = true
+
+	p.wf.Status.Pinned = nil
+	if len(retained) > 0 {
+		p.wf.Status.Pinned = &wavefrontv1alpha1.ResourceInventory{Entries: retained}
 	}
 	return errors.Join(errs...)
 }
 
-// pinnedSources is the release ledger: the sorted, deduplicated source of
-// every pinned node in the last published status.members. It is the only
-// read of status.members.
-func pinnedSources(wf *wavefrontv1alpha1.Wavefront) []types.NamespacedName {
-	seen := map[types.NamespacedName]bool{}
-	for _, member := range wf.Status.Members {
-		if member.Source != "" {
-			seen[parseSource(member.Source)] = true
-		}
+// refOf encodes a GitRepository as a release-ledger entry, in Flux's
+// inventory ID format "<namespace>_<name>_<group>_<kind>".
+func refOf(src types.NamespacedName) wavefrontv1alpha1.ResourceRef {
+	return wavefrontv1alpha1.ResourceRef{
+		ID:      strings.Join([]string{src.Namespace, src.Name, sourcev1.GroupVersion.Group, sourcev1.GitRepositoryKind}, "_"),
+		Version: sourcev1.GroupVersion.Version,
 	}
-	return slices.SortedFunc(maps.Keys(seen), func(a, b types.NamespacedName) int {
-		return cmp.Compare(a.String(), b.String())
-	})
+}
+
+// sourceOf decodes a release-ledger entry written by refOf. The ID is
+// unambiguous: names, groups and kinds cannot contain "_".
+func sourceOf(ref wavefrontv1alpha1.ResourceRef) (types.NamespacedName, bool) {
+	parts := strings.Split(ref.ID, "_")
+	if len(parts) != 4 || parts[0] == "" || parts[1] == "" ||
+		parts[2] != sourcev1.GroupVersion.Group || parts[3] != sourcev1.GitRepositoryKind {
+		return types.NamespacedName{}, false
+	}
+	return types.NamespacedName{Namespace: parts[0], Name: parts[1]}, true
 }
 
 // shadowAdmissions implements the Shadow branch of execute: the engine
@@ -691,7 +735,7 @@ func (r *WavefrontReconciler) holdEvents(p *pass) {
 	// release of the old hold and a detect of the new one in the same pass.
 	diffLedger(previous, current,
 		func(src string, h inputs.Hold) {
-			related := sourceObject(p, parseSource(src))
+			related := sourceObject(p, holdSource(src))
 			switch h.Kind {
 			case inputs.HoldSuspend:
 				r.event(p.wf, related, corev1.EventTypeWarning, reasonHoldDetected, actionHold,
@@ -702,7 +746,7 @@ func (r *WavefrontReconciler) holdEvents(p *pass) {
 			}
 		},
 		func(src string, h inputs.Hold) {
-			related := sourceObject(p, parseSource(src))
+			related := sourceObject(p, holdSource(src))
 			switch h.Kind {
 			case inputs.HoldSuspend:
 				r.event(p.wf, related, corev1.EventTypeNormal, reasonHoldReleased, actionRelease,
@@ -714,14 +758,15 @@ func (r *WavefrontReconciler) holdEvents(p *pass) {
 		})
 }
 
-// parseSource parses a status ledger source ("namespace/name", as
-// status.held, status.members and diffLedger's string keys carry it) into a
-// NamespacedName. The ledgers are always written from a real
+// holdSource parses a hold ledger key ("namespace/name", as diffLedger's
+// string keys carry it) into a NamespacedName for sourceObject. The ledger
+// keys are always written by inputs.HeldSources from a real
 // types.NamespacedName.String(), so a split failure here would mean a
-// malformed value slipped into status; rather than let that panic or abort
-// the pass, the raw string is used as Name with an empty Namespace (an event
-// still fires, just without a fully-qualified related object).
-func parseSource(key string) types.NamespacedName {
+// malformed key slipped into status.held; rather than let that panic or
+// abort event emission, the raw string is used as Name with an empty
+// Namespace, so the event still fires (just without a fully-qualified
+// related object).
+func holdSource(key string) types.NamespacedName {
 	ns, name, err := cache.SplitMetaNamespaceKey(key)
 	if err != nil {
 		return types.NamespacedName{Name: key}
@@ -854,12 +899,8 @@ func (r *WavefrontReconciler) summariseNodes(p *pass) {
 	status.Nodes = summary.Counts
 	status.Blocked = summary.Blocked
 	status.Held = summary.Held
-	// A failed release keeps the previous members: they are the ledger the
-	// next pass retries against.
-	if !p.unreleased {
-		status.Members = summary.Members
-		status.MembersOmitted = summary.MembersOmitted
-	}
+	status.Members = summary.Members
+	status.MembersOmitted = summary.MembersOmitted
 	status.Phase = summary.Phase
 }
 

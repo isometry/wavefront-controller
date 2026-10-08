@@ -321,8 +321,7 @@ spec:
                   description: |-
                     Member is one evaluated node's derived state for the last evaluation
                     (selected nodes and the gate nodes reached through dependsOn).
-                    The reconciler reads it back only as the pin-release ledger: the sources
-                    it lists as pinned have their pins relinquished once no longer claimed.
+                    Write-only output: the reconciler never reads it back.
                   properties:
                     blocked:
                       description: BlockedRef attributes a blocked node to its nearest
@@ -464,6 +463,35 @@ spec:
                 - Advancing
                 - Blocked
                 type: string
+              pinned:
+                description: |-
+                  Pinned is the release ledger: every source this Wavefront has a claim
+                  on, i.e. every in-scope source while in Enforce, plus any whose release
+                  has not yet succeeded. Uncapped.
+                properties:
+                  entries:
+                    items:
+                      description: ResourceRef locates one object, as in Flux's inventory.
+                      properties:
+                        id:
+                          description: |-
+                            ID is "<namespace>_<name>_<group>_<kind>",
+                            e.g. "flotillas_team-a-repo_source.toolkit.fluxcd.io_GitRepository".
+                          type: string
+                        v:
+                          description: Version is the object's API version, e.g. "v1".
+                          type: string
+                      required:
+                      - id
+                      - v
+                      type: object
+                    type: array
+                    x-kubernetes-list-map-keys:
+                    - id
+                    x-kubernetes-list-type: map
+                required:
+                - entries
+                type: object
               shadow:
                 description: |-
                   Shadow lists would-be admissions already announced in Shadow mode

@@ -672,6 +672,17 @@ var _ = Describe("Wavefront reconciler", func() {
 	})
 
 	Describe("pin release", func() {
+		// pinnedNames reads the source names in the Wavefront's status.pinned.
+		pinnedNames := func(wfName string) []string {
+			var names []string
+			if inv := getWavefront(wfName).Status.Pinned; inv != nil {
+				for _, ref := range inv.Entries {
+					src, _ := sourceOf(ref)
+					names = append(names, src.Name)
+				}
+			}
+			return names
+		}
 		// pinnedFleet stands up one managed, selected source per name and an
 		// Enforce Wavefront over them, returning once every source is pinned.
 		pinnedFleet := func(ns, wfName string, names ...string) map[string]*kustomizev1.Kustomization {
@@ -691,10 +702,7 @@ var _ = Describe("Wavefront reconciler", func() {
 			for _, name := range names {
 				Eventually(func() string { return pinOf(ns, name) }).Should(Equal(shaA))
 			}
-			// The release ledger is the published members, so wait for it.
-			Eventually(func() []wavefrontv1alpha1.Member {
-				return getWavefront(wfName).Status.Members
-			}).Should(HaveLen(len(names)))
+			Eventually(func() []string { return pinnedNames(wfName) }).Should(ConsistOf(names))
 			return nodes
 		}
 		setMode := func(wfName string, mode wavefrontv1alpha1.Mode) {
@@ -715,6 +723,7 @@ var _ = Describe("Wavefront reconciler", func() {
 
 			Eventually(func() string { return pinOf(ns, flotilla) }).Should(BeEmpty())
 			Expect(getRepo(ns, flotilla).GetAnnotations()).NotTo(HaveKey(pin.AnnotObservedRef))
+			Eventually(func() []string { return pinnedNames(wfName) }).Should(BeEmpty())
 			Eventually(func() []eventsv1.Event {
 				return rawEvents(reasonPinReleased, "GitRepository", flotilla)
 			}).ShouldNot(BeEmpty())
@@ -740,6 +749,7 @@ var _ = Describe("Wavefront reconciler", func() {
 
 			Eventually(func() string { return pinOf(ns, "descope-a") }).Should(BeEmpty())
 			Consistently(func() string { return pinOf(ns, "descope-b") }).Should(Equal(shaA))
+			Eventually(func() []string { return pinnedNames(wfName) }).Should(Equal([]string{"descope-b"}))
 			Eventually(func() []string {
 				messages, _ := recordedEvents(reasonPinReleased, wfName)
 				return messages
@@ -778,6 +788,7 @@ var _ = Describe("Wavefront reconciler", func() {
 			Eventually(func() bool { return pin.Owned(getRepo(ns, flotilla)) }).Should(BeFalse())
 			Expect(pinOf(ns, flotilla)).To(Equal(shaA), "the co-owned hand-pin survives")
 			Expect(getRepo(ns, flotilla).GetAnnotations()).NotTo(HaveKey(pin.AnnotObservedRef))
+			Eventually(func() []string { return pinnedNames(wfName) }).Should(BeEmpty())
 		})
 	})
 

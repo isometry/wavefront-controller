@@ -298,13 +298,15 @@ over time.
 
 Every `Wavefront` carries the finalizer `wavefront.as-code.io/release-pins`.
 On deletion the controller relinquishes every pin it owns on the sources the
-`Wavefront` last reported (`status.members`) before letting the object go:
+`Wavefront` last recorded (`status.pinned`) before letting the object go:
 
 - Only the controller's own share is dropped: `spec.ref.commit` and the
   provenance annotations are removed unless another field manager co-owns the
   value, so a hand-pin (foreign field manager) survives. Sources revert to
   their tracking refs.
 - Deletion strips even when the fleet is `suspend`ed.
+- A source another `Wavefront` still lists in its own `status.pinned` (a
+  shared `GitRepository`) is left pinned for that `Wavefront` to manage.
 - **Delete `Wavefront`s *before* uninstalling the controller.** With the
   controller gone nothing removes the finalizer, and the `Wavefront` hangs in
   `Terminating`.

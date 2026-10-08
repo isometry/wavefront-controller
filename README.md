@@ -194,6 +194,10 @@ status:
       pendingSince: "2026-08-27T09:14:03Z"
       ready: true
       blocked: { reason: AncestorUnhealthy, ancestor: { kind: Kustomization, namespace: waves, name: wave-2-gate } }
+  pinned:                                 # release ledger: sources this Wavefront has a claim on (uncapped)
+    entries:
+      - id: flotillas_team-x-repo_source.toolkit.fluxcd.io_GitRepository
+        v: v1
   lastEvaluated: "2026-08-27T09:15:11Z"   # advanced at most once per spec.poll.interval
   conditions:
     - type: Ready
@@ -210,6 +214,9 @@ is what [`wfctl`](#wfctl) reads by default, and it is **write-only** output:
 the reconciler never reads it back, so admission never depends on it — see
 [why rolling admission is a pure function of live
 inputs](DESIGN.md#d9--rolling-admission-not-cycle-coherent-admission-sets-reversed-from-v31-of-this-document).
+`status.pinned` is the pin-release ledger (same shape as Flux's
+`status.inventory`): every source the `Wavefront` has a claim on, whose pin the
+controller relinquishes once nothing claims it any more.
 `status.lastEvaluated` stamps when the picture was derived, and
 advances at most once per `spec.poll.interval` so watch-triggered reconciles
 do not rewrite status on every pass — budget for that when judging staleness.

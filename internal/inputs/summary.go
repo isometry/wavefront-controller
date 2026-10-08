@@ -47,9 +47,9 @@ type Summary struct {
 	Held    []wavefrontv1alpha1.HeldNode
 	// Members is every evaluated node's derived state, sorted by
 	// kind/namespace/name and capped at MembersCap; MembersOmitted counts the
-	// remainder. Admissibility never reads it back — it is re-derived from
-	// live cluster state on every pass — but the reconciler does, as the
-	// ledger of pins to relinquish once no longer claimed.
+	// remainder. Write-only output: nothing here or in the reconciler ever
+	// reads it back — admissibility is re-derived from live cluster state on
+	// every pass, never from a previous status write.
 	Members        []wavefrontv1alpha1.Member
 	MembersOmitted int
 	// BlockedByReason is uncapped, unlike Blocked: a gauge must count every
