@@ -55,6 +55,9 @@ const (
 	fleetName         = "fleet"
 	teamAName         = "team-a"
 	teamBName         = "team-b"
+	sharedName        = "shared"
+	otherName         = "other"
+	waveLabel         = "wave"
 
 	managedLabelValue = "true"
 	// Field manager standing in for a human hand-pin.
@@ -171,7 +174,7 @@ func buildFor(
 // Target, and NodeBySource must list both referencing nodes rather than
 // silently keeping only the last writer.
 func TestBuildMemoizesASharedSource(t *testing.T) {
-	src := types.NamespacedName{Namespace: fluxNamespace, Name: "shared"}
+	src := types.NamespacedName{Namespace: fluxNamespace, Name: sharedName}
 	repo := managedRepo(src.Name, "https://git.example.com/org/shared.git",
 		&sourcev1.GitRepositoryRef{Name: mainRef})
 
@@ -262,7 +265,7 @@ func TestBuildSkipsASourceReferencedOnlyByNonSelectedNodes(t *testing.T) {
 // resolves exactly once (one Target), the selected node is pinned to it, and
 // the gate node stays a plain gate — never added to NodeBySource.
 func TestBuildMixedSelectedAndGateSharersOfOneSource(t *testing.T) {
-	src := types.NamespacedName{Namespace: fluxNamespace, Name: "shared"}
+	src := types.NamespacedName{Namespace: fluxNamespace, Name: sharedName}
 	repo := managedRepo(src.Name, "https://git.example.com/org/shared.git",
 		&sourcev1.GitRepositoryRef{Name: mainRef})
 
@@ -545,15 +548,22 @@ func TestGraphVerdictOverlapOutranksCycles(t *testing.T) {
 		},
 		{
 			name:       "overlap only",
-			res:        &Result{Overlap: "other"},
+			res:        &Result{Overlap: otherName},
 			wantReason: wavefrontv1alpha1.GraphValidReasonSelectorOverlap,
 			wantIn:     `node selector overlaps Wavefront "other"; admissions suppressed`,
 		},
 		{
 			name:       "both: overlap wins",
-			res:        &Result{Overlap: "other", Cycles: cycle},
+			res:        &Result{Overlap: otherName, Cycles: cycle},
 			wantReason: wavefrontv1alpha1.GraphValidReasonSelectorOverlap,
 			wantIn:     `node selector overlaps Wavefront "other"; admissions suppressed`,
+		},
+		{
+			name: "source overlap",
+			res: &Result{Overlap: otherName, Cycles: cycle,
+				SharedSource: types.NamespacedName{Namespace: fluxNamespace, Name: sharedName}},
+			wantReason: wavefrontv1alpha1.GraphValidReasonSourceOverlap,
+			wantIn:     `GitRepository flux-system/shared is also pinned by Wavefront "other"; admissions suppressed`,
 		},
 	}
 
@@ -574,6 +584,98 @@ func TestGraphVerdictOverlapOutranksCycles(t *testing.T) {
 			}
 		})
 	}
+}
+
+// --- source overlap ----------------------------------------------------------
+
+// selectorAdapter honours the selector, which source-overlap detection needs:
+// each Wavefront must see only its own nodes.
+type selectorAdapter struct{ nodes []adapter.Node }
+
+func (s *selectorAdapter) Kind() string { return kindKustomization }
+
+func (s *selectorAdapter) List(_ context.Context, _ client.Reader, sel labels.Selector) ([]adapter.Node, error) {
+	var out []adapter.Node
+	for _, node := range s.nodes {
+		if sel.Matches(labels.Set(node.Labels)) {
+			out = append(out, node)
+		}
+	}
+	return out, nil
+}
+
+func (s *selectorAdapter) Get(_ context.Context, _ client.Reader, ref adapter.NodeRef) (adapter.Node, bool, error) {
+	for _, node := range s.nodes {
+		if node.Ref == ref {
+			return node, true, nil
+		}
+	}
+	return adapter.Node{}, false, nil
+}
+
+func waveWavefront(name, wave string) *wavefrontv1alpha1.Wavefront {
+	wf := &wavefrontv1alpha1.Wavefront{Name: name}
+	wf.Spec.Nodes.Selector.MatchLabels = map[string]string{waveLabel: wave}
+	return wf
+}
+
+// TestBuildDetectsASharedManagedSource covers two Wavefronts with disjoint
+// selectors whose nodes reference one GitRepository: each would otherwise move
+// the same pin independently, so both report the overlap, while an unmanaged
+// shared source (a gate for both) and a lone Wavefront report none.
+func TestBuildDetectsASharedManagedSource(t *testing.T) {
+	src := types.NamespacedName{Namespace: fluxNamespace, Name: sharedName}
+	managed := managedRepo(src.Name, "https://git.example.com/org/shared.git",
+		&sourcev1.GitRepositoryRef{Name: mainRef})
+	unmanaged := managed.DeepCopy()
+	unmanaged.Labels = nil
+
+	nodes := &selectorAdapter{nodes: []adapter.Node{
+		{Ref: teamARef(), SourceRef: &src, Labels: map[string]string{waveLabel: "a"}},
+		{Ref: teamBRef(), SourceRef: &src, Labels: map[string]string{waveLabel: "b"}},
+	}}
+	wfA, wfB := waveWavefront("alpha", "a"), waveWavefront("beta", "b")
+
+	build := func(t *testing.T, self *wavefrontv1alpha1.Wavefront, objs ...client.Object) *Result {
+		t.Helper()
+		reader := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(objs...).Build()
+		res, err := Build(context.Background(), reader, Params{
+			Wavefront: self, Adapter: nodes, Strategy: selection.TrackRef(),
+		})
+		if err != nil {
+			t.Fatalf("Build: %v", err)
+		}
+		return res
+	}
+
+	t.Run("managed, symmetric", func(t *testing.T) {
+		for _, tc := range []struct{ self, other *wavefrontv1alpha1.Wavefront }{{wfA, wfB}, {wfB, wfA}} {
+			res := build(t, tc.self, managed, wfA.DeepCopy(), wfB.DeepCopy())
+			if res.Overlap != tc.other.Name || res.SharedSource != src {
+				t.Errorf("%s: Overlap=%q SharedSource=%v, want %q and %v",
+					tc.self.Name, res.Overlap, res.SharedSource, tc.other.Name, src)
+			}
+			if v := res.GraphVerdict(); v.Valid || v.Reason != wavefrontv1alpha1.GraphValidReasonSourceOverlap {
+				t.Errorf("%s: verdict = %+v, want invalid SourceOverlap", tc.self.Name, v)
+			}
+			if !res.SkipAdmissions() || !res.Resolved || !res.GraphChecked {
+				t.Errorf("%s: SkipAdmissions=%v Resolved=%v GraphChecked=%v, want all true",
+					tc.self.Name, res.SkipAdmissions(), res.Resolved, res.GraphChecked)
+			}
+		}
+	})
+
+	t.Run("unmanaged", func(t *testing.T) {
+		if res := build(t, wfA, unmanaged, wfA.DeepCopy(), wfB.DeepCopy()); res.Overlap != "" {
+			t.Errorf("Overlap = %q, want none for an unmanaged shared source", res.Overlap)
+		}
+	})
+
+	t.Run("single Wavefront", func(t *testing.T) {
+		if res := build(t, wfA, managed, wfA.DeepCopy()); res.Overlap != "" {
+			t.Errorf("Overlap = %q, want none with no other Wavefront", res.Overlap)
+		}
+	})
 }
 
 // --- purity ------------------------------------------------------------------

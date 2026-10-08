@@ -315,12 +315,17 @@ func admissionViews(admissions []engine.Admission) []AdmissionView {
 }
 
 // structuralDiagnostics reports what the pass discovered about the
-// configuration itself: a selector overlap suppresses admissions fleet-wide,
+// configuration itself: a selector or managed-source overlap suppresses admissions fleet-wide,
 // and a source whose ref style v1 cannot sequence (anything beyond a tracked
 // branch or tag name) is silently demoted to a gate unless someone says so.
 func structuralDiagnostics(res *inputs.Result) []string {
 	var diags []string
-	if res.Overlap != "" {
+	switch {
+	case res.Overlap != "" && res.SharedSource.Name != "":
+		diags = append(diags, fmt.Sprintf(
+			"GitRepository %s is also pinned by Wavefront %q: admissions are suppressed fleet-wide until no managed source is shared",
+			res.SharedSource, res.Overlap))
+	case res.Overlap != "":
 		diags = append(diags, fmt.Sprintf(
 			"node selector overlaps Wavefront %q: admissions are suppressed fleet-wide until the selectors are disjoint",
 			res.Overlap))

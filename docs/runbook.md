@@ -243,7 +243,7 @@ Effects:
    `spec.nodes.selector`. Let it run through several poll cycles.
 2. Validate before flipping:
    - `status.conditions[type=GraphValid]` is `True` — no `dependsOn` cycles
-     or selector overlaps with another `Wavefront`. While `GraphValid` is
+     or selector or managed-source overlaps with another `Wavefront`. While `GraphValid` is
      `False`, this Wavefront's per-Wavefront gauges are suppressed (retired,
      not zeroed) so a fleet-wide `sum()` never double-counts against the
      Wavefront it overlaps with — see [Safety alarms](#safety-alarms).

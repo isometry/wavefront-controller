@@ -1317,6 +1317,39 @@ func TestExecuteShadowReleasesOwnedPins(t *testing.T) {
 	}
 }
 
+// TestExecuteSourceOverlapWritesNothing: an Enforce Wavefront sharing a
+// managed source with another Wavefront neither admits nor releases, so
+// neither Wavefront moves the shared pin.
+func TestExecuteSourceOverlapWritesNothing(t *testing.T) {
+	r, applied, recorder := releaseReconciler(t, nil, repoOwnedBy(alphaSource, pin.FieldManager))
+
+	wf := &wavefrontv1alpha1.Wavefront{
+		Name:   fleetName,
+		Spec:   wavefrontv1alpha1.WavefrontSpec{Mode: wavefrontv1alpha1.ModeEnforce},
+		Status: wavefrontv1alpha1.WavefrontStatus{Pinned: ledger(alphaSource)},
+	}
+	res := &inputs.Result{
+		Overlap:      otherWavefront,
+		SharedSource: sourceKey(alphaSource),
+		Eval:         engine.Evaluation{Admissions: []engine.Admission{admissionFor(teamAKey(), shaB)}},
+	}
+	if reason := res.GraphVerdict().Reason; reason != wavefrontv1alpha1.GraphValidReasonSourceOverlap {
+		t.Fatalf("verdict reason = %q, want %q", reason, wavefrontv1alpha1.GraphValidReasonSourceOverlap)
+	}
+	if err := r.execute(context.Background(), &pass{wf: wf, res: res}); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if len(*applied) != 0 {
+		t.Errorf("applied = %v, want nothing written under a source overlap", *applied)
+	}
+	if got := ledgerNames(wf); !slices.Equal(got, []string{alphaSource}) {
+		t.Errorf("pinned = %v, want the ledger untouched", got)
+	}
+	if recorded := drain(recorder.Events); len(recorded) != 0 {
+		t.Errorf("events = %v, want none", recorded)
+	}
+}
+
 // TestExecuteEnforceReleasesOnlyDescopedPins: Enforce releases the ledger
 // minus the sources this pass still selects, which stay in the ledger.
 func TestExecuteEnforceReleasesOnlyDescopedPins(t *testing.T) {
