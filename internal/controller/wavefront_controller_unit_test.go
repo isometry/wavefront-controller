@@ -1234,7 +1234,7 @@ func repoOwnedBy(name, manager string) *sourcev1.GitRepository {
 func ledger(names ...string) *wavefrontv1alpha1.ResourceInventory {
 	inv := &wavefrontv1alpha1.ResourceInventory{}
 	for _, name := range names {
-		inv.Entries = append(inv.Entries, refOf(sourceKey(name)))
+		inv.Entries = append(inv.Entries, pin.LedgerRef(sourceKey(name)))
 	}
 	return inv
 }
@@ -1246,7 +1246,7 @@ func ledgerNames(wf *wavefrontv1alpha1.Wavefront) []string {
 	}
 	var names []string
 	for _, ref := range wf.Status.Pinned.Entries {
-		src, _ := sourceOf(ref)
+		src, _ := pin.LedgerSource(ref)
 		names = append(names, src.Name)
 	}
 	return names
@@ -1496,19 +1496,19 @@ func TestInScopeSourcesSeedEmptyLedger(t *testing.T) {
 	}
 }
 
-// TestPinnedRefRoundTrip: refOf writes Flux's inventory ID, and sourceOf
-// rejects anything that is not a GitRepository entry.
+// TestPinnedRefRoundTrip: pin.LedgerRef writes Flux's inventory ID, and
+// pin.LedgerSource rejects anything that is not a GitRepository entry.
 func TestPinnedRefRoundTrip(t *testing.T) {
-	ref := refOf(sourceKey(alphaSource))
+	ref := pin.LedgerRef(sourceKey(alphaSource))
 	if want := fluxNamespace + "_" + alphaSource + "_source.toolkit.fluxcd.io_GitRepository"; ref.ID != want || ref.Version != "v1" {
-		t.Errorf("refOf = %+v, want ID %q, v1", ref, want)
+		t.Errorf("LedgerRef = %+v, want ID %q, v1", ref, want)
 	}
-	if src, ok := sourceOf(ref); !ok || src != sourceKey(alphaSource) {
-		t.Errorf("sourceOf(refOf) = %v, %v", src, ok)
+	if src, ok := pin.LedgerSource(ref); !ok || src != sourceKey(alphaSource) {
+		t.Errorf("pin.LedgerSource(LedgerRef) = %v, %v", src, ok)
 	}
 	for _, id := range []string{"", "a_b", "ns_name_apps_Deployment", "_name_source.toolkit.fluxcd.io_GitRepository"} {
-		if _, ok := sourceOf(wavefrontv1alpha1.ResourceRef{ID: id}); ok {
-			t.Errorf("sourceOf(%q) ok, want rejected", id)
+		if _, ok := pin.LedgerSource(wavefrontv1alpha1.ResourceRef{ID: id}); ok {
+			t.Errorf("pin.LedgerSource(%q) ok, want rejected", id)
 		}
 	}
 }

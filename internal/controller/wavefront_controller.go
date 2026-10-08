@@ -27,7 +27,6 @@ import (
 	"fmt"
 	"maps"
 	"slices"
-	"strings"
 	"sync"
 	"time"
 
@@ -475,14 +474,14 @@ func (r *WavefrontReconciler) settlePins(ctx context.Context, p *pass, cause str
 	if p.wf.Status.Pinned != nil {
 		for _, ref := range p.wf.Status.Pinned.Entries {
 			// An entry that does not parse names nothing we can release.
-			if src, ok := sourceOf(ref); ok {
-				candidates[refOf(src).ID] = src
+			if src, ok := pin.LedgerSource(ref); ok {
+				candidates[pin.LedgerRef(src).ID] = src
 			}
 		}
 	}
 	if p.res != nil {
 		for src := range p.res.NodeBySource {
-			candidates[refOf(src).ID] = src
+			candidates[pin.LedgerRef(src).ID] = src
 		}
 	}
 
@@ -504,13 +503,13 @@ func (r *WavefrontReconciler) settlePins(ctx context.Context, p *pass, cause str
 	for _, id := range slices.Sorted(maps.Keys(candidates)) {
 		src := candidates[id]
 		if _, kept := keep[src]; kept {
-			retained = append(retained, refOf(src))
+			retained = append(retained, pin.LedgerRef(src))
 			continue
 		}
 		repo := &sourcev1.GitRepository{}
 		if err := r.Get(ctx, src, repo); err != nil {
 			if !apierrors.IsNotFound(err) {
-				retained = append(retained, refOf(src))
+				retained = append(retained, pin.LedgerRef(src))
 				errs = append(errs, fmt.Errorf("getting GitRepository %s: %w", src, err))
 			}
 			continue
@@ -519,7 +518,7 @@ func (r *WavefrontReconciler) settlePins(ctx context.Context, p *pass, cause str
 			continue
 		}
 		if err := r.PinWriter.Release(ctx, src); err != nil {
-			retained = append(retained, refOf(src))
+			retained = append(retained, pin.LedgerRef(src))
 			errs = append(errs, err)
 			continue
 		}
@@ -533,26 +532,6 @@ func (r *WavefrontReconciler) settlePins(ctx context.Context, p *pass, cause str
 		p.wf.Status.Pinned = &wavefrontv1alpha1.ResourceInventory{Entries: retained}
 	}
 	return errors.Join(errs...)
-}
-
-// refOf encodes a GitRepository as a release-ledger entry, in Flux's
-// inventory ID format "<namespace>_<name>_<group>_<kind>".
-func refOf(src types.NamespacedName) wavefrontv1alpha1.ResourceRef {
-	return wavefrontv1alpha1.ResourceRef{
-		ID:      strings.Join([]string{src.Namespace, src.Name, sourcev1.GroupVersion.Group, sourcev1.GitRepositoryKind}, "_"),
-		Version: sourcev1.GroupVersion.Version,
-	}
-}
-
-// sourceOf decodes a release-ledger entry written by refOf. The ID is
-// unambiguous: names, groups and kinds cannot contain "_".
-func sourceOf(ref wavefrontv1alpha1.ResourceRef) (types.NamespacedName, bool) {
-	parts := strings.Split(ref.ID, "_")
-	if len(parts) != 4 || parts[0] == "" || parts[1] == "" ||
-		parts[2] != sourcev1.GroupVersion.Group || parts[3] != sourcev1.GitRepositoryKind {
-		return types.NamespacedName{}, false
-	}
-	return types.NamespacedName{Namespace: parts[0], Name: parts[1]}, true
 }
 
 // shadowAdmissions implements the Shadow branch of execute: the engine

@@ -56,6 +56,10 @@ var _ Action = (*Pin)(nil)
 
 // Plan implements Action.
 func (a *Pin) Plan(ctx context.Context) (*Plan, error) {
+	if !shaPattern.MatchString(a.SHA) {
+		return nil, fmt.Errorf("--sha %q is not a full 40- or 64-character lower-case hex commit ID", a.SHA)
+	}
+
 	repo, err := getSource(ctx, a.Client, a.Source)
 	if err != nil {
 		return nil, err
@@ -144,6 +148,20 @@ func (a *Pin) verify(ctx context.Context, repo *sourcev1.GitRepository) ([]strin
 // hand-pin is asking for exactly that, and the alternative — a conflict error
 // naming the controller — would be noise in an incident.
 func (a *Pin) apply(ctx context.Context, displaced string) (bool, error) {
+	// ForceOwnership below would silently displace whoever pinned since the
+	// plan was shown, which is exactly what the plan's own check refuses.
+	if !a.Force {
+		repo, err := getSource(ctx, a.Client, a.Source)
+		if err != nil {
+			return false, err
+		}
+		if foreign := foreignOwners(repo, pin.WfctlFieldManager); len(foreign) > 0 {
+			return false, fmt.Errorf(
+				"spec.ref.commit of %s was taken by %s after the plan; re-run (--force to displace it)",
+				a.Source, describeOwners(foreign))
+		}
+	}
+
 	desired := &unstructured.Unstructured{Object: map[string]any{
 		"apiVersion": sourcev1.GroupVersion.String(),
 		"kind":       sourcev1.GitRepositoryKind,

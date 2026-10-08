@@ -18,6 +18,7 @@ package actions_test
 
 import (
 	"strings"
+	"unicode/utf8"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -53,6 +54,17 @@ var _ = Describe("audit", func() {
 		Expect(found.Note).To(Equal("alice@prod ran: wfctl suspend --yes"))
 		Expect(found.Regarding.Kind).To(Equal("Wavefront"))
 		Expect(found.Regarding.UID).To(Equal(wf.UID))
+	})
+
+	It("truncates on a rune boundary, never mid-character", func() {
+		// 3-byte runes, so that byte 1021 falls inside one for two of the
+		// three offsets of the prefix the note starts with.
+		for pad := range 4 {
+			note := actions.Note("a"+strings.Repeat("b", pad), strings.Repeat("\u20ac", 400))
+			Expect(len(note)).To(BeNumerically("<=", 1024))
+			Expect(utf8.ValidString(note)).To(BeTrue(), "pad %d", pad)
+			Expect(note).To(HaveSuffix("..."))
+		}
 	})
 
 	It("truncates a note the apiserver would reject", func() {

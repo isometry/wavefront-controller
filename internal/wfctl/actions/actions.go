@@ -36,8 +36,10 @@ package actions
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"maps"
+	"regexp"
 	"slices"
 	"strings"
 	"time"
@@ -48,6 +50,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	wavefrontv1alpha1 "github.com/isometry/wavefront-controller/api/v1alpha1"
 	"github.com/isometry/wavefront-controller/internal/gitpoll"
 	"github.com/isometry/wavefront-controller/internal/pin"
 	"github.com/isometry/wavefront-controller/internal/selection"
@@ -65,9 +68,67 @@ const (
 	commitOwnersField = "spec.ref.commit owners"
 )
 
-// removeCommitPatch is the break-glass one-liner of docs/runbook.md, verbatim:
-// a JSON patch is the only way to *delete* a field without owning it under SSA.
-var removeCommitPatch = []byte(`[{"op":"remove","path":"/spec/ref/commit"}]`)
+// shaPattern is a full git object ID, SHA-1 or SHA-256, lower-case as git
+// prints it. Anything else is a typo, a branch name, or a flag value that went
+// missing, and would be written to spec.ref.commit as it stands.
+var shaPattern = regexp.MustCompile("^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
+
+// removeCommitPatch is the break-glass one-liner of docs/runbook.md: a JSON
+// patch is the only way to *delete* a field without owning it under SSA. The
+// leading test op makes the apiserver reject it (422) if spec.ref.commit is no
+// longer the value that was planned, so a hand-pin made after the plan is not
+// stripped by a command that never showed it to the operator.
+func removeCommitPatch(current string) []byte {
+	value, _ := json.Marshal(current) // a string always marshals
+	return fmt.Appendf(nil,
+		`[{"op":"test","path":"/spec/ref/commit","value":%s},{"op":"remove","path":"/spec/ref/commit"}]`, value)
+}
+
+// scopeOf is the set of sources a Wavefront owns, as its status records them:
+// the pinned members, plus the pins in its release ledger (which outlive a
+// source that was de-scoped but not yet released).
+func scopeOf(wf *wavefrontv1alpha1.Wavefront) map[types.NamespacedName]bool {
+	scope := map[types.NamespacedName]bool{}
+	for _, member := range wf.Status.Members {
+		if member.Source == "" {
+			continue
+		}
+		if src, err := snapshot.ParseSource(member.Source); err == nil {
+			scope[src] = true
+		}
+	}
+	if wf.Status.Pinned != nil {
+		for _, ref := range wf.Status.Pinned.Entries {
+			if src, ok := pin.LedgerSource(ref); ok {
+				scope[src] = true
+			}
+		}
+	}
+	return scope
+}
+
+// refuseOutOfScope stops a single-source write on a source another Wavefront
+// owns: the fleet named by --wavefront is the one the operator thinks they are
+// acting on. The limit is that status.members is empty before a Wavefront's
+// first reconcile and capped at MembersCap.
+func refuseOutOfScope(verb string, wf *wavefrontv1alpha1.Wavefront, src types.NamespacedName) error {
+	if scopeOf(wf)[src] {
+		return nil
+	}
+	return fmt.Errorf("refusing to %s %s: not a source of Wavefront %s (status.members / status.pinned)",
+		verb, src, wf.Name)
+}
+
+// refuseShadow stops a pin write the controller would undo: outside Enforce it
+// releases every pin it owns, and a pin it wrote on someone's behalf is its own.
+func refuseShadow(verb string, wf *wavefrontv1alpha1.Wavefront, src types.NamespacedName) error {
+	if wf.Spec.Mode == wavefrontv1alpha1.ModeEnforce {
+		return nil
+	}
+	return fmt.Errorf("refusing to %s %s: Wavefront %s is in Shadow mode, and the controller "+
+		"releases every pin it owns, so this write would be undone on the next pass",
+		verb, src, wf.Name)
+}
 
 // Plan is what a write would do, and the closure that does it.
 type Plan struct {

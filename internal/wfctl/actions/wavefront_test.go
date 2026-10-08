@@ -91,7 +91,7 @@ var _ = Describe("suspend, resume and mode", func() {
 		plan := planOf(&actions.WavefrontChange{Client: k8sClient, Wavefront: wf, Mode: &mode})
 		Expect(plan.Warnings).To(ContainElement(ContainSubstring("already")))
 		Expect(plan.Warnings).NotTo(ContainElement(ContainSubstring("relinquishes")))
-		run(plan)
+		runWritingNothing(plan)
 	})
 
 	It("refuses to overwrite a concurrent change", func() {

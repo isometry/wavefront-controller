@@ -36,7 +36,7 @@ func testPlan(applied *bool) *actions.Plan {
 	return &actions.Plan{
 		Summary: "Hand-pin default/infra to abc123",
 		Before:  map[string]string{fieldCommit: "old", "metadata.annotations[x]": ""},
-		After:   map[string]string{fieldCommit: "abc123"},
+		After:   map[string]string{fieldCommit: shortSHA},
 		Warnings: []string{
 			"the controller will report this as held",
 		},
@@ -146,7 +146,7 @@ func TestConfirmerPrintsThePlan(t *testing.T) {
 	for _, want := range []string{
 		"Hand-pin default/infra to abc123",
 		"FIELD", "BEFORE", "AFTER",
-		fieldCommit, "old", "abc123",
+		fieldCommit, "old", shortSHA,
 		// A field named by one side alone reads as absent, not blank.
 		"metadata.annotations[x]", "(unset)",
 		"Warning: the controller will report this as held",

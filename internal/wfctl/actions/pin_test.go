@@ -133,6 +133,34 @@ var _ = Describe("pin", func() {
 		Expect(err.Error()).To(ContainSubstring("advertises no ref"))
 	})
 
+	It("refuses a SHA that is not a full hex commit ID, before reading the source", func() {
+		for _, sha := range []string{"", shortSHA, "ZZZZ" + shaA[4:], shaA + "0", shaA[:39]} {
+			_, err := (&actions.Pin{Client: k8sClient, Source: key, SHA: sha, Unverified: true}).Plan(ctx)
+			Expect(err).To(HaveOccurred(), sha)
+			Expect(err.Error()).To(ContainSubstring(errBadSHA))
+		}
+		By("accepting a 64-character SHA-256 ID")
+		sha256 := shaA + shaA[:24]
+		_, err := (&actions.Pin{Client: k8sClient, Source: key, SHA: sha256, Unverified: true}).Plan(ctx)
+		Expect(err).NotTo(HaveOccurred())
+	})
+
+	It("does not displace a hand-pin taken after the plan was shown", func() {
+		plan := planOf(&actions.Pin{Client: k8sClient, Source: key, SHA: shaB, Unverified: true})
+		handPin(key, shaX, humanManager)
+
+		Expect(runExpectingError(plan).Error()).To(ContainSubstring("taken by " + humanManager))
+		Expect(get(key).Spec.Reference.Commit).To(Equal(shaX))
+	})
+
+	It("displaces a hand-pin taken after the plan under --force, as asked", func() {
+		plan := planOf(&actions.Pin{Client: k8sClient, Source: key, SHA: shaB, Unverified: true, Force: true})
+		handPin(key, shaX, humanManager)
+
+		run(plan)
+		Expect(get(key).Spec.Reference.Commit).To(Equal(shaB))
+	})
+
 	It("warns that an unverified SHA was nobody's to check", func() {
 		plan := planOf(&actions.Pin{Client: k8sClient, Source: key, SHA: shaB, Unverified: true})
 		Expect(plan.Warnings).To(ContainElement(ContainSubstring("--unverified")))
