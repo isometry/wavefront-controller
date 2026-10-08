@@ -48,6 +48,10 @@ const (
 	flagYes   = "--yes"
 	flagPoll  = "--poll"
 	badSource = "not-a-source"
+	flagSHA   = "--sha"
+	flagUnver = "--unverified"
+	shortSHA  = "abc123"
+	badSHAMsg = "not a full 40- or 64-character"
 )
 
 // writeCluster is the fixture every write test drives against: one Wavefront
@@ -61,13 +65,16 @@ func writeCluster() client.WithWatch {
 				Spec: wavefrontv1alpha1.WavefrontSpec{
 					Mode: wavefrontv1alpha1.ModeShadow,
 				},
+				Status: wavefrontv1alpha1.WavefrontStatus{
+					Members: []wavefrontv1alpha1.Member{{Source: testSource}},
+				},
 			},
 			&sourcev1.GitRepository{
 				Namespace: "default",
 				Name:      "infra",
 				Labels:    map[string]string{pin.ManagedLabel: "true"},
 				Spec: sourcev1.GitRepositorySpec{
-					Reference: &sourcev1.GitRepositoryRef{Name: "refs/heads/main", Commit: "abc123"},
+					Reference: &sourcev1.GitRepositoryRef{Name: "refs/heads/main", Commit: shortSHA},
 				},
 			},
 		).
@@ -320,8 +327,33 @@ func TestWriteFlagValidation(t *testing.T) {
 		},
 		{
 			name: "pin with an unchecked SHA",
-			args: []string{cmdPin, testSource, "--sha", "abc123", flagYes},
-			want: "--unverified",
+			args: []string{cmdPin, testSource, flagSHA, strings.Repeat("a", 40), flagYes},
+			want: flagUnver,
+		},
+		{
+			name: "pin with a SHA that is not hex",
+			args: []string{cmdPin, testSource, flagSHA, strings.Repeat("g", 40), flagYes, flagUnver},
+			want: badSHAMsg,
+		},
+		{
+			name: "pin with a short SHA",
+			args: []string{cmdPin, testSource, flagSHA, shortSHA, flagYes, flagUnver},
+			want: badSHAMsg,
+		},
+		{
+			name: "pin with an empty SHA",
+			args: []string{cmdPin, testSource, "--sha=", flagYes, flagUnver},
+			want: badSHAMsg,
+		},
+		{
+			name: "force-admit with a malformed SHA",
+			args: []string{cmdForceAdmit, testSource, flagSHA, shortSHA, flagYes, flagUnver},
+			want: badSHAMsg,
+		},
+		{
+			name: "force-admit --unverified needs --sha",
+			args: []string{cmdForceAdmit, testSource, flagYes, flagUnver},
+			want: "--unverified only applies to an explicit --sha",
 		},
 	}
 

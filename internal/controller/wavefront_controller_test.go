@@ -677,7 +677,7 @@ var _ = Describe("Wavefront reconciler", func() {
 			var names []string
 			if inv := getWavefront(wfName).Status.Pinned; inv != nil {
 				for _, ref := range inv.Entries {
-					src, _ := sourceOf(ref)
+					src, _ := pin.LedgerSource(ref)
 					names = append(names, src.Name)
 				}
 			}

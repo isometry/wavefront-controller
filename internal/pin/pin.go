@@ -31,6 +31,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 	"time"
 
 	sourcev1 "github.com/fluxcd/source-controller/api/v1"
@@ -40,6 +41,8 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/structured-merge-diff/v6/fieldpath"
+
+	wavefrontv1alpha1 "github.com/isometry/wavefront-controller/api/v1alpha1"
 )
 
 const (
@@ -195,4 +198,24 @@ func (w *Writer) Release(ctx context.Context, repo types.NamespacedName) error {
 		return fmt.Errorf("releasing pin of %s: %w", repo, err)
 	}
 	return nil
+}
+
+// LedgerRef encodes a GitRepository as a release-ledger entry, in Flux's
+// inventory ID format "<namespace>_<name>_<group>_<kind>".
+func LedgerRef(src types.NamespacedName) wavefrontv1alpha1.ResourceRef {
+	return wavefrontv1alpha1.ResourceRef{
+		ID:      strings.Join([]string{src.Namespace, src.Name, sourcev1.GroupVersion.Group, sourcev1.GitRepositoryKind}, "_"),
+		Version: sourcev1.GroupVersion.Version,
+	}
+}
+
+// LedgerSource decodes a release-ledger entry written by LedgerRef. The ID is
+// unambiguous: names, groups and kinds cannot contain "_".
+func LedgerSource(ref wavefrontv1alpha1.ResourceRef) (types.NamespacedName, bool) {
+	parts := strings.Split(ref.ID, "_")
+	if len(parts) != 4 || parts[0] == "" || parts[1] == "" ||
+		parts[2] != sourcev1.GroupVersion.Group || parts[3] != sourcev1.GitRepositoryKind {
+		return types.NamespacedName{}, false
+	}
+	return types.NamespacedName{Namespace: parts[0], Name: parts[1]}, true
 }

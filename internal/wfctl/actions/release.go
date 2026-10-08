@@ -28,6 +28,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/structured-merge-diff/v6/fieldpath"
 
+	wavefrontv1alpha1 "github.com/isometry/wavefront-controller/api/v1alpha1"
 	"github.com/isometry/wavefront-controller/internal/pin"
 	"github.com/isometry/wavefront-controller/internal/selection"
 )
@@ -64,6 +65,9 @@ var (
 type Release struct {
 	Client client.Client
 	Source types.NamespacedName
+	// Wavefront is the fleet the source must belong to, and whose mode decides
+	// whether a transfer would survive.
+	Wavefront *wavefrontv1alpha1.Wavefront
 	// Float removes the pin instead of transferring it.
 	Float bool
 	// Strategy resolves the tracking ref recorded as provenance; nil means
@@ -77,6 +81,10 @@ var _ Action = (*Release)(nil)
 
 // Plan implements Action.
 func (a *Release) Plan(ctx context.Context) (*Plan, error) {
+	if err := refuseOutOfScope("release", a.Wavefront, a.Source); err != nil {
+		return nil, err
+	}
+
 	repo, err := getSource(ctx, a.Client, a.Source)
 	if err != nil {
 		return nil, err
@@ -89,6 +97,11 @@ func (a *Release) Plan(ctx context.Context) (*Plan, error) {
 
 	if a.Float {
 		return a.floatPlan(repo, current)
+	}
+	// A float is the one release Shadow does not undo: it removes the pin
+	// rather than handing it to the controller.
+	if err := refuseShadow("release", a.Wavefront, a.Source); err != nil {
+		return nil, err
 	}
 	return a.transferPlan(repo, current)
 }
@@ -119,16 +132,16 @@ func (a *Release) floatPlan(repo *sourcev1.GitRepository, current string) (*Plan
 		Before:   map[string]string{commitField: current},
 		After:    map[string]string{commitField: unset},
 		Warnings: warnings,
-		Apply:    a.applyFloat,
+		Apply:    func(ctx context.Context) (bool, error) { return a.applyFloat(ctx, current) },
 	}, nil
 }
 
-// applyFloat performs the removal.
-func (a *Release) applyFloat(ctx context.Context) (bool, error) {
+// applyFloat performs the removal, guarded on the pin that was planned.
+func (a *Release) applyFloat(ctx context.Context, current string) (bool, error) {
 	repo := &sourcev1.GitRepository{}
 	repo.Namespace, repo.Name = a.Source.Namespace, a.Source.Name
 
-	if err := a.Client.Patch(ctx, repo, client.RawPatch(types.JSONPatchType, removeCommitPatch),
+	if err := a.Client.Patch(ctx, repo, client.RawPatch(types.JSONPatchType, removeCommitPatch(current)),
 		client.FieldOwner(pin.WfctlFieldManager)); err != nil {
 		return false, fmt.Errorf("removing spec.ref.commit of %s: %w", a.Source, err)
 	}

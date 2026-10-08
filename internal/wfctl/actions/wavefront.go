@@ -77,6 +77,8 @@ func (a *WavefrontChange) Plan(_ context.Context) (*Plan, error) {
 	}
 
 	if before == after {
+		// Nothing would change, so nothing is written and nothing is audited.
+		plan.Apply = func(context.Context) (bool, error) { return false, nil }
 		plan.Warnings = append(plan.Warnings,
 			fmt.Sprintf("no change: %s is already %s", field, shown(after)))
 	}

@@ -182,6 +182,15 @@ its artifact, per [initial pin on
 discovery](../DESIGN.md#35-pin-ownership-provenance-and-coexistence).
 Removing a hand-set value with `kubectl` is always the `--float` behaviour.
 
+`pin` takes a full 40- or 64-character lower-case hex SHA. `release` and
+`force-admit` act only on sources of the selected Wavefront (those in its
+`status.members` or `status.pinned`), and both refuse in Shadow mode, where the
+controller would release the pin again on its next pass — except `release
+--float`, which removes the pin and is allowed. `--unverified` on `force-admit`
+requires an explicit `--sha`. If something else takes `spec.ref.commit`
+between the plan and the write, `pin` (without `--force`) and `release --float`
+fail rather than overwrite or remove it.
+
 ## Break-glass: pin-strip
 
 Restores plain floating-ref Flux behaviour fleet-wide by removing every
@@ -207,7 +216,10 @@ a hand-pin under a foreign field manager, or the source's own
 model](../DESIGN.md#35-pin-ownership-provenance-and-coexistence) — because
 somebody is holding those deliberately; `--include-held` strips them too.
 The `kubectl` loop above
-strips them regardless, since it cannot tell the difference. Per-source
+strips them regardless, since it cannot tell the difference, and strips every
+managed source in the cluster, whereas `wfctl pin-strip` touches only the
+selected Wavefront's own sources and guards each patch with a JSON-patch `test`
+on the planned commit, so a hand-pin made after the plan is left alone. Per-source
 errors are reported and the run continues rather than abandoning the fleet
 half-stripped. The plan always warns that the controller re-pins everything on
 its next sweep unless the fleet is suspended or in Shadow mode, and names the

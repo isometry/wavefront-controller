@@ -214,12 +214,14 @@ ref until the controller initial-pins it from its artifact.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return o.runWrite(cmd, actions.ReasonPinReleased, false,
-				func(c client.Client, _ *wavefrontv1alpha1.Wavefront) (actions.Action, error) {
+				func(c client.Client, wf *wavefrontv1alpha1.Wavefront) (actions.Action, error) {
 					source, err := snapshot.ParseSource(args[0])
 					if err != nil {
 						return nil, err
 					}
-					return &actions.Release{Client: c, Source: source, Float: float, Now: o.now}, nil
+					return &actions.Release{
+						Client: c, Source: source, Wavefront: wf, Float: float, Now: o.now,
+					}, nil
 				})
 		},
 	}
@@ -291,6 +293,9 @@ the ForceAdmitted audit event is the record.
 One source, one node's gate. Refused when the source is held or suspended.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if unverified && sha == "" {
+				return errors.New("--unverified only applies to an explicit --sha")
+			}
 			return o.runWrite(cmd, actions.ReasonForceAdmitted, false,
 				func(c client.Client, wf *wavefrontv1alpha1.Wavefront) (actions.Action, error) {
 					source, err := snapshot.ParseSource(args[0])
