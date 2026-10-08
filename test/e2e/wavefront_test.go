@@ -38,6 +38,7 @@ import (
 	fluxgit "github.com/fluxcd/pkg/git"
 	sourcev1 "github.com/fluxcd/source-controller/api/v1"
 	eventsv1 "k8s.io/api/events/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -594,6 +595,82 @@ var _ = Describe("Wavefront fleet", Ordered, func() {
 		expectQuiescent()
 	})
 
+	// A release is an SSA apply of identity alone, so it drops only what the
+	// controller owns by itself: a commit a human co-owns keeps its value, and
+	// the human is left holding it.
+	It("keeps a hand-pin's value when Shadow relinquishes the controller's share", func() {
+		pinned := pinOf(Default, teamNode)
+		Expect(pinned).To(Equal(repos[teamNode].Head()))
+
+		// An Update-op patch of an unchanged value records no ownership; only an
+		// apply of the same value makes the hand-pin a co-owner.
+		By("co-owning team-a's commit at its current value under a foreign apply")
+		handApply(pinned)
+		Expect(commitManagers(Default, teamNode)).To(ConsistOf(pin.FieldManager, handManager))
+
+		By("switching the fleet to Shadow")
+		setMode(wavefrontv1alpha1.ModeShadow)
+
+		By("checking infra is unpinned while team-a keeps the hand-pinned value")
+		Eventually(func(g Gomega) {
+			g.Expect(pinOf(g, infraNode)).To(BeEmpty())
+			g.Expect(pinOf(g, teamNode)).To(Equal(pinned))
+			g.Expect(commitManagers(g, teamNode)).To(ConsistOf(handManager))
+		}, waitConverge, pollFast).Should(Succeed())
+		// The Shadow spec above already announced both releases, so these
+		// events cannot tell this pass from that one; the pins and owners are
+		// the proof. team-a gets one too, rightly: the controller did give up
+		// its share — it just was not the only one holding the value.
+		expectEvent(fleetNamespace, sourcev1.GitRepositoryKind, infraNode, "PinReleased", "mode is Shadow")
+
+		By("dropping the hand-pin and switching back to Enforce")
+		releaseHandPin()
+		Expect(pinOf(Default, teamNode)).To(BeEmpty())
+		setMode(wavefrontv1alpha1.ModeEnforce)
+
+		expectQuiescent()
+	})
+
+	It("relinquishes the pin of a node that leaves the selector, and re-pins it on return", func() {
+		infraPinned := pinOf(Default, infraNode)
+		teamID := pinnedID(teamNode)
+		infraID := pinnedID(infraNode)
+		Expect(pinnedIDs(getFleet(Default))).To(ContainElements(teamID, infraID))
+
+		By("taking team-a's Kustomization out of the selector")
+		setNodeManaged(teamNode, false)
+		// Restored explicitly below; this covers a failure in between.
+		DeferCleanup(setNodeManaged, teamNode, true)
+
+		By("checking team-a's pin is relinquished and stays relinquished")
+		Eventually(func(g Gomega) {
+			g.Expect(pinOf(g, teamNode)).To(BeEmpty())
+		}, waitConverge, pollFast).Should(Succeed())
+		Consistently(func(g Gomega) {
+			g.Expect(pinOf(g, teamNode)).To(BeEmpty())
+		}, holdWindow, pollFast).Should(Succeed())
+		expectEvent(fleetEventNamespace, "Wavefront", fleetName, "PinReleased",
+			"relinquished pin of "+fleetNamespace+"/"+teamNode+" (no longer selected)")
+
+		By("checking infra is untouched and the ledger dropped only team-a")
+		Expect(pinOf(Default, infraNode)).To(Equal(infraPinned))
+		Expect(infraPinned).To(Equal(repos[infraNode].Head()))
+		Eventually(func(g Gomega) {
+			ids := pinnedIDs(getFleet(g))
+			g.Expect(ids).NotTo(ContainElement(teamID))
+			g.Expect(ids).To(ContainElement(infraID))
+		}, waitShort, pollFast).Should(Succeed())
+
+		By("returning team-a to the selector and checking it is pinned again")
+		setNodeManaged(teamNode, true)
+		Eventually(func(g Gomega) {
+			g.Expect(pinOf(g, teamNode)).To(Equal(repos[teamNode].Head()))
+			g.Expect(pinnedIDs(getFleet(g))).To(ContainElements(teamID, infraID))
+		}, waitConverge, pollFast).Should(Succeed())
+
+		expectQuiescent()
+	})
+
 	It("self-heals after a force-push over the pinned commit", func() {
 		pinned := pinOf(Default, infraNode)
 
@@ -613,6 +690,38 @@ var _ = Describe("Wavefront fleet", Ordered, func() {
 		Eventually(func(g Gomega) {
 			g.Expect(pinOf(g, infraNode)).To(Equal(rewritten))
 		}, waitConverge, pollFast).Should(Succeed())
+
+		expectQuiescent()
+	})
+
+	// Last on purpose: it deletes and recreates the Wavefront every earlier
+	// scenario shares.
+	It("relinquishes every pin when the Wavefront is deleted, and a new Wavefront re-adopts the fleet", func() {
+		By("deleting the Wavefront and waiting for its finalizer to clear")
+		cmd := exec.Command("kubectl", "delete", "wavefront", fleetName, "--timeout=3m")
+		_, err := utils.Run(cmd)
+		Expect(err).NotTo(HaveOccurred(), "failed to delete the Wavefront")
+
+		err = k8sClient.Get(ctx, types.NamespacedName{Name: fleetName}, &wavefrontv1alpha1.Wavefront{})
+		Expect(apierrors.IsNotFound(err)).To(BeTrue(), "Wavefront still present: %v", err)
+
+		// The finalizer releases before it lets go, so by now this is settled.
+		By("checking every pin was relinquished, and the Flux objects left alone")
+		for _, node := range []string{infraNode, teamNode} {
+			Expect(pinOf(Default, node)).To(BeEmpty(), "%s is still pinned", node)
+			expectEvent(fleetNamespace, sourcev1.GitRepositoryKind, node, "PinReleased", "Wavefront deleted")
+		}
+		for _, node := range []string{infraNode, gateNode, teamNode} {
+			getKustomization(Default, node)
+		}
+		for _, name := range []string{infraNode, gateRepo, teamNode} {
+			getRepo(Default, name)
+		}
+
+		By("recreating the Wavefront and checking it re-pins the fleet")
+		cmd = exec.Command("kubectl", "apply", "-f", fixturesFile)
+		_, err = utils.Run(cmd)
+		Expect(err).NotTo(HaveOccurred(), "failed to re-apply the fixture fleet")
 
 		expectQuiescent()
 	})
@@ -763,6 +872,34 @@ func admittedAt(g Gomega, node string) time.Time {
 	return at
 }
 
+// commitManagers names every field manager owning a source's spec.ref.commit.
+func commitManagers(g Gomega, name string) []string {
+	owners := pin.Owners(getRepo(g, name))
+	managers := make([]string, 0, len(owners))
+	for _, owner := range owners {
+		managers = append(managers, owner.Manager)
+	}
+	return managers
+}
+
+// pinnedID is a fixture source's release-ledger ID, in Flux's inventory
+// format "<namespace>_<name>_<group>_<kind>".
+func pinnedID(name string) string {
+	return strings.Join([]string{fleetNamespace, name, sourcev1.GroupVersion.Group, sourcev1.GitRepositoryKind}, "_")
+}
+
+// pinnedIDs lists the IDs in a fleet's release ledger, status.pinned.
+func pinnedIDs(fleet *wavefrontv1alpha1.Wavefront) []string {
+	if fleet.Status.Pinned == nil {
+		return nil
+	}
+	var ids []string
+	for _, ref := range fleet.Status.Pinned.Entries {
+		ids = append(ids, ref.ID)
+	}
+	return ids
+}
+
 func blockedEntry(fleet *wavefrontv1alpha1.Wavefront, node string) *wavefrontv1alpha1.BlockedNode {
 	for i := range fleet.Status.Blocked {
 		if fleet.Status.Blocked[i].Node.Name == node {
@@ -824,6 +961,25 @@ func handPin(sha string) {
 	Expect(err).NotTo(HaveOccurred(), "failed to hand-pin %s", teamNode)
 }
 
+// handApply server-side applies spec.ref.commit under the hand-pin manager.
+// Applying the value the controller already holds makes the two co-owners
+// rather than conflicting, which no Update-op patch of an unchanged value does.
+func handApply(sha string) {
+	GinkgoHelper()
+	cmd := exec.Command("kubectl", "apply", "--server-side", "--field-manager="+handManager, "-f", "-")
+	cmd.Stdin = strings.NewReader(fmt.Sprintf(`apiVersion: %s
+kind: %s
+metadata:
+  name: %s
+  namespace: %s
+spec:
+  ref:
+    commit: %q
+`, sourcev1.GroupVersion, sourcev1.GitRepositoryKind, teamNode, fleetNamespace, sha))
+	_, err := utils.Run(cmd)
+	Expect(err).NotTo(HaveOccurred(), "failed to hand-apply %s", teamNode)
+}
+
 // releaseHandPin removes the field, and with it the foreign manager's claim.
 func releaseHandPin() {
 	GinkgoHelper()
@@ -841,6 +997,19 @@ func setMode(mode wavefrontv1alpha1.Mode) {
 		"-p", fmt.Sprintf(`{"spec":{"mode":%q}}`, mode))
 	_, err := utils.Run(cmd)
 	Expect(err).NotTo(HaveOccurred(), "failed to set mode %s", mode)
+}
+
+// setNodeManaged adds or removes a fixture Kustomization's participation
+// label, moving the node into or out of the fleet's selector.
+func setNodeManaged(name string, managed bool) {
+	GinkgoHelper()
+	label := pin.ManagedLabel + "-"
+	if managed {
+		label = pin.ManagedLabel + "=true"
+	}
+	cmd := exec.Command("kubectl", "label", "kustomization", name, "-n", fleetNamespace, label, "--overwrite")
+	_, err := utils.Run(cmd)
+	Expect(err).NotTo(HaveOccurred(), "failed to set %s managed=%t", name, managed)
 }
 
 // pruneServerHistory expires the rewritten-away objects so the pinned commit
