@@ -61,6 +61,17 @@ var _ Action = (*ForceAdmit)(nil)
 
 // Plan implements Action.
 func (a *ForceAdmit) Plan(ctx context.Context) (*Plan, error) {
+	if a.SHA != "" && !shaPattern.MatchString(a.SHA) {
+		return nil, fmt.Errorf("--sha %q is not a full 40- or 64-character lower-case hex commit ID", a.SHA)
+	}
+	// Before anything is listed: a refused write must not cost a remote call.
+	if err := refuseShadow("force-admit", a.Wavefront, a.Source); err != nil {
+		return nil, err
+	}
+	if err := refuseOutOfScope("force-admit", a.Wavefront, a.Source); err != nil {
+		return nil, err
+	}
+
 	repo, err := getSource(ctx, a.Client, a.Source)
 	if err != nil {
 		return nil, err
@@ -96,11 +107,6 @@ func (a *ForceAdmit) Plan(ctx context.Context) (*Plan, error) {
 		warnings = append(warnings, fmt.Sprintf(
 			"Wavefront %s is suspended: this pin is written anyway, but the controller will not "+
 				"advance anything behind it until suspend is cleared", a.Wavefront.Name))
-	}
-	if a.Wavefront.Spec.Mode == wavefrontv1alpha1.ModeShadow {
-		warnings = append(warnings, fmt.Sprintf(
-			"Wavefront %s is in Shadow mode, which suppresses the controller's own writes; this "+
-				"one is not suppressed", a.Wavefront.Name))
 	}
 	warnings = append(warnings,
 		"this bypasses ancestor gating once: the controller sees pin == observed and settles the "+

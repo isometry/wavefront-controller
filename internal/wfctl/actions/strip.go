@@ -65,6 +65,7 @@ func (a *Strip) Plan(ctx context.Context) (*Plan, error) {
 
 	var (
 		targets  []types.NamespacedName
+		scope    = scopeOf(a.Wavefront)
 		before   = map[string]string{}
 		after    = map[string]string{}
 		warnings []string
@@ -77,6 +78,10 @@ func (a *Strip) Plan(ctx context.Context) (*Plan, error) {
 			continue
 		}
 		key := types.NamespacedName{Namespace: repo.Namespace, Name: repo.Name}
+		// Managed sources are cluster-wide; only this Wavefront's are its to strip.
+		if !scope[key] {
+			continue
+		}
 
 		// The same hold the controller sees, which is a hand-pin *or* the
 		// source's own suspension: stripping a suspended source's pin
@@ -114,7 +119,7 @@ func (a *Strip) Plan(ctx context.Context) (*Plan, error) {
 		After:    after,
 		Warnings: append(warnings, a.consequences(len(targets))...),
 		Apply: func(ctx context.Context) (bool, error) {
-			return a.apply(ctx, suspendPlan, targets)
+			return a.apply(ctx, suspendPlan, targets, before)
 		},
 	}, nil
 }
@@ -131,8 +136,8 @@ func (a *Strip) summary(targets int) string {
 	if a.Suspend {
 		suspend = fmt.Sprintf("suspend Wavefront %s, then ", a.Wavefront.Name)
 	}
-	return fmt.Sprintf("Break-glass: %sremove spec.ref.commit from %d managed %s (JSON patch)",
-		suspend, targets, plural(targets, "source", "sources"))
+	return fmt.Sprintf("Break-glass: %sremove spec.ref.commit from %d managed %s of Wavefront %s (JSON patch)",
+		suspend, targets, plural(targets, "source", "sources"), a.Wavefront.Name)
 }
 
 // consequences is the warning block every strip must show.
@@ -161,19 +166,25 @@ func (a *Strip) consequences(targets int) []string {
 // It reports whether anything landed, which for a partial strip is the whole
 // point: thirty stripped sources are a fact about the fleet whether or not the
 // command exits 0.
-func (a *Strip) apply(ctx context.Context, suspendPlan *Plan, targets []types.NamespacedName) (bool, error) {
+func (a *Strip) apply(
+	ctx context.Context,
+	suspendPlan *Plan,
+	targets []types.NamespacedName,
+	planned map[string]string,
+) (bool, error) {
+	written := false
 	if suspendPlan != nil {
-		if written, err := suspendPlan.Apply(ctx); err != nil {
+		var err error
+		if written, err = suspendPlan.Apply(ctx); err != nil {
 			return written, fmt.Errorf("suspending before the strip (nothing was stripped): %w", err)
 		}
 	}
-	written := suspendPlan != nil
 
 	var failures []error
 	for _, key := range targets {
 		repo := &sourcev1.GitRepository{}
 		repo.Namespace, repo.Name = key.Namespace, key.Name
-		if err := a.Client.Patch(ctx, repo, client.RawPatch(types.JSONPatchType, removeCommitPatch),
+		if err := a.Client.Patch(ctx, repo, client.RawPatch(types.JSONPatchType, removeCommitPatch(planned[key.String()])),
 			client.FieldOwner(pin.WfctlFieldManager)); err != nil {
 			failures = append(failures, fmt.Errorf("stripping %s: %w", key, err))
 			continue

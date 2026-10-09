@@ -69,6 +69,8 @@ const (
 	fieldName    = "name"
 	valueTrue    = "true"
 	valueUnset   = "(unset)"
+	shortSHA     = "abc123"
+	errBadSHA    = "not a full"
 )
 
 // The timestamps a controller pin and a wfctl write are stamped with. Fixed so
@@ -356,6 +358,16 @@ func makeWavefront(prefix string, mutate ...func(spec map[string]any)) *wavefron
 		client.FieldOwner(catalogManager))).To(Succeed())
 
 	return getWavefront(name)
+}
+
+// withMembers records sources as pinned members of wf, as the controller's
+// status would: the scope every single-source write is checked against. It
+// edits the Go object only, because the actions read the Wavefront from memory.
+func withMembers(wf *wavefrontv1alpha1.Wavefront, sources ...types.NamespacedName) *wavefrontv1alpha1.Wavefront {
+	for _, source := range sources {
+		wf.Status.Members = append(wf.Status.Members, wavefrontv1alpha1.Member{Source: source.String()})
+	}
+	return wf
 }
 
 // getWavefront reads a Wavefront back.

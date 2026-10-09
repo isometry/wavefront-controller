@@ -65,6 +65,8 @@ var _ = Describe("pin-strip", func() {
 		advance(suspendedSource, shaA)
 
 		clean = renderSource("strip-clean")
+
+		withMembers(wf, pinned, held, suspendedSource, clean)
 	})
 
 	It("strips controller pins and skips held sources", func() {
@@ -94,6 +96,39 @@ var _ = Describe("pin-strip", func() {
 		manager, stillHeld := pin.Hold(get(held))
 		Expect(stillHeld).To(BeTrue())
 		Expect(manager).To(Equal(pin.WfctlFieldManager))
+	})
+
+	It("leaves the sources of another Wavefront alone", func() {
+		foreign := renderSource("strip-foreign")
+		advance(foreign, shaA)
+
+		plan := planOf(&actions.Strip{Client: k8sClient, Wavefront: wf})
+		Expect(plan.Before).NotTo(HaveKey(foreign.String()))
+		Expect(plan.Summary).To(ContainSubstring("of Wavefront " + wf.Name))
+		run(plan)
+
+		Expect(get(pinned).Spec.Reference.Commit).To(BeEmpty())
+		Expect(get(foreign).Spec.Reference.Commit).To(Equal(shaA))
+	})
+
+	It("strips a source only the release ledger still names", func() {
+		leftover := renderSource("strip-leftover")
+		advance(leftover, shaA)
+		wf.Status.Pinned = &wavefrontv1alpha1.ResourceInventory{
+			Entries: []wavefrontv1alpha1.ResourceRef{pin.LedgerRef(leftover)}}
+
+		plan := planOf(&actions.Strip{Client: k8sClient, Wavefront: wf})
+		Expect(plan.Before).To(HaveKeyWithValue(leftover.String(), shaA))
+	})
+
+	It("does not strip a pin taken by hand after the plan was shown", func() {
+		plan := planOf(&actions.Strip{Client: k8sClient, Wavefront: wf})
+		Expect(plan.Before).To(HaveKeyWithValue(pinned.String(), shaA))
+
+		handPin(pinned, shaZ, "kubectl-edit")
+
+		Expect(runExpectingError(plan).Error()).To(ContainSubstring("stripping " + pinned.String()))
+		Expect(get(pinned).Spec.Reference.Commit).To(Equal(shaZ))
 	})
 
 	It("strips held sources too under --include-held", func() {

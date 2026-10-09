@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"time"
+	"unicode/utf8"
 
 	corev1 "k8s.io/api/core/v1"
 	eventsv1 "k8s.io/api/events/v1"
@@ -76,7 +77,12 @@ func truncate(note string) string {
 	if len(note) <= noteLimit {
 		return note
 	}
-	return note[:noteLimit-3] + "..."
+	// Back up to a rune boundary: the apiserver rejects an invalid UTF-8 note.
+	cut := noteLimit - 3
+	for cut > 0 && !utf8.RuneStart(note[cut]) {
+		cut--
+	}
+	return note[:cut] + "..."
 }
 
 // Audit records one completed write as an event on the Wavefront.

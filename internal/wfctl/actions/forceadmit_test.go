@@ -17,6 +17,8 @@ limitations under the License.
 package actions_test
 
 import (
+	"errors"
+
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
@@ -37,6 +39,7 @@ var _ = Describe("force-admit", func() {
 	BeforeEach(func() {
 		wf = makeWavefront("force-admit")
 		key = renderSource("force-admit")
+		withMembers(wf, key)
 		refs = actions.Advertisement{Lister: fakeLister{refs: map[string]string{
 			trackingRef:         shaC,
 			"refs/heads/hotfix": shaB,
@@ -99,6 +102,7 @@ var _ = Describe("force-admit", func() {
 		suspended := renderSource("force-admit-suspended", func(spec map[string]any) {
 			spec["suspend"] = true
 		})
+		withMembers(wf, suspended)
 		action := admit("", false)
 		action.Source = suspended
 
@@ -122,16 +126,47 @@ var _ = Describe("force-admit", func() {
 		Expect(get(key).Spec.Reference.Commit).To(Equal(shaZ))
 	})
 
-	It("warns, but still writes, when the fleet is suspended or shadowed", func() {
+	It("warns, but still writes, when the fleet is suspended", func() {
 		suspend := true
 		run(planOf(&actions.WavefrontChange{Client: k8sClient, Wavefront: wf, Suspend: &suspend}))
-		wf = getWavefront(wf.Name)
+		wf = withMembers(getWavefront(wf.Name), key)
 
 		plan := planOf(admit("", false))
 		Expect(plan.Warnings).To(ContainElement(ContainSubstring("is suspended")))
 		run(plan)
 
 		Expect(get(key).Spec.Reference.Commit).To(Equal(shaC))
+	})
+
+	It("refuses in Shadow mode, before listing the remote", func() {
+		shadow := wavefrontv1alpha1.ModeShadow
+		run(planOf(&actions.WavefrontChange{Client: k8sClient, Wavefront: wf, Mode: &shadow}))
+		wf = withMembers(getWavefront(wf.Name), key)
+
+		action := admit("", false)
+		action.Advertisement = actions.Advertisement{Lister: fakeLister{err: errors.New("remote consulted")}}
+		_, err := action.Plan(ctx)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(And(ContainSubstring("Shadow mode"), ContainSubstring("would be undone")))
+		Expect(err.Error()).NotTo(ContainSubstring("remote consulted"))
+	})
+
+	It("refuses a source of another Wavefront", func() {
+		other := renderSource("force-admit-other")
+		action := admit("", false)
+		action.Source = other
+
+		_, err := action.Plan(ctx)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(And(ContainSubstring("not a source of Wavefront "+wf.Name), ContainSubstring(other.String())))
+	})
+
+	It("refuses a SHA that is not a full hex commit ID", func() {
+		for _, sha := range []string{shortSHA, "ZZZZ" + shaA[4:], shaA + "0"} {
+			_, err := admit(sha, true).Plan(ctx)
+			Expect(err).To(HaveOccurred(), sha)
+			Expect(err.Error()).To(ContainSubstring(errBadSHA))
+		}
 	})
 
 	It("reports a tracking ref the remote does not advertise", func() {

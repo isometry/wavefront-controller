@@ -24,15 +24,20 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	wavefrontv1alpha1 "github.com/isometry/wavefront-controller/api/v1alpha1"
 	"github.com/isometry/wavefront-controller/internal/pin"
 	"github.com/isometry/wavefront-controller/internal/wfctl/actions"
 )
 
 var _ = Describe("release", func() {
-	var key types.NamespacedName
+	var (
+		wf  *wavefrontv1alpha1.Wavefront
+		key types.NamespacedName
+	)
 
 	BeforeEach(func() {
 		key = renderSource("release")
+		wf = withMembers(makeWavefront("release"), key)
 	})
 
 	It("transfers a wfctl hold to the controller, value and provenance intact", func() {
@@ -41,7 +46,7 @@ var _ = Describe("release", func() {
 		run(planOf(&actions.Pin{Client: k8sClient, Source: key, SHA: shaB, Unverified: true}))
 		Expect(ownersOf(get(key))).To(ConsistOf(pin.Owner{Manager: pin.WfctlFieldManager, Operation: applyOperation}))
 
-		plan := planOf(&actions.Release{Client: k8sClient, Source: key, Now: fixedClock})
+		plan := planOf(&actions.Release{Client: k8sClient, Source: key, Wavefront: wf, Now: fixedClock})
 		Expect(plan.Before).To(HaveKeyWithValue(fieldCommit, shaB))
 		Expect(plan.After).To(HaveKeyWithValue(fieldCommit, shaB))
 		Expect(plan.After).To(HaveKeyWithValue("spec.ref.commit owners", ContainSubstring(pin.FieldManager)))
@@ -76,7 +81,7 @@ var _ = Describe("release", func() {
 		handPin(key, shaX, humanManager)
 		Expect(ownersOf(get(key))).To(ConsistOf(pin.Owner{Manager: humanManager, Operation: updateOperation}))
 
-		plan := planOf(&actions.Release{Client: k8sClient, Source: key, Now: fixedClock})
+		plan := planOf(&actions.Release{Client: k8sClient, Source: key, Wavefront: wf, Now: fixedClock})
 		Expect(plan.Warnings).To(ContainElement(ContainSubstring("managedFields")))
 		run(plan)
 
@@ -110,7 +115,7 @@ var _ = Describe("release", func() {
 			client.FieldOwner(otherApplier), client.ForceOwnership)).To(Succeed())
 		Expect(ownersOf(get(key))).To(ContainElement(pin.Owner{Manager: otherApplier, Operation: applyOperation}))
 
-		run(planOf(&actions.Release{Client: k8sClient, Source: key, Now: fixedClock}))
+		run(planOf(&actions.Release{Client: k8sClient, Source: key, Wavefront: wf, Now: fixedClock}))
 
 		repo := get(key)
 		Expect(repo.Spec.Reference.Commit).To(Equal(shaX))
@@ -135,6 +140,7 @@ var _ = Describe("release", func() {
 			// build's Go type would drop on the floor.
 			sourceSpec(func(spec map[string]any) { spec[unknownToThisBuild] = "kept" })))).To(Succeed())
 		Expect(unknownValue(key)).To(Equal("kept"))
+		withMembers(wf, key)
 
 		advance(key, shaA)
 
@@ -144,7 +150,7 @@ var _ = Describe("release", func() {
 			client.FieldOwner(humanManager))).To(Succeed())
 		Expect(ownersOf(get(key))).To(ConsistOf(pin.Owner{Manager: humanManager, Operation: updateOperation}))
 
-		run(planOf(&actions.Release{Client: k8sClient, Source: key, Now: fixedClock}))
+		run(planOf(&actions.Release{Client: k8sClient, Source: key, Wavefront: wf, Now: fixedClock}))
 
 		By("releasing the hold without deleting what it could not parse")
 		Expect(unknownValue(key)).To(Equal("kept"))
@@ -157,7 +163,7 @@ var _ = Describe("release", func() {
 		advance(key, shaA)
 		run(planOf(&actions.Pin{Client: k8sClient, Source: key, SHA: shaB, Unverified: true}))
 
-		plan := planOf(&actions.Release{Client: k8sClient, Source: key, Float: true, Now: fixedClock})
+		plan := planOf(&actions.Release{Client: k8sClient, Source: key, Wavefront: wf, Float: true, Now: fixedClock})
 		Expect(plan.After).To(HaveKeyWithValue(fieldCommit, valueUnset))
 		Expect(plan.Warnings).To(ContainElement(ContainSubstring("floats on " + trackingRef)))
 		run(plan)
@@ -174,17 +180,58 @@ var _ = Describe("release", func() {
 		Expect(repo.Spec.Reference.Name).To(Equal(trackingRef))
 	})
 
+	It("refuses a transfer in Shadow mode, but allows --float", func() {
+		advance(key, shaA)
+		run(planOf(&actions.Pin{Client: k8sClient, Source: key, SHA: shaB, Unverified: true}))
+
+		shadow := wavefrontv1alpha1.ModeShadow
+		run(planOf(&actions.WavefrontChange{Client: k8sClient, Wavefront: wf, Mode: &shadow}))
+		wf = withMembers(getWavefront(wf.Name), key)
+
+		_, err := (&actions.Release{Client: k8sClient, Source: key, Wavefront: wf, Now: fixedClock}).Plan(ctx)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(And(ContainSubstring("Shadow mode"), ContainSubstring("would be undone")))
+
+		run(planOf(&actions.Release{Client: k8sClient, Source: key, Wavefront: wf, Float: true, Now: fixedClock}))
+		Expect(get(key).Spec.Reference.Commit).To(BeEmpty())
+	})
+
+	It("refuses a source of another Wavefront, float or not", func() {
+		other := renderSource("release-other")
+		advance(other, shaA)
+
+		for _, float := range []bool{false, true} {
+			_, err := (&actions.Release{
+				Client: k8sClient, Source: other, Wavefront: wf, Float: float, Now: fixedClock,
+			}).Plan(ctx)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("not a source of Wavefront " + wf.Name))
+		}
+		Expect(get(other).Spec.Reference.Commit).To(Equal(shaA))
+	})
+
+	It("does not float a pin taken by hand after the plan was shown", func() {
+		advance(key, shaA)
+		run(planOf(&actions.Pin{Client: k8sClient, Source: key, SHA: shaB, Unverified: true}))
+
+		plan := planOf(&actions.Release{Client: k8sClient, Source: key, Wavefront: wf, Float: true, Now: fixedClock})
+		handPin(key, shaX, humanManager)
+
+		Expect(runExpectingError(plan).Error()).To(ContainSubstring("removing spec.ref.commit"))
+		Expect(get(key).Spec.Reference.Commit).To(Equal(shaX))
+	})
+
 	It("refuses to transfer a pin nobody is holding", func() {
 		advance(key, shaA)
 
-		_, err := (&actions.Release{Client: k8sClient, Source: key, Now: fixedClock}).Plan(ctx)
+		_, err := (&actions.Release{Client: k8sClient, Source: key, Wavefront: wf, Now: fixedClock}).Plan(ctx)
 		Expect(err).To(HaveOccurred())
 		Expect(err.Error()).To(ContainSubstring("not held"))
 		Expect(err.Error()).To(ContainSubstring("--float"))
 	})
 
 	It("refuses to release a source with no pin at all", func() {
-		_, err := (&actions.Release{Client: k8sClient, Source: key, Now: fixedClock}).Plan(ctx)
+		_, err := (&actions.Release{Client: k8sClient, Source: key, Wavefront: wf, Now: fixedClock}).Plan(ctx)
 		Expect(err).To(HaveOccurred())
 		Expect(err.Error()).To(ContainSubstring("no spec.ref.commit"))
 	})
