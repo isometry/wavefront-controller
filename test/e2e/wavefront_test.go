@@ -566,7 +566,11 @@ var _ = Describe("Wavefront fleet", Ordered, func() {
 		expectQuiescent()
 	})
 
-	It("relinquishes every pin in Shadow mode, and re-pins in Enforce", func() {
+	// Shadow writes no pins, but it keeps the pins it would have written in
+	// status.virtualPins and gates on them exactly as Enforce gates on real ones.
+	// The next three scenarios are one Shadow stay: relinquish and seed the
+	// ledger, gate on an unhealthy ancestor, then flip back and re-pin for real.
+	It("relinquishes every pin in Shadow mode and keeps virtual pins", func() {
 		By("switching the fleet to Shadow")
 		setMode(wavefrontv1alpha1.ModeShadow)
 
@@ -577,22 +581,82 @@ var _ = Describe("Wavefront fleet", Ordered, func() {
 		}, waitConverge, pollFast).Should(Succeed())
 		expectEvent(fleetEventNamespace, "Wavefront", fleetName, "PinReleased", "mode is Shadow")
 
+		By("checking the virtual pins were seeded from the pins that were just released")
+		Eventually(func(g Gomega) {
+			fleet := getFleet(g)
+			g.Expect(virtualPinOf(fleet, infraNode)).To(Equal(repos[infraNode].Head()))
+			g.Expect(virtualPinOf(fleet, teamNode)).To(Equal(repos[teamNode].Head()))
+		}, waitConverge, pollFast).Should(Succeed())
+
 		By("pushing to infra")
 		shaS := pushRevision(repos[infraNode])
 
-		By("checking no pin is written")
+		By("checking the infra source's virtual pin advances to the new SHA")
+		Eventually(func(g Gomega) {
+			g.Expect(virtualPinOf(getFleet(g), infraNode)).To(Equal(shaS))
+		}, waitConverge, pollFast).Should(Succeed())
+
+		By("checking no real pin is written")
 		Consistently(func(g Gomega) {
 			g.Expect(pinOf(g, infraNode)).To(BeEmpty())
 		}, holdWindow, pollFast).Should(Succeed())
 
-		By("checking the would-be admission was reported")
+		By("checking the virtual advance was reported")
 		expectEvent(fleetEventNamespace, "Wavefront", fleetName, "ShadowAdmission", shaS)
+	})
 
-		By("switching back to Enforce and checking the fleet is pinned again")
-		setMode(wavefrontv1alpha1.ModeEnforce)
+	It("gates virtual pins on ancestors in Shadow mode", func() {
+		teamVirtualBefore := virtualPinOf(getFleet(Default), teamNode)
+		Expect(teamVirtualBefore).NotTo(BeEmpty())
+
+		By("pushing a manifest that the kustomize-controller cannot build")
+		shaBroken, err := repos[infraNode].PushFile(configMapPath, brokenManifest, "break infra in Shadow")
+		Expect(err).NotTo(HaveOccurred())
+
+		By("waiting for infra to be virtually admitted and to go Ready=False for real")
 		Eventually(func(g Gomega) {
-			g.Expect(pinOf(g, infraNode)).To(Equal(shaS))
-			g.Expect(pinOf(g, teamNode)).NotTo(BeEmpty())
+			g.Expect(virtualPinOf(getFleet(g), infraNode)).To(Equal(shaBroken))
+			g.Expect(readyStatus(g, infraNode)).To(Equal("False"))
+		}, waitConverge, pollFast).Should(Succeed())
+
+		By("pushing to team-a behind the unhealthy ancestor")
+		shaT := pushRevision(repos[teamNode])
+
+		// Waiting for the Blocked verdict first proves the controller has seen
+		// the push, so the "did not advance" window below is not vacuous.
+		By("checking the engine blocks team-a on its ancestor")
+		Eventually(func(g Gomega) {
+			entry := blockedEntry(getFleet(g), teamNode)
+			g.Expect(entry).NotTo(BeNil())
+			g.Expect(entry.Reason).To(Equal("AncestorUnhealthy"))
+		}, waitShort, pollFast).Should(Succeed())
+
+		By("checking team-a's virtual pin does not advance and no would-pin event names it")
+		Consistently(func(g Gomega) {
+			g.Expect(virtualPinOf(getFleet(g), teamNode)).To(Equal(teamVirtualBefore))
+			g.Expect(eventSeen(g, fleetEventNamespace, "Wavefront", fleetName, "ShadowAdmission", shaT)).
+				To(BeFalse(), "a ShadowAdmission event named team-a's push behind an unhealthy ancestor")
+		}, holdWindow, pollFast).Should(Succeed())
+
+		By("pushing a fix to infra and waiting for the virtual pins to drain")
+		shaFix := pushRevision(repos[infraNode])
+		Eventually(func(g Gomega) {
+			fleet := getFleet(g)
+			g.Expect(virtualPinOf(fleet, infraNode)).To(Equal(shaFix))
+			g.Expect(virtualPinOf(fleet, teamNode)).To(Equal(shaT))
+		}, waitConverge, pollFast).Should(Succeed())
+		expectEvent(fleetEventNamespace, "Wavefront", fleetName, "ShadowAdmission", shaT)
+	})
+
+	It("clears virtual pins and pins at the artifact when flipped back to Enforce", func() {
+		By("switching back to Enforce")
+		setMode(wavefrontv1alpha1.ModeEnforce)
+
+		By("checking the virtual pins are cleared and real pins are written at the artifact")
+		Eventually(func(g Gomega) {
+			g.Expect(getFleet(g).Status.VirtualPins).To(BeEmpty())
+			g.Expect(pinOf(g, infraNode)).To(Equal(repos[infraNode].Head()))
+			g.Expect(pinOf(g, teamNode)).To(Equal(repos[teamNode].Head()))
 		}, waitConverge, pollFast).Should(Succeed())
 
 		expectQuiescent()
@@ -1101,6 +1165,17 @@ func expectEvent(ns, kind, name, reason, note string) {
 		g.Expect(eventSeen(g, ns, kind, name, reason, note)).
 			To(BeTrue(), "no %s event for %s/%s containing %q", reason, kind, name, note)
 	}, waitShort, time.Second).Should(Succeed())
+}
+
+// virtualPinOf reads a fixture source's entry in status.virtualPins ("" when
+// it has none).
+func virtualPinOf(fleet *wavefrontv1alpha1.Wavefront, name string) string {
+	for _, vp := range fleet.Status.VirtualPins {
+		if vp.Source == fleetNamespace+"/"+name {
+			return vp.Commit
+		}
+	}
+	return ""
 }
 
 // eventSeen reports whether such an Event exists right now.

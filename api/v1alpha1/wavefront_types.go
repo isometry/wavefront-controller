@@ -137,13 +137,13 @@ type HeldNode struct {
 	Reason string `json:"reason,omitempty"`
 }
 
-// ShadowAdmission records a would-be admission announced in Shadow mode:
-// the pin write the controller would have performed in Enforce.
-type ShadowAdmission struct {
+// VirtualPin is the commit Shadow mode has virtually pinned a source to: the
+// pin the controller would hold in Enforce.
+type VirtualPin struct {
 	// Source is the "<namespace>/<name>" of the GitRepository.
 	Source string `json:"source"`
-	// To is the SHA that would be pinned.
-	To string `json:"to"`
+	// Commit is the virtually pinned SHA.
+	Commit string `json:"commit"`
 }
 
 // BlockedRef attributes a blocked node to its nearest unsettled ancestor.
@@ -184,12 +184,15 @@ type WavefrontStatus struct {
 	Blocked []BlockedNode `json:"blocked,omitempty"`
 	// +listType=atomic
 	Held []HeldNode `json:"held,omitempty"`
-	// Shadow lists would-be admissions already announced in Shadow mode
-	// (capped at StatusListCap); the edge-trigger ledger for ShadowAdmission
-	// events and the shadow admissions counter.
-	// +listType=atomic
+	// VirtualPins is Shadow mode's pin store: the commit each managed source
+	// would be pinned to in Enforce. Unlike the rest of status it is an
+	// evaluation input, standing in for spec.ref.commit while Shadow writes no
+	// real pins. Written only in Shadow, cleared in Enforce; uncapped, since
+	// truncating it would re-pin the dropped sources ungated.
+	// +listType=map
+	// +listMapKey=source
 	// +optional
-	Shadow []ShadowAdmission `json:"shadow,omitempty"`
+	VirtualPins []VirtualPin `json:"virtualPins,omitempty"`
 	// +listType=map
 	// +listMapKey=type
 	Conditions         []metav1.Condition `json:"conditions,omitempty"`

@@ -500,28 +500,32 @@ spec:
                 required:
                 - entries
                 type: object
-              shadow:
+              virtualPins:
                 description: |-
-                  Shadow lists would-be admissions already announced in Shadow mode
-                  (capped at StatusListCap); the edge-trigger ledger for ShadowAdmission
-                  events and the shadow admissions counter.
+                  VirtualPins is Shadow mode's pin store: the commit each managed source
+                  would be pinned to in Enforce. Unlike the rest of status it is an
+                  evaluation input, standing in for spec.ref.commit while Shadow writes no
+                  real pins. Written only in Shadow, cleared in Enforce; uncapped, since
+                  truncating it would re-pin the dropped sources ungated.
                 items:
                   description: |-
-                    ShadowAdmission records a would-be admission announced in Shadow mode:
-                    the pin write the controller would have performed in Enforce.
+                    VirtualPin is the commit Shadow mode has virtually pinned a source to: the
+                    pin the controller would hold in Enforce.
                   properties:
+                    commit:
+                      description: Commit is the virtually pinned SHA.
+                      type: string
                     source:
                       description: Source is the "<namespace>/<name>" of the GitRepository.
                       type: string
-                    to:
-                      description: To is the SHA that would be pinned.
-                      type: string
                   required:
+                  - commit
                   - source
-                  - to
                   type: object
                 type: array
-                x-kubernetes-list-type: atomic
+                x-kubernetes-list-map-keys:
+                - source
+                x-kubernetes-list-type: map
             type: object
         required:
         - spec

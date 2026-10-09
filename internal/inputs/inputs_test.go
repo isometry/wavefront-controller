@@ -28,6 +28,7 @@ import (
 	"time"
 
 	sourcev1 "github.com/fluxcd/source-controller/api/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -736,5 +737,47 @@ func TestPackageStaysPure(t *testing.T) {
 		if strings.HasPrefix(path, "github.com/isometry/wavefront-controller/") && !slices.Contains(allowed, path) {
 			t.Errorf("imports %q, which is not on the allowlist: a new in-repo dependency needs arguing for", path)
 		}
+	}
+}
+
+// --- the effective pin -------------------------------------------------------
+
+// TestEffectivePin: in Shadow the virtual pin stands in for spec.ref.commit,
+// except where the real pin is authoritative: Enforce, or a hand-pin.
+func TestEffectivePin(t *testing.T) {
+	const shaVirtual = "2222222222222222222222222222222222222222"
+	handPin := []metav1.ManagedFieldsEntry{{
+		Manager:   humanManager,
+		Operation: metav1.ManagedFieldsOperationUpdate,
+		FieldsV1:  metav1.NewFieldsV1(`{"f:spec":{"f:ref":{"f:commit":{}}}}`),
+	}}
+	ledger := []wavefrontv1alpha1.VirtualPin{{Source: fluxNamespace + "/" + teamAName, Commit: shaVirtual}}
+	tests := []struct {
+		name   string
+		mode   wavefrontv1alpha1.Mode
+		ledger []wavefrontv1alpha1.VirtualPin
+		commit string
+		fields []metav1.ManagedFieldsEntry
+		want   string
+	}{
+		{name: "Enforce ignores the ledger", mode: wavefrontv1alpha1.ModeEnforce, ledger: ledger, commit: shaA, want: shaA},
+		{name: "Shadow prefers the ledger", mode: wavefrontv1alpha1.ModeShadow, ledger: ledger, commit: shaA, want: shaVirtual},
+		{name: "Shadow falls back to the owned pin", mode: wavefrontv1alpha1.ModeShadow, commit: shaA, want: shaA},
+		{name: "Shadow with neither is unpinned", mode: wavefrontv1alpha1.ModeShadow, want: ""},
+		{name: "a hand-pin beats the ledger", mode: wavefrontv1alpha1.ModeShadow, ledger: ledger, commit: shaHand, fields: handPin, want: shaHand},
+		{name: "an empty mode is Shadow", ledger: ledger, commit: shaA, want: shaVirtual},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			wf := testWavefront()
+			wf.Spec.Mode = tt.mode
+			wf.Status.VirtualPins = tt.ledger
+			repo := managedRepo(teamAName, "https://git.example.com/org/a.git",
+				&sourcev1.GitRepositoryRef{Name: mainRef, Commit: tt.commit})
+			repo.ManagedFields = tt.fields
+			if got := EffectivePin(wf, repo); got != tt.want {
+				t.Errorf("EffectivePin() = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }

@@ -237,6 +237,16 @@ func pinOf(ns, name string) string {
 	return repo.Spec.Reference.Commit
 }
 
+// virtualPinOf reads one source's entry in a Wavefront's status.virtualPins.
+func virtualPinOf(wfName, ns, name string) string {
+	for _, vp := range getWavefront(wfName).Status.VirtualPins {
+		if vp.Source == ns+"/"+name {
+			return vp.Commit
+		}
+	}
+	return ""
+}
+
 // memberOf returns the named node's entry in status.members, nil when absent.
 func memberOf(wf *wavefrontv1alpha1.Wavefront, name string) *wavefrontv1alpha1.Member {
 	for i := range wf.Status.Members {
@@ -634,20 +644,23 @@ var _ = Describe("Wavefront reconciler", func() {
 			By("never writing a pin, initial pins included")
 			Consistently(func() string { return pinOf(ns, flotilla) }).Should(BeEmpty())
 
+			By("recording the virtual pin instead")
+			Eventually(func() string { return virtualPinOf("wf-shadow", ns, flotilla) }).Should(Equal(shaA))
+
 			By("still publishing live status")
 			Eventually(func() wavefrontv1alpha1.NodeCounts {
 				return getWavefront("wf-shadow").Status.Nodes
 			}).Should(And(HaveField("Observed", 1), HaveField("Pinned", 1)))
 
-			// The engine re-derives the identical would-be admission every
-			// reconcile, so the ShadowAdmission event and
-			// wavefront_admissions_total{result="shadow"} are edge-triggered
-			// against status.Shadow rather than fired once per pass (40+/hour
-			// on a pending change).
+			// The next pass evaluates against the virtual pin, so the
+			// ShadowAdmission event and
+			// wavefront_admissions_total{result="shadow"} fire once per
+			// virtual advance rather than once per pass (40+/hour on a
+			// pending change).
 			// Events are at-least-once, not exactly-once: the next reconcile
 			// can read the informer cache before it has absorbed this pass's
 			// status patch (client.MergeFrom carries no optimistic lock) and
-			// re-fire the edge-trigger once more.
+			// re-derive the same advance once more.
 			// Assert >=1 then bound at <=2 so a regression that re-fires the
 			// event on every pass (10+ occurrences in this window) still
 			// fails.
@@ -668,6 +681,47 @@ var _ = Describe("Wavefront reconciler", func() {
 			Consistently(func() float64 {
 				return testutil.ToFloat64(instruments.AdmissionsTotal.WithLabelValues("wf-shadow", resultShadow))
 			}).Should(BeNumerically("<=", 2))
+		})
+	})
+
+	Describe("Shadow mode ordering", func() {
+		It("advances a descendant's virtual pin only behind a healthy ancestor", func() {
+			const ns, scenario, wfName = "shadow-chain", "shadow-chain", "wf-shadow-chain"
+			makeNamespace(ns)
+
+			upURL, downURL := repoURLFor(ns, "up"), repoURLFor(ns, "down")
+			lister.advertise(upURL, mainRef, shaA)
+			lister.advertise(downURL, mainRef, shaA)
+
+			upRepo := makeGitRepo(ns, "up", upURL, mainRef, true)
+			setArtifact(upRepo, revisionOf(shaA))
+			up := makeKustomization(ns, "up",
+				types.NamespacedName{Namespace: ns, Name: "up"}, nil,
+				map[string]string{scenarioLabel: scenario})
+			downRepo := makeGitRepo(ns, "down", downURL, mainRef, true)
+			setArtifact(downRepo, revisionOf(shaA))
+			down := makeKustomization(ns, "down",
+				types.NamespacedName{Namespace: ns, Name: "down"}, []string{"up"},
+				map[string]string{scenarioLabel: scenario})
+
+			makeWavefront(wfName, scenario, wavefrontv1alpha1.ModeShadow)
+
+			By("taking both initial virtual pins")
+			Eventually(func() string { return virtualPinOf(wfName, ns, "up") }).Should(Equal(shaA))
+			Eventually(func() string { return virtualPinOf(wfName, ns, "down") }).Should(Equal(shaA))
+
+			By("advertising new commits on both while the ancestor is not Ready")
+			setKustomizationReady(up, revisionOf(shaA), false)
+			setKustomizationReady(down, revisionOf(shaA), true)
+			lister.advertise(upURL, mainRef, shaB)
+			lister.advertise(downURL, mainRef, shaB)
+
+			Eventually(func() string { return virtualPinOf(wfName, ns, "up") }).Should(Equal(shaB))
+			Consistently(func() string { return virtualPinOf(wfName, ns, "down") }).Should(Equal(shaA))
+			messages, _ := recordedEvents("ShadowAdmission", wfName)
+			Expect(messages).NotTo(ContainElement(SatisfyAll(
+				ContainSubstring(ns+"/down"), ContainSubstring(shaB))))
+			Expect(pinOf(ns, "up")).To(BeEmpty(), "Shadow writes no real pin")
 		})
 	})
 
