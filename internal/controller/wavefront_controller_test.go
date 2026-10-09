@@ -1082,6 +1082,47 @@ var _ = Describe("Wavefront reconciler", func() {
 		})
 	})
 
+	Describe("source overlap", func() {
+		It("marks both Wavefronts invalid when disjoint selectors share a managed source", func() {
+			const ns, wfA, wfB = "source-overlap", "wf-source-overlap-a", "wf-source-overlap-b"
+			makeNamespace(ns)
+
+			// As above, both exist before any node so neither admits alone.
+			makeWavefront(wfA, "source-overlap-a", wavefrontv1alpha1.ModeEnforce)
+			makeWavefront(wfB, "source-overlap-b", wavefrontv1alpha1.ModeEnforce)
+			for _, name := range []string{wfA, wfB} {
+				Eventually(func() int64 {
+					return getWavefront(name).Status.ObservedGeneration
+				}).Should(Equal(getWavefront(name).Generation))
+			}
+
+			// Both nodes exist before their source does, so neither Wavefront
+			// can see the managed source without also seeing the other's node.
+			src := types.NamespacedName{Namespace: ns, Name: flotilla}
+			makeKustomization(ns, "ks-a", src, nil, map[string]string{scenarioLabel: "source-overlap-a"})
+			makeKustomization(ns, "ks-b", src, nil, map[string]string{scenarioLabel: "source-overlap-b"})
+			url := repoURLFor(ns, flotilla)
+			lister.advertise(url, mainRef, shaA)
+			repo := makeGitRepo(ns, flotilla, url, mainRef, true)
+			setArtifact(repo, revisionOf(shaA))
+
+			for name, other := range map[string]string{
+				wfA: wfB,
+				wfB: wfA,
+			} {
+				Eventually(func() *metav1.Condition {
+					return conditionOf(getWavefront(name), wavefrontv1alpha1.ConditionGraphValid)
+				}).Should(And(
+					HaveField("Status", metav1.ConditionFalse),
+					HaveField("Reason", wavefrontv1alpha1.GraphValidReasonSourceOverlap),
+					HaveField("Message", ContainSubstring(other)),
+				))
+			}
+
+			Consistently(func() string { return pinOf(ns, flotilla) }).Should(BeEmpty())
+		})
+	})
+
 	Describe("dependsOn cycles", func() {
 		It("reports the cycle while unrelated nodes still admit", func() {
 			const ns, scenario = "cycle", "cycle"

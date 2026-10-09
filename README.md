@@ -136,9 +136,10 @@ carries the controller's configuration and fleet-level status. It declares
 scope and policy only — never topology, which is discovered from
 `dependsOn` (see [how nodes, edges and roles are derived from the
 graph](DESIGN.md#32-the-graph-nodes-edges-roles)). Multiple `Wavefront`s are permitted (e.g. per
-context) but their node selectors must not overlap; overlap is reported as
-an error condition on both, and their per-Wavefront gauges (see
-[Metrics](#metrics)) are suppressed for as long as the overlap stands, so a
+context) but their node selectors must not overlap, nor may their selected
+nodes share a managed `GitRepository`; either overlap is reported as an error
+condition on both (`GraphValid` reason `SelectorOverlap` or `SourceOverlap`),
+and their per-Wavefront gauges (see [Metrics](#metrics)) are suppressed for as long as the overlap stands, so a
 fleet-wide `sum()` never double-counts either Wavefront.
 
 ```yaml
@@ -201,7 +202,7 @@ status:
   lastEvaluated: "2026-08-27T09:15:11Z"   # advanced at most once per spec.poll.interval
   conditions:
     - type: Ready
-    - type: GraphValid                    # False on dependsOn cycles or selector overlap
+    - type: GraphValid                    # False on dependsOn cycles, selector or source overlap
   observedGeneration: 4
 ```
 

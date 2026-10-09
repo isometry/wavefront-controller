@@ -39,6 +39,8 @@ import (
 	sourcev1 "github.com/fluxcd/source-controller/api/v1"
 	eventsv1 "k8s.io/api/events/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -59,6 +61,7 @@ const (
 
 	trackedRef  = "refs/heads/" + utils.GitBranch
 	handManager = "e2e-hand-pin"
+	managedTrue = "true"
 
 	// Events for the cluster-scoped Wavefront land in the default namespace:
 	// client-go's events.k8s.io recorder substitutes it for an empty
@@ -725,6 +728,165 @@ var _ = Describe("Wavefront fleet", Ordered, func() {
 
 		expectQuiescent()
 	})
+
+	// Disjoint selectors can still meet on a GitRepository, and two
+	// Wavefronts pinning one source would fight over spec.ref.commit. Runs
+	// beside the live fleet, which also proves the pause stays local.
+	It("reports SourceOverlap on both Wavefronts when disjoint selectors share a managed source, "+
+		"and recovers when one goes", func() {
+		const sharedSource, wfA, wfB = "shared", "overlap-a", "overlap-b"
+		const fleetLabel = "wavefront.as-code.io/fleet"
+
+		// The previous spec recreated the fleet's Wavefront.
+		expectQuiescent()
+
+		By("seeding a source no fixture Wavefront selects")
+		// Pointing at infra or team-a would put fleet itself into SourceOverlap.
+		sharedRepo, err := utils.NewRepo(GinkgoT().TempDir(), sharedSource)
+		Expect(err).NotTo(HaveOccurred())
+		pushRevision(sharedRepo)
+
+		// The Wavefronts go first, their release-pins finalizer waited for, or
+		// AfterSuite's CRD delete would hang on it. Idempotent, so it is both
+		// the normal teardown at the end of the spec and the safety net for a
+		// failed one.
+		teardown := func() {
+			cmd := exec.Command("kubectl", "delete", "wavefront", wfA, wfB, "--ignore-not-found", "--timeout=3m")
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "failed to delete the overlapping Wavefronts")
+
+			cmd = exec.Command("kubectl", "delete", "-n", fleetNamespace,
+				"kustomization/"+wfA, "kustomization/"+wfB, "gitrepository/"+sharedSource,
+				"--ignore-not-found", "--timeout=3m")
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "failed to remove the shared-source fixtures")
+		}
+		DeferCleanup(teardown)
+
+		By("creating two Wavefronts with disjoint selectors, and a node for each")
+		for _, name := range []string{wfA, wfB} {
+			suffix := strings.TrimPrefix(name, "overlap-")
+			Expect(k8sClient.Create(ctx, &wavefrontv1alpha1.Wavefront{
+				Name: name,
+				Spec: wavefrontv1alpha1.WavefrontSpec{
+					Nodes: wavefrontv1alpha1.NodesSpec{
+						Kinds:    []string{kustomizev1.KustomizationKind},
+						Selector: metav1.LabelSelector{MatchLabels: map[string]string{fleetLabel: suffix}},
+					},
+					// Shadow (the default) never pins, so "no pin" would pass
+					// for the wrong reason.
+					Mode: wavefrontv1alpha1.ModeEnforce,
+					// The survivor learns of the other's deletion only on its
+					// own requeue; the 90s default would outlast the waits.
+					Poll: wavefrontv1alpha1.PollSpec{Interval: metav1.Duration{Duration: 15 * time.Second}},
+				},
+			})).To(Succeed())
+
+			Expect(k8sClient.Create(ctx, &kustomizev1.Kustomization{
+				Name:      name,
+				Namespace: fleetNamespace,
+				// No managed label: fleet would select these too, and that is
+				// SelectorOverlap, not the case under test.
+				Labels: map[string]string{fleetLabel: suffix},
+				Spec: kustomizev1.KustomizationSpec{
+					Interval:        metav1.Duration{Duration: time.Minute},
+					RetryInterval:   &metav1.Duration{Duration: 15 * time.Second},
+					Timeout:         &metav1.Duration{Duration: time.Minute},
+					Path:            "./kustomize",
+					Prune:           true,
+					Wait:            true,
+					TargetNamespace: fleetNamespace,
+					// Both apply the same ConfigMap, and would prune each other's.
+					NamePrefix: suffix + "-",
+					SourceRef: kustomizev1.CrossNamespaceSourceReference{
+						Kind: sourcev1.GitRepositoryKind,
+						Name: sharedSource,
+					},
+				},
+			})).To(Succeed())
+		}
+
+		// Overlap is a property of a selected node on a managed source. Until
+		// both nodes are in the controller's cache, whichever Wavefront sees the
+		// source first could legitimately initial-pin alone.
+		By("waiting for each Wavefront to list its own node")
+		for _, name := range []string{wfA, wfB} {
+			Eventually(func(g Gomega) {
+				g.Expect(memberOf(getWavefront(g, name), name)).NotTo(BeNil(), "%s does not list its node", name)
+			}, waitShort, pollFast).Should(Succeed())
+		}
+
+		By("creating the managed source both nodes share")
+		Expect(k8sClient.Create(ctx, &sourcev1.GitRepository{
+			Name:      sharedSource,
+			Namespace: fleetNamespace,
+			Labels:    map[string]string{pin.ManagedLabel: managedTrue},
+			Spec: sourcev1.GitRepositorySpec{
+				URL:       utils.GitServerClusterURL(sharedSource),
+				Interval:  metav1.Duration{Duration: 30 * time.Second},
+				Reference: &sourcev1.GitRepositoryRef{Name: trackedRef},
+			},
+		})).To(Succeed())
+
+		// An initial pin needs an artifact, so without one "no pin" proves nothing.
+		By("waiting for the source to have an artifact at the pushed head")
+		Eventually(func(g Gomega) {
+			artifact := getRepo(g, sharedSource).Status.Artifact
+			g.Expect(artifact).NotTo(BeNil())
+			g.Expect(fluxgit.ExtractHashFromRevision(artifact.Revision).String()).To(Equal(sharedRepo.Head()))
+		}, waitShort, pollFast).Should(Succeed())
+
+		By("checking both Wavefronts report SourceOverlap naming the other")
+		for name, other := range map[string]string{wfA: wfB, wfB: wfA} {
+			Eventually(func(g Gomega) {
+				cond := graphValid(g, name)
+				g.Expect(cond).NotTo(BeNil())
+				g.Expect(cond.Status).To(Equal(metav1.ConditionFalse))
+				g.Expect(cond.Reason).To(Equal(wavefrontv1alpha1.GraphValidReasonSourceOverlap))
+				g.Expect(cond.Message).To(ContainSubstring(fmt.Sprintf("%q", other)))
+				g.Expect(cond.Message).To(ContainSubstring(fleetNamespace + "/" + sharedSource))
+			}, waitShort, pollFast).Should(Succeed())
+		}
+
+		By("checking neither Wavefront pins the shared source")
+		Consistently(func(g Gomega) {
+			g.Expect(pinOf(g, sharedSource)).To(BeEmpty())
+			g.Expect(pin.Owners(getRepo(g, sharedSource))).To(BeEmpty())
+			for _, name := range []string{wfA, wfB} {
+				g.Expect(graphValid(g, name).Reason).To(Equal(wavefrontv1alpha1.GraphValidReasonSourceOverlap))
+			}
+			g.Expect(eventSeen(g, fleetNamespace, sourcev1.GitRepositoryKind, sharedSource, "InitialPin", "")).
+				To(BeFalse(), "the shared source was initial-pinned")
+		}, holdWindow, pollFast).Should(Succeed())
+
+		By("checking the fixture fleet is unaffected")
+		Expect(graphValid(Default, fleetName).Status).To(Equal(metav1.ConditionTrue))
+		expectQuiescent()
+
+		By("deleting one Wavefront and checking the other resumes")
+		cmd := exec.Command("kubectl", "delete", "wavefront", wfB, "--timeout=3m")
+		_, err = utils.Run(cmd)
+		Expect(err).NotTo(HaveOccurred(), "failed to delete %s", wfB)
+
+		Eventually(func(g Gomega) {
+			cond := graphValid(g, wfA)
+			g.Expect(cond).NotTo(BeNil())
+			g.Expect(cond.Status).To(Equal(metav1.ConditionTrue))
+			g.Expect(cond.Reason).To(Equal(wavefrontv1alpha1.GraphValidReasonValid))
+		}, waitShort, pollFast).Should(Succeed())
+		Eventually(func(g Gomega) {
+			g.Expect(pinOf(g, sharedSource)).To(Equal(sharedRepo.Head()))
+		}, waitConverge, pollFast).Should(Succeed())
+		expectEvent(fleetNamespace, sourcev1.GitRepositoryKind, sharedSource, "InitialPin", "")
+		Expect(commitManagers(Default, sharedSource)).To(ConsistOf(pin.FieldManager))
+
+		// In the body, not a DeferCleanup: as the container's last spec, its
+		// cleanups run after AfterAll has removed the fixture fleet, and the
+		// fleet can no longer be judged quiescent by then.
+		By("removing the shared-source fixtures")
+		teardown()
+		expectQuiescent()
+	})
 })
 
 // --- fixture content -------------------------------------------------------
@@ -817,10 +979,16 @@ func getKustomization(g Gomega, name string) *kustomizev1.Kustomization {
 	return ks
 }
 
-func getFleet(g Gomega) *wavefrontv1alpha1.Wavefront {
-	fleet := &wavefrontv1alpha1.Wavefront{}
-	g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: fleetName}, fleet)).To(Succeed())
-	return fleet
+func getWavefront(g Gomega, name string) *wavefrontv1alpha1.Wavefront {
+	wf := &wavefrontv1alpha1.Wavefront{}
+	g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name}, wf)).To(Succeed())
+	return wf
+}
+
+func getFleet(g Gomega) *wavefrontv1alpha1.Wavefront { return getWavefront(g, fleetName) }
+
+func graphValid(g Gomega, name string) *metav1.Condition {
+	return apimeta.FindStatusCondition(getWavefront(g, name).Status.Conditions, wavefrontv1alpha1.ConditionGraphValid)
 }
 
 // pinOf reads a managed source's spec.ref.commit.
@@ -930,21 +1098,26 @@ func expectQuiescent() {
 func expectEvent(ns, kind, name, reason, note string) {
 	GinkgoHelper()
 	Eventually(func(g Gomega) {
-		var list eventsv1.EventList
-		g.Expect(k8sClient.List(ctx, &list, client.InNamespace(ns))).To(Succeed())
-
-		for i := range list.Items {
-			e := &list.Items[i]
-			if e.Reason != reason || e.Regarding.Kind != kind || e.Regarding.Name != name {
-				continue
-			}
-			if note == "" || strings.Contains(e.Note, note) {
-				return
-			}
-		}
-		g.Expect(fmt.Errorf("no %s event for %s/%s containing %q", reason, kind, name, note)).
-			NotTo(HaveOccurred())
+		g.Expect(eventSeen(g, ns, kind, name, reason, note)).
+			To(BeTrue(), "no %s event for %s/%s containing %q", reason, kind, name, note)
 	}, waitShort, time.Second).Should(Succeed())
+}
+
+// eventSeen reports whether such an Event exists right now.
+func eventSeen(g Gomega, ns, kind, name, reason, note string) bool {
+	var list eventsv1.EventList
+	g.Expect(k8sClient.List(ctx, &list, client.InNamespace(ns))).To(Succeed())
+
+	for i := range list.Items {
+		e := &list.Items[i]
+		if e.Reason != reason || e.Regarding.Kind != kind || e.Regarding.Name != name {
+			continue
+		}
+		if note == "" || strings.Contains(e.Note, note) {
+			return true
+		}
+	}
+	return false
 }
 
 // --- cluster writes --------------------------------------------------------
@@ -1179,7 +1352,7 @@ func dumpFleet() {
 	const get = "get"
 	for _, args := range [][]string{
 		{get, "gitrepositories,kustomizations", "-n", fleetNamespace, "-o", "wide"},
-		{get, "wavefront", fleetName, "-o", "yaml"},
+		{get, "wavefronts", "-o", "yaml"},
 		{get, "events", "-n", fleetNamespace},
 		{get, "events", "-n", fleetEventNamespace},
 		{"logs", "-l", inst.PodSelector(), "-n", inst.Namespace(), "--tail=200"},

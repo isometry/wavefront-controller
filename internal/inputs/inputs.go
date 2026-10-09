@@ -135,7 +135,10 @@ type Result struct {
 
 	// fleet
 	Wavefronts *wavefrontv1alpha1.WavefrontList
-	Overlap    string // name of the Wavefront whose selector overlaps this one
+	Overlap    string // name of the Wavefront whose selector or managed source overlaps this one
+	// SharedSource is the managed GitRepository this Wavefront shares with
+	// Overlap's nodes; empty for a selector overlap.
+	SharedSource types.NamespacedName
 
 	// graph and evaluation
 	Graph  *graph.Graph
@@ -156,6 +159,12 @@ func (res *Result) GraphVerdict() GraphVerdict {
 	switch {
 	case res == nil:
 		return GraphVerdict{Valid: true, Reason: wavefrontv1alpha1.GraphValidReasonValid, Message: graphValidMessage}
+	case res.Overlap != "" && res.SharedSource.Name != "":
+		return GraphVerdict{
+			Reason: wavefrontv1alpha1.GraphValidReasonSourceOverlap,
+			Message: fmt.Sprintf("GitRepository %s is also pinned by Wavefront %q; admissions suppressed",
+				res.SharedSource, res.Overlap),
+		}
 	case res.Overlap != "":
 		return GraphVerdict{
 			Reason:  wavefrontv1alpha1.GraphValidReasonSelectorOverlap,
@@ -326,6 +335,40 @@ func (b *builder) detectOverlap(ctx context.Context) error {
 	return nil
 }
 
+// detectSourceOverlap finds another Wavefront selecting a node on one of this
+// Wavefront's managed sources: disjoint selectors still let two Wavefronts pin
+// one GitRepository independently. Unmanaged shared sources are gates for
+// both and harmless, so only NodeBySource is compared.
+func (b *builder) detectSourceOverlap(ctx context.Context) error {
+	all := b.res.Wavefronts
+	for i := range all.Items {
+		other := &all.Items[i]
+		if other.Name == b.params.Wavefront.Name {
+			continue
+		}
+		selector, err := metav1.LabelSelectorAsSelector(&other.Spec.Nodes.Selector)
+		if err != nil {
+			continue
+		}
+		nodes, err := b.params.Adapter.List(ctx, b.reader, selector)
+		if err != nil {
+			return fmt.Errorf("listing Wavefront %q nodes: %w", other.Name, err)
+		}
+		var shared []types.NamespacedName
+		for _, node := range nodes {
+			if node.SourceRef != nil && len(b.res.NodeBySource[*node.SourceRef]) > 0 {
+				shared = append(shared, *node.SourceRef)
+			}
+		}
+		if len(shared) > 0 {
+			// The least source keeps the reported overlap stable across passes.
+			b.res.Overlap, b.res.SharedSource = other.Name, slices.MinFunc(shared, compareSources)
+			return nil
+		}
+	}
+	return nil
+}
+
 // resolve determines each node's role and, for pinned nodes, the
 // GitRepository reading the engine evaluates against.
 func (b *builder) resolve(ctx context.Context) error {
@@ -384,6 +427,12 @@ func (b *builder) resolve(ctx context.Context) error {
 	// an unhealthy gate rather than being silently omitted.
 	for ref := range res.Missing {
 		res.Inputs[ref] = engine.NodeInput{Ref: ref, Role: engine.RoleGate}
+	}
+
+	if res.Overlap == "" && len(res.NodeBySource) > 0 && len(res.Wavefronts.Items) > 1 {
+		if err := b.detectSourceOverlap(ctx); err != nil {
+			return err
+		}
 	}
 
 	res.Resolved = true

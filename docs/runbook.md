@@ -243,7 +243,7 @@ Effects:
    `spec.nodes.selector`. Let it run through several poll cycles.
 2. Validate before flipping:
    - `status.conditions[type=GraphValid]` is `True` — no `dependsOn` cycles
-     or selector overlaps with another `Wavefront`. While `GraphValid` is
+     or selector or managed-source overlaps with another `Wavefront`. While `GraphValid` is
      `False`, this Wavefront's per-Wavefront gauges are suppressed (retired,
      not zeroed) so a fleet-wide `sum()` never double-counts against the
      Wavefront it overlaps with — see [Safety alarms](#safety-alarms).
@@ -327,7 +327,9 @@ On deletion the controller relinquishes every pin it owns on the sources the
 avoids overlapping/piling-up sweeps if listing ever gets slow). So the
 effective poll period observed by the fleet is `poll.interval + sweep
 duration`, not `poll.interval` alone. Budget for that when reasoning about
-detection latency or setting a pin-staleness alarm threshold.
+detection latency or setting a pin-staleness alarm threshold. A source with
+no observation yet (newly targeted, or every source after a controller
+restart) triggers an immediate sweep rather than waiting out the interval.
 
 ## Events
 

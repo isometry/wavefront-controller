@@ -362,20 +362,10 @@ func TestPollerSweepsOnInterval(t *testing.T) {
 		stop := runPoller(t, p)
 		defer stop()
 
-		// Nothing before the first tick.
-		time.Sleep(9 * time.Second)
-		synctest.Wait()
-		if got := lister.callCount(alphaURL); got != 0 {
-			t.Errorf("listings before the interval elapsed = %d, want 0", got)
-		}
-		if _, ok := p.Observation(source("alpha")); ok {
-			t.Error("Observation exists before the first sweep, want none")
-		}
-
-		time.Sleep(2 * time.Second)
+		// A new target is swept at once rather than after the first tick.
 		synctest.Wait()
 		if got := lister.callCount(alphaURL); got != 1 {
-			t.Errorf("listings after one interval = %d, want 1", got)
+			t.Errorf("listings at start = %d, want 1", got)
 		}
 
 		obs, ok := p.Observation(source("alpha"))
@@ -395,10 +385,17 @@ func TestPollerSweepsOnInterval(t *testing.T) {
 			t.Errorf("URL/TrackingRef = %q/%q, want %q/%q", obs.URL, obs.TrackingRef, alphaURL, trackedRef)
 		}
 
-		time.Sleep(10 * time.Second)
+		// Nothing more before the interval elapses.
+		time.Sleep(9 * time.Second)
+		synctest.Wait()
+		if got := lister.callCount(alphaURL); got != 1 {
+			t.Errorf("listings before the interval elapsed = %d, want 1", got)
+		}
+
+		time.Sleep(2 * time.Second)
 		synctest.Wait()
 		if got := lister.callCount(alphaURL); got != 2 {
-			t.Errorf("listings after two intervals = %d, want 2", got)
+			t.Errorf("listings after one interval = %d, want 2", got)
 		}
 	})
 }
@@ -422,10 +419,10 @@ func TestPollerNotifiesOncePerSweep(t *testing.T) {
 		stop := runPoller(t, p)
 		defer stop()
 
-		time.Sleep(10 * time.Second)
+		// The first sweep runs at once: every target is new.
 		synctest.Wait()
 		if got := notify.count(); got != 1 {
-			t.Errorf("notify calls after one sweep of 3 targets on 2 hosts = %d, want 1", got)
+			t.Errorf("notify calls after the first sweep of 3 targets on 2 hosts = %d, want 1", got)
 		}
 
 		time.Sleep(10 * time.Second)
@@ -812,7 +809,6 @@ func TestPollerMidSweepPlumbingSwapDiscardsInFlightResult(t *testing.T) {
 		stop := runPoller(t, p)
 		defer stop()
 
-		time.Sleep(10 * time.Second)
 		synctest.Wait()
 		if got := lister.callCount(alphaURL); got != 1 {
 			t.Fatalf("listings = %d, want one in flight against the old plumbing", got)
@@ -823,21 +819,17 @@ func TestPollerMidSweepPlumbingSwapDiscardsInFlightResult(t *testing.T) {
 
 		// The catalog repoints the source mid-sweep, then the old listing lands.
 		p.SetTargets([]gitpoll.Target{{Source: source("alpha"), URL: betaURL, TrackingRef: tagRefV2}})
+		// The swap left alpha unobserved, so a fresh sweep follows at once.
 		close(gate)
 		synctest.Wait()
 
-		if obs, ok := p.Observation(source("alpha")); ok {
-			t.Errorf("in-flight result for superseded plumbing landed as %+v, want no observation", obs)
-		}
-
-		time.Sleep(10 * time.Second)
-		synctest.Wait()
 		obs, ok := p.Observation(source("alpha"))
 		if !ok {
 			t.Fatal("no observation after the sweep following the swap")
 		}
-		if obs.SHA != shaB {
-			t.Errorf("SHA = %q, want the new plumbing's %q", obs.SHA, shaB)
+		if obs.SHA != shaB || obs.URL != betaURL {
+			t.Errorf("observation = %+v, want the new plumbing's %q from %s, not the superseded in-flight result",
+				obs, shaB, betaURL)
 		}
 	})
 }
@@ -864,7 +856,7 @@ func TestPollerReadsSecretFreshEachSweep(t *testing.T) {
 		stop := runPoller(t, p)
 		defer stop()
 
-		time.Sleep(10 * time.Second)
+		// The first sweep runs at once: every target is new.
 		synctest.Wait()
 		if got := secrets.getCount(secretRef); got != 1 {
 			t.Errorf("secret Gets after one sweep = %d, want 1", got)
@@ -916,7 +908,7 @@ func TestPollerMissingSecretIsAFailure(t *testing.T) {
 		stop := runPoller(t, p)
 		defer stop()
 
-		time.Sleep(10 * time.Second)
+		// The first sweep runs at once: every target is new.
 		synctest.Wait()
 
 		obs, ok := p.Observation(source("alpha"))
@@ -977,7 +969,7 @@ func TestPollerDedupsSecretReadsPerSweep(t *testing.T) {
 		stop := runPoller(t, p)
 		defer stop()
 
-		time.Sleep(10 * time.Second)
+		// The first sweep runs at once: every target is new.
 		synctest.Wait()
 
 		if got := secrets.getCount(shared); got != 1 {
@@ -1032,7 +1024,7 @@ func TestPollerCredentialReadFailureCountedSeparately(t *testing.T) {
 		stop := runPoller(t, p)
 		defer stop()
 
-		time.Sleep(10 * time.Second)
+		// The first sweep runs at once: every target is new.
 		synctest.Wait()
 
 		if got := credentialFailureCount(t, reg); got != 1 {
@@ -1076,7 +1068,7 @@ func TestPollerListingFailureStillCountsHostNotCredential(t *testing.T) {
 		stop := runPoller(t, p)
 		defer stop()
 
-		time.Sleep(10 * time.Second)
+		// The first sweep runs at once: every target is new.
 		synctest.Wait()
 
 		if got := failureCount(t, reg); got != 1 {
@@ -1163,16 +1155,23 @@ func TestPollerConfigureClampsNonPositiveValues(t *testing.T) {
 		stop := runPoller(t, p)
 		defer stop()
 
-		time.Sleep(defaultInterval - time.Second)
+		// The immediate first sweep (new targets) takes two listing rounds.
+		time.Sleep(10 * time.Second)
 		synctest.Wait()
-		if got := lister.callCount(targets[0].URL); got != 0 {
-			t.Fatalf("listings before the clamped %v interval = %d, want 0", defaultInterval, got)
+		if got := lister.callCount(targets[0].URL); got != 1 {
+			t.Fatalf("listings after the first sweep = %d, want 1", got)
+		}
+
+		time.Sleep(defaultInterval - 10*time.Second)
+		synctest.Wait()
+		if got := lister.callCount(targets[0].URL); got != 1 {
+			t.Fatalf("listings before the clamped %v interval = %d, want 1", defaultInterval, got)
 		}
 
 		time.Sleep(10 * time.Second)
 		synctest.Wait()
-		if got := lister.callCount(targets[0].URL); got != 1 {
-			t.Errorf("listings after the clamped %v interval = %d, want 1", defaultInterval, got)
+		if got := lister.callCount(targets[0].URL); got != 2 {
+			t.Errorf("listings after the clamped %v interval = %d, want 2", defaultInterval, got)
 		}
 		if got := lister.peak(exampleHost); got != defaultPerHost {
 			t.Errorf("peak concurrent listings = %d, want the clamped default %d", got, defaultPerHost)
@@ -1203,7 +1202,7 @@ func TestPollerObservationsNeverMixSweeps(t *testing.T) {
 		stop := runPoller(t, p)
 		defer stop()
 
-		time.Sleep(10 * time.Second)
+		// The first sweep runs at once: every target is new.
 		synctest.Wait()
 
 		snapshot := p.Observations()
@@ -1306,8 +1305,8 @@ func TestPollerConfigureAppliesWithoutWaitingOutTheOldInterval(t *testing.T) {
 
 		time.Sleep(time.Second)
 		synctest.Wait()
-		if got := lister.callCount(alphaURL); got != 0 {
-			t.Fatalf("listings one second in = %d, want 0 on a 90s cadence", got)
+		if got := lister.callCount(alphaURL); got != 1 {
+			t.Fatalf("listings one second in = %d, want only the immediate first sweep on a 90s cadence", got)
 		}
 
 		// A faster Wavefront joins the fleet.
@@ -1315,8 +1314,8 @@ func TestPollerConfigureAppliesWithoutWaitingOutTheOldInterval(t *testing.T) {
 
 		time.Sleep(11 * time.Second)
 		synctest.Wait()
-		if got := lister.callCount(alphaURL); got != 1 {
-			t.Errorf("listings %v after shortening the interval to 10s = %d, want 1: "+
+		if got := lister.callCount(alphaURL); got != 2 {
+			t.Errorf("listings %v after shortening the interval to 10s = %d, want 2: "+
 				"a cadence change must not wait out the old interval", 12*time.Second, got)
 		}
 	})
@@ -1345,9 +1344,100 @@ func TestPollerRepeatedConfigureDoesNotStarveSweeps(t *testing.T) {
 		}
 		synctest.Wait()
 
-		if got := lister.callCount(alphaURL); got != 2 {
-			t.Errorf("listings over 20s of repeated Configure = %d, want 2: "+
+		// The immediate first sweep, then one per interval.
+		if got := lister.callCount(alphaURL); got != 3 {
+			t.Errorf("listings over 20s of repeated Configure = %d, want 3: "+
 				"an unchanged cadence must not re-arm the wait", got)
+		}
+	})
+}
+
+// TestPollerSweepsANewTargetAtOnce: a source joining the poll set is swept
+// straight away rather than left unobserved for a whole interval.
+func TestPollerSweepsANewTargetAtOnce(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		lister := newFakeLister()
+		lister.setAdvertised(alphaURL, map[string]string{trackedRef: shaA})
+		lister.setAdvertised(betaURL, map[string]string{trackedRef: shaA})
+
+		p := gitpoll.NewPoller(newFakeSecrets(), lister, func() {}, selection.TrackRef(), nil, nil)
+		p.Configure(time.Hour, 2)
+		p.SetTargets([]gitpoll.Target{target("alpha", alphaURL)})
+
+		stop := runPoller(t, p)
+		defer stop()
+
+		time.Sleep(time.Minute)
+		synctest.Wait()
+
+		p.SetTargets([]gitpoll.Target{target("alpha", alphaURL), target("beta", betaURL)})
+		synctest.Wait()
+		if obs, ok := p.Observation(source("beta")); !ok || obs.SHA != shaA {
+			t.Errorf("beta observation = %+v (ok=%v), want %q well before the hour-long interval", obs, ok, shaA)
+		}
+	})
+}
+
+// TestPollerObservedTargetsDoNotTriggerSweeps: once every target has a record,
+// a reconcile re-setting the same targets — even one that queued a signal while
+// the first sweep was in flight — must not sweep again.
+func TestPollerObservedTargetsDoNotTriggerSweeps(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		lister := newFakeLister()
+		lister.setAdvertised(alphaURL, map[string]string{trackedRef: shaA})
+		gate := lister.gate(alphaURL)
+
+		p := gitpoll.NewPoller(newFakeSecrets(), lister, func() {}, selection.TrackRef(), nil, nil)
+		p.Configure(time.Hour, 2)
+		targets := []gitpoll.Target{target("alpha", alphaURL)}
+		p.SetTargets(targets)
+
+		stop := runPoller(t, p)
+		defer stop()
+
+		synctest.Wait()
+		p.SetTargets(targets) // still unobserved: queues a signal behind the sweep in flight
+		close(gate)
+		synctest.Wait()
+
+		for range 5 {
+			p.SetTargets(targets)
+			time.Sleep(time.Second)
+		}
+		synctest.Wait()
+		if got := lister.callCount(alphaURL); got != 1 {
+			t.Errorf("listings = %d, want 1: an observed target must not trigger another sweep", got)
+		}
+	})
+}
+
+// TestPollerFailingTargetDoesNotLoopSweeps: a failed listing still records an
+// observation, so a persistently broken source waits for the interval like
+// any other rather than sweeping on every SetTargets.
+func TestPollerFailingTargetDoesNotLoopSweeps(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		lister := newFakeLister()
+		lister.setErr(errListFailed)
+
+		p := gitpoll.NewPoller(newFakeSecrets(), lister, func() {}, selection.TrackRef(), nil, nil)
+		p.Configure(time.Hour, 2)
+		targets := []gitpoll.Target{target("alpha", alphaURL)}
+		p.SetTargets(targets)
+
+		stop := runPoller(t, p)
+		defer stop()
+
+		for range 5 {
+			synctest.Wait()
+			p.SetTargets(targets)
+			time.Sleep(time.Second)
+		}
+		synctest.Wait()
+		if got := lister.callCount(alphaURL); got != 1 {
+			t.Errorf("listings = %d, want 1: a failing target must not cause a sweep loop", got)
+		}
+		if obs, ok := p.Observation(source("alpha")); !ok || obs.Err == nil {
+			t.Errorf("observation = %+v (ok=%v), want the failure recorded", obs, ok)
 		}
 	})
 }

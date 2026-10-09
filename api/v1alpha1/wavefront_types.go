@@ -55,6 +55,7 @@ const (
 const (
 	GraphValidReasonValid           = "Valid"
 	GraphValidReasonSelectorOverlap = "SelectorOverlap"
+	GraphValidReasonSourceOverlap   = "SourceOverlap"
 	GraphValidReasonCyclesDetected  = "CyclesDetected"
 )
 
