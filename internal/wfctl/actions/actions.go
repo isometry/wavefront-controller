@@ -45,7 +45,6 @@ import (
 	"time"
 
 	sourcev1 "github.com/fluxcd/source-controller/api/v1"
-	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -281,21 +280,6 @@ func (a Advertisement) list(
 	c client.Client,
 	repo *sourcev1.GitRepository,
 ) (map[string]string, error) {
-	var data map[string][]byte
-	if repo.Spec.SecretRef != nil {
-		key := types.NamespacedName{Namespace: repo.Namespace, Name: repo.Spec.SecretRef.Name}
-		secret := &corev1.Secret{}
-		if err := c.Get(ctx, key, secret); err != nil {
-			return nil, fmt.Errorf("reading credential Secret %s: %w", key, err)
-		}
-		data = secret.Data
-	}
-
-	auth, err := gitpoll.AuthFromSecret(repo.Spec.URL, data)
-	if err != nil {
-		return nil, fmt.Errorf("building credentials for %s/%s: %w", repo.Namespace, repo.Name, err)
-	}
-
 	lister := a.Lister
 	if lister == nil {
 		timeout := a.Timeout
@@ -305,7 +289,15 @@ func (a Advertisement) list(
 		lister = gitpoll.NewGoGitLister(timeout)
 	}
 
-	advertised, err := lister.List(ctx, repo.Spec.URL, auth)
+	target := gitpoll.Target{
+		Source: types.NamespacedName{Namespace: repo.Namespace, Name: repo.Name},
+		URL:    repo.Spec.URL,
+	}
+	if repo.Spec.SecretRef != nil {
+		target.SecretRef = &types.NamespacedName{Namespace: repo.Namespace, Name: repo.Spec.SecretRef.Name}
+	}
+
+	advertised, err := gitpoll.List(ctx, c, lister, target)
 	if err != nil {
 		return nil, fmt.Errorf("listing the refs of %s/%s: %w", repo.Namespace, repo.Name, err)
 	}
