@@ -21,7 +21,6 @@ limitations under the License.
 package graph
 
 import (
-	"iter"
 	"slices"
 	"sync"
 
@@ -110,19 +109,6 @@ func Build(nodes map[adapter.NodeRef][]adapter.NodeRef) *Graph {
 	}
 }
 
-// Nodes returns every node known to the graph (both supplied and external),
-// in deterministic (String()-sorted) order.
-func (g *Graph) Nodes() iter.Seq[adapter.NodeRef] {
-	all := sortedKeys(g.edges)
-	return func(yield func(adapter.NodeRef) bool) {
-		for _, ref := range all {
-			if !yield(ref) {
-				return
-			}
-		}
-	}
-}
-
 // DependsOn returns ref's direct dependencies, deduplicated and sorted by
 // String(). It returns nil for a ref unknown to the graph.
 func (g *Graph) DependsOn(ref adapter.NodeRef) []adapter.NodeRef {
@@ -195,21 +181,8 @@ func (g *Graph) Unknown() []adapter.NodeRef {
 	return slices.Clone(g.unknown)
 }
 
-// compareRefs orders refs by their String() form, giving the whole package
-// a single, deterministic sort key.
-func compareRefs(a, b adapter.NodeRef) int {
-	switch as, bs := a.String(), b.String(); {
-	case as < bs:
-		return -1
-	case as > bs:
-		return 1
-	default:
-		return 0
-	}
-}
-
 func sortRefs(refs []adapter.NodeRef) {
-	slices.SortFunc(refs, compareRefs)
+	slices.SortFunc(refs, adapter.NodeRef.Compare)
 }
 
 // dedupSorted returns a sorted, duplicate-free copy of refs. A nil or empty
@@ -239,7 +212,7 @@ func sortedKeys(m map[adapter.NodeRef][]adapter.NodeRef) []adapter.NodeRef {
 // orders.
 func sortCycles(cycles [][]adapter.NodeRef) {
 	slices.SortFunc(cycles, func(a, b []adapter.NodeRef) int {
-		return compareRefs(a[0], b[0])
+		return a[0].Compare(b[0])
 	})
 }
 

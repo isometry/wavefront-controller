@@ -271,6 +271,13 @@ func source(name string) types.NamespacedName {
 	return types.NamespacedName{Namespace: testNamespace, Name: name}
 }
 
+// observationOf is the single-source read the production API deliberately
+// lacks: Observations is the coherent one.
+func observationOf(p *gitpoll.Poller, src types.NamespacedName) (gitpoll.Observation, bool) {
+	obs, ok := p.Observations()[src]
+	return obs, ok
+}
+
 func target(name, repoURL string) gitpoll.Target {
 	return gitpoll.Target{Source: source(name), URL: repoURL, TrackingRef: trackedRef}
 }
@@ -368,7 +375,7 @@ func TestPollerSweepsOnInterval(t *testing.T) {
 			t.Errorf("listings at start = %d, want 1", got)
 		}
 
-		obs, ok := p.Observation(source("alpha"))
+		obs, ok := observationOf(p, source("alpha"))
 		if !ok {
 			t.Fatal("Observation missing after the first sweep")
 		}
@@ -491,11 +498,11 @@ func TestPollerFirstObservedStableUntilSHAChanges(t *testing.T) {
 
 		time.Sleep(10 * time.Second)
 		synctest.Wait()
-		first, _ := p.Observation(source("alpha"))
+		first, _ := observationOf(p, source("alpha"))
 
 		time.Sleep(10 * time.Second)
 		synctest.Wait()
-		second, _ := p.Observation(source("alpha"))
+		second, _ := observationOf(p, source("alpha"))
 
 		if !second.FirstObserved.Equal(first.FirstObserved) {
 			t.Errorf("FirstObserved moved from %v to %v across an unchanged SHA", first.FirstObserved, second.FirstObserved)
@@ -508,7 +515,7 @@ func TestPollerFirstObservedStableUntilSHAChanges(t *testing.T) {
 		time.Sleep(10 * time.Second)
 		synctest.Wait()
 
-		third, _ := p.Observation(source("alpha"))
+		third, _ := observationOf(p, source("alpha"))
 		if third.SHA != shaB {
 			t.Errorf("SHA = %q, want %q", third.SHA, shaB)
 		}
@@ -537,13 +544,13 @@ func TestPollerFailureRetainsLastGoodSHA(t *testing.T) {
 
 		time.Sleep(10 * time.Second)
 		synctest.Wait()
-		good, _ := p.Observation(source("alpha"))
+		good, _ := observationOf(p, source("alpha"))
 
 		lister.setErr(errListFailed)
 		time.Sleep(10 * time.Second)
 		synctest.Wait()
 
-		failed, ok := p.Observation(source("alpha"))
+		failed, ok := observationOf(p, source("alpha"))
 		if !ok {
 			t.Fatal("Observation dropped after a listing failure")
 		}
@@ -568,7 +575,7 @@ func TestPollerFailureRetainsLastGoodSHA(t *testing.T) {
 		time.Sleep(10 * time.Second)
 		synctest.Wait()
 
-		recovered, _ := p.Observation(source("alpha"))
+		recovered, _ := observationOf(p, source("alpha"))
 		if recovered.Err != nil {
 			t.Errorf("Err = %v, want nil after recovery", recovered.Err)
 		}
@@ -604,7 +611,7 @@ func TestPollerWrappedCancelledErrorIsCountedFailure(t *testing.T) {
 
 		time.Sleep(10 * time.Second)
 		synctest.Wait()
-		good, ok := p.Observation(source("alpha"))
+		good, ok := observationOf(p, source("alpha"))
 		if !ok || good.SHA != shaA {
 			t.Fatalf("Observation = %+v, want %q observed on the first sweep", good, shaA)
 		}
@@ -616,7 +623,7 @@ func TestPollerWrappedCancelledErrorIsCountedFailure(t *testing.T) {
 		time.Sleep(10 * time.Second)
 		synctest.Wait()
 
-		after, ok := p.Observation(source("alpha"))
+		after, ok := observationOf(p, source("alpha"))
 		if !ok {
 			t.Fatal("Observation dropped after a listing failure")
 		}
@@ -659,7 +666,7 @@ func TestPollerShutdownDiscardsInFlightListing(t *testing.T) {
 
 		time.Sleep(10 * time.Second)
 		synctest.Wait()
-		good, ok := p.Observation(source("alpha"))
+		good, ok := observationOf(p, source("alpha"))
 		if !ok || good.SHA != shaA {
 			t.Fatalf("Observation = %+v, want %q observed before shutdown", good, shaA)
 		}
@@ -686,7 +693,7 @@ func TestPollerShutdownDiscardsInFlightListing(t *testing.T) {
 			t.Fatal("Start did not return after context cancellation")
 		}
 
-		after, ok := p.Observation(source("alpha"))
+		after, ok := observationOf(p, source("alpha"))
 		if !ok {
 			t.Fatal("Observation dropped by a discarded listing")
 		}
@@ -714,15 +721,15 @@ func TestPollerSetTargetsReplacesAndDropsObservations(t *testing.T) {
 
 		time.Sleep(10 * time.Second)
 		synctest.Wait()
-		if _, ok := p.Observation(source("beta")); !ok {
+		if _, ok := observationOf(p, source("beta")); !ok {
 			t.Fatal("Observation for beta missing after the first sweep")
 		}
 
 		p.SetTargets([]gitpoll.Target{target("alpha", alphaURL)})
-		if _, ok := p.Observation(source("beta")); ok {
+		if _, ok := observationOf(p, source("beta")); ok {
 			t.Error("Observation for beta survived its removal from the target set")
 		}
-		if _, ok := p.Observation(source("alpha")); !ok {
+		if _, ok := observationOf(p, source("alpha")); !ok {
 			t.Error("Observation for alpha dropped although it is still targeted")
 		}
 
@@ -769,18 +776,18 @@ func TestPollerSetTargetsInvalidatesChangedPlumbing(t *testing.T) {
 
 				time.Sleep(10 * time.Second)
 				synctest.Wait()
-				if obs, ok := p.Observation(source("alpha")); !ok || obs.SHA != shaA {
+				if obs, ok := observationOf(p, source("alpha")); !ok || obs.SHA != shaA {
 					t.Fatalf("observation before the change = %+v (present=%t), want SHA %q", obs, ok, shaA)
 				}
 
 				p.SetTargets([]gitpoll.Target{tc.next})
-				if obs, ok := p.Observation(source("alpha")); ok {
+				if obs, ok := observationOf(p, source("alpha")); ok {
 					t.Errorf("observation %+v survived a plumbing change, want it dropped until re-observed", obs)
 				}
 
 				time.Sleep(10 * time.Second)
 				synctest.Wait()
-				obs, ok := p.Observation(source("alpha"))
+				obs, ok := observationOf(p, source("alpha"))
 				if !ok {
 					t.Fatal("no observation after the first sweep of the new plumbing")
 				}
@@ -813,7 +820,7 @@ func TestPollerMidSweepPlumbingSwapDiscardsInFlightResult(t *testing.T) {
 		if got := lister.callCount(alphaURL); got != 1 {
 			t.Fatalf("listings = %d, want one in flight against the old plumbing", got)
 		}
-		if _, ok := p.Observation(source("alpha")); ok {
+		if _, ok := observationOf(p, source("alpha")); ok {
 			t.Fatal("observation recorded while the listing is still in flight")
 		}
 
@@ -823,7 +830,7 @@ func TestPollerMidSweepPlumbingSwapDiscardsInFlightResult(t *testing.T) {
 		close(gate)
 		synctest.Wait()
 
-		obs, ok := p.Observation(source("alpha"))
+		obs, ok := observationOf(p, source("alpha"))
 		if !ok {
 			t.Fatal("no observation after the sweep following the swap")
 		}
@@ -911,7 +918,7 @@ func TestPollerMissingSecretIsAFailure(t *testing.T) {
 		// The first sweep runs at once: every target is new.
 		synctest.Wait()
 
-		obs, ok := p.Observation(source("alpha"))
+		obs, ok := observationOf(p, source("alpha"))
 		if !ok {
 			t.Fatal("Observation missing after a failed sweep")
 		}
@@ -1034,7 +1041,7 @@ func TestPollerCredentialReadFailureCountedSeparately(t *testing.T) {
 			t.Errorf("%s{host=%q} = %v, want 0: a credential-read failure must not blame the git host", failuresMetric, exampleHost, got)
 		}
 		for _, tgt := range targets {
-			obs, ok := p.Observation(tgt.Source)
+			obs, ok := observationOf(p, tgt.Source)
 			if !ok {
 				t.Fatalf("Observation missing for %v", tgt.Source)
 			}
@@ -1095,7 +1102,7 @@ func TestPollerUnadvertisedTrackingRefIsAFailure(t *testing.T) {
 		time.Sleep(10 * time.Second)
 		synctest.Wait()
 
-		obs, _ := p.Observation(source("alpha"))
+		obs, _ := observationOf(p, source("alpha"))
 		if obs.Err == nil {
 			t.Error("Err = nil, want a failure when the tracking ref is not advertised")
 		}
@@ -1122,7 +1129,7 @@ func TestPollerPrefersPeeledTag(t *testing.T) {
 		time.Sleep(10 * time.Second)
 		synctest.Wait()
 
-		obs, _ := p.Observation(source("alpha"))
+		obs, _ := observationOf(p, source("alpha"))
 		if obs.SHA != shaB {
 			t.Errorf("SHA = %q, want the peeled commit %q rather than the tag object", obs.SHA, shaB)
 		}
@@ -1372,7 +1379,7 @@ func TestPollerSweepsANewTargetAtOnce(t *testing.T) {
 
 		p.SetTargets([]gitpoll.Target{target("alpha", alphaURL), target("beta", betaURL)})
 		synctest.Wait()
-		if obs, ok := p.Observation(source("beta")); !ok || obs.SHA != shaA {
+		if obs, ok := observationOf(p, source("beta")); !ok || obs.SHA != shaA {
 			t.Errorf("beta observation = %+v (ok=%v), want %q well before the hour-long interval", obs, ok, shaA)
 		}
 	})
@@ -1436,7 +1443,7 @@ func TestPollerFailingTargetDoesNotLoopSweeps(t *testing.T) {
 		if got := lister.callCount(alphaURL); got != 1 {
 			t.Errorf("listings = %d, want 1: a failing target must not cause a sweep loop", got)
 		}
-		if obs, ok := p.Observation(source("alpha")); !ok || obs.Err == nil {
+		if obs, ok := observationOf(p, source("alpha")); !ok || obs.Err == nil {
 			t.Errorf("observation = %+v (ok=%v), want the failure recorded", obs, ok)
 		}
 	})
@@ -1524,9 +1531,9 @@ func TestPollerUsesInjectedStrategy(t *testing.T) {
 			t.Fatalf("stub strategy Candidate call count = %d, want >= 1: the injected strategy was never consulted", got)
 		}
 
-		obs, ok := p.Observation(source("alpha"))
+		obs, ok := observationOf(p, source("alpha"))
 		if !ok {
-			t.Fatal("Observation(alpha) not found after a sweep")
+			t.Fatal("observation for alpha not found after a sweep")
 		}
 		if obs.SHA != stubSentinelSHA {
 			t.Errorf("Observation.SHA = %q, want %q (the injected stub's sentinel): NewPoller is not consulting the injected strategy", obs.SHA, stubSentinelSHA)

@@ -38,18 +38,7 @@ func refs(names ...string) []adapter.NodeRef {
 	return out
 }
 
-func sortRefs(rs []adapter.NodeRef) {
-	slices.SortFunc(rs, func(a, b adapter.NodeRef) int {
-		switch {
-		case a.String() < b.String():
-			return -1
-		case a.String() > b.String():
-			return 1
-		default:
-			return 0
-		}
-	})
-}
+func sortRefs(rs []adapter.NodeRef) { slices.SortFunc(rs, adapter.NodeRef.Compare) }
 
 // sortedCycles normalizes a Cycles() result for comparison: each member list
 // sorted, then the outer list sorted by its first (smallest) member.
@@ -286,55 +275,6 @@ func TestDeterministicOrdering(t *testing.T) {
 	}
 	if want := refs("ca", "cb", "cc"); !slices.Equal(cycles[0], want) {
 		t.Errorf("Cycles()[0] = %v, want sorted %v", cycles[0], want)
-	}
-
-	// Nodes() must also enumerate deterministically.
-	var seen []adapter.NodeRef
-	for n := range g.Nodes() {
-		seen = append(seen, n)
-	}
-	sortRefs(seen)
-	got := slices.Clone(seen)
-	sortRefs(got)
-	orig := slices.Clone(seen)
-	if !slices.Equal(got, orig) {
-		t.Errorf("Nodes() enumeration was not internally consistent")
-	}
-	var unsorted []adapter.NodeRef
-	for n := range g.Nodes() {
-		unsorted = append(unsorted, n)
-	}
-	if !slices.IsSortedFunc(unsorted, func(a, b adapter.NodeRef) int {
-		switch {
-		case a.String() < b.String():
-			return -1
-		case a.String() > b.String():
-			return 1
-		default:
-			return 0
-		}
-	}) {
-		t.Errorf("Nodes() = %v, want sorted by String()", unsorted)
-	}
-}
-
-// TestNodesEarlyBreak exercises the yield=false path of the iter.Seq
-// returned by Nodes() (range-over-func with an early break).
-func TestNodesEarlyBreak(t *testing.T) {
-	g := graph.Build(map[adapter.NodeRef][]adapter.NodeRef{
-		ref("a"): nil,
-		ref("b"): nil,
-		ref("c"): nil,
-	})
-	count := 0
-	for range g.Nodes() {
-		count++
-		if count == 1 {
-			break
-		}
-	}
-	if count != 1 {
-		t.Errorf("count after early break = %d, want 1", count)
 	}
 }
 

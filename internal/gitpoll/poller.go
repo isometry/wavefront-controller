@@ -309,14 +309,6 @@ func (p *Poller) unobservedLocked() bool {
 	return false
 }
 
-// Observation returns the latest observation for a source, if any.
-func (p *Poller) Observation(src types.NamespacedName) (Observation, bool) {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-	rec, ok := p.observations[src]
-	return withRef(rec), ok
-}
-
 // Observations returns a coherent point-in-time snapshot of every current
 // observation: an independent copy of the whole store, taken under a single
 // read lock.
@@ -328,7 +320,7 @@ func (p *Poller) Observation(src types.NamespacedName) (Observation, bool) {
 // admission rule a descendant is admitted when its ancestors are *settled*,
 // and an ancestor whose observation lagged a sweep behind would look settled
 // when it is not, mis-sequencing co-arriving changes. Reading
-// source by source with Observation cannot provide that guarantee.
+// source by source cannot provide that guarantee.
 func (p *Poller) Observations() map[types.NamespacedName]Observation {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
