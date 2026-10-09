@@ -64,9 +64,6 @@ func Status(w io.Writer, s *snapshot.Snapshot, o Options) error {
 	if err := heldSection(w, "HELD", s.Wavefront.Status.Held, o); err != nil {
 		return err
 	}
-	if err := shadowSection(w, s.Wavefront.Status.Shadow); err != nil {
-		return err
-	}
 	if derived {
 		if err := blockedSection(w, "BLOCKED (derived)", s.Derived.Blocked, o, now); err != nil {
 			return err
@@ -237,26 +234,6 @@ func heldSection(w io.Writer, title string, nodes []wavefrontv1alpha1.HeldNode, 
 			o.Palette.Held(orAbsent(node.Reason)),
 			orAbsent(node.Manager),
 		)
-	}
-	return table.Flush()
-}
-
-// shadowSection lists the pin advances Shadow mode announced but did not
-// perform.
-func shadowSection(w io.Writer, admissions []wavefrontv1alpha1.ShadowAdmission) error {
-	if len(admissions) == 0 {
-		return nil
-	}
-	out := newSink(w)
-	out.blank()
-	out.printf("SHADOW (%d)\n", len(admissions))
-	if out.err != nil {
-		return out.err
-	}
-
-	table := NewTable(w, "SOURCE", "WOULD-PIN")
-	for _, admission := range admissions {
-		table.Row(orAbsent(admission.Source), shortSHA(admission.To))
 	}
 	return table.Flush()
 }

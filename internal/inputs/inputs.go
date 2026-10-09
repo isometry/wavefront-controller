@@ -22,8 +22,10 @@ limitations under the License.
 // poller — so the reconciler and the CLI derive the *same* picture from the
 // same reads: the reconciler adds execution, status and telemetry on top,
 // while the CLI renders the Result directly. Every pass is a full
-// recalculation from live inputs; nothing here reads back previously
-// published status.
+// recalculation from live inputs; the one piece of previously published
+// status read back is status.virtualPins (see EffectivePin): in Shadow no
+// real pins are written, so that ledger stands in for spec.ref.commit, or
+// every source would look unpinned and re-pin ungated each pass.
 package inputs
 
 import (
@@ -458,6 +460,23 @@ func (b *builder) resolveSource(ctx context.Context, src types.NamespacedName) (
 	return rs, nil
 }
 
+// EffectivePin is the pin the engine evaluates repo against. In Enforce, or
+// for a hand-pinned source, that is spec.ref.commit. In Shadow it is the
+// Wavefront's virtual pin, falling back to spec.ref.commit: the
+// controller-owned pin on the Enforce -> Shadow flip pass, else "".
+func EffectivePin(wf *wavefrontv1alpha1.Wavefront, repo *sourcev1.GitRepository) string {
+	if _, held := pin.Hold(repo); wf.Spec.Mode == wavefrontv1alpha1.ModeEnforce || held {
+		return pin.Commit(repo)
+	}
+	src := client.ObjectKeyFromObject(repo).String()
+	for _, vp := range wf.Status.VirtualPins {
+		if vp.Source == src {
+			return vp.Commit
+		}
+	}
+	return pin.Commit(repo)
+}
+
 // resolveSourceOnce reads one GitRepository. It returns a zero-value
 // resolvedSource — nil state, nil target — for every gate source: absent,
 // unmanaged, or a ref style (semver) that only a future SemverWindow
@@ -494,7 +513,7 @@ func (b *builder) resolveSourceOnce(ctx context.Context, src types.NamespacedNam
 	state := &engine.SourceState{
 		Source:       src,
 		TrackingRef:  trackingRef,
-		Pin:          pin.Commit(repo),
+		Pin:          EffectivePin(b.params.Wavefront, repo),
 		Held:         held,
 		HeldBy:       manager,
 		Suspended:    repo.Spec.Suspend,

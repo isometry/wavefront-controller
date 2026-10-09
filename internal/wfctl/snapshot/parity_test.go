@@ -294,6 +294,27 @@ var _ = Describe("Snapshot provider parity", Ordered, func() {
 		)))
 	})
 
+	It("agrees on a Shadow virtual pin, and does not mistake it for a lagging status", func() {
+		By("seeding the Shadow ledger ahead of the real pin")
+		setVirtualPins([]wavefrontv1alpha1.VirtualPin{{Source: repoA.String(), Commit: shaA2}})
+		DeferCleanup(setVirtualPins, []wavefrontv1alpha1.VirtualPin(nil))
+
+		observed := observations(firstObserved, map[types.NamespacedName]string{repoA: shaA2, repoB: shaB2})
+		publishStatus(observed)
+
+		statusSnap := capture(&snapshot.StatusSource{Reader: k8sClient, Wavefront: parityWavefront})
+		deriveSnap := capture(&snapshot.DeriveSource{
+			Reader: k8sClient, Wavefront: parityWavefront, Observations: observed,
+		})
+
+		Expect(nodeIn(statusSnap, nodeA).Pin).To(Equal(shaA2), "the engine evaluated the virtual pin")
+		Expect(statusSnap.Nodes).To(Equal(withoutDeriveOnly(deriveSnap.Nodes)))
+		for _, snap := range []*snapshot.Snapshot{statusSnap, deriveSnap} {
+			Expect(snap.Sources[0].Pin).To(Equal(shaA2))
+			Expect(snap.Diagnostics).NotTo(ContainElement(ContainSubstring("status is behind")))
+		}
+	})
+
 	It("degrades to a partial source when the GitRepository cannot be read", func() {
 		By("deleting one source out from under the published status")
 		Expect(k8sClient.Delete(ctx, &sourcev1.GitRepository{
@@ -412,6 +433,19 @@ func observations(at time.Time, shas map[types.NamespacedName]string) map[types.
 		}
 	}
 	return observed
+}
+
+// setVirtualPins writes status.virtualPins, the ledger a Shadow controller keeps.
+func setVirtualPins(ledger []wavefrontv1alpha1.VirtualPin) {
+	GinkgoHelper()
+	Eventually(func() error {
+		wf := &wavefrontv1alpha1.Wavefront{}
+		if err := k8sClient.Get(ctx, types.NamespacedName{Name: parityWavefront}, wf); err != nil {
+			return err
+		}
+		wf.Status.VirtualPins = ledger
+		return k8sClient.Status().Update(ctx, wf)
+	}).Should(Succeed())
 }
 
 // suspendRepo flips spec.suspend, the incident action a Suspend hold models.

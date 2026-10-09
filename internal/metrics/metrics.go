@@ -47,7 +47,7 @@ const LabelWavefront = "wavefront"
 type Instruments struct {
 	// AdmissionsTotal counts pin admissions by owning Wavefront and result:
 	// "admitted" (an ancestor-gated advance), "initial"
-	// (initial-pin-on-discovery), "shadow" (would-be admission in Shadow
+	// (initial-pin-on-discovery), "shadow" (a virtual advance in Shadow
 	// mode, no write) or "conflict" (blocked by a foreign field-manager
 	// hold). Attributed like every other per-Wavefront collector, but —
 	// being cumulative — its series are never retired by a pass; only
@@ -61,8 +61,8 @@ type Instruments struct {
 	// rather than Reset()ting a co-resident Wavefront's series away.
 	PinLagSeconds *prometheus.GaugeVec // wavefront_node_pin_lag_seconds{wavefront,kind,namespace,name}
 	// AdmissionWaitSeconds is observed→admitted latency at the moment an
-	// admission actually executes (the starvation signal), by
-	// owning Wavefront. Cumulative like AdmissionsTotal: a pass never
+	// admission actually executes, real or (in Shadow) virtual (the
+	// starvation signal), by owning Wavefront. Cumulative like AdmissionsTotal: a pass never
 	// retires its series, only Forget does (on Wavefront deletion).
 	AdmissionWaitSeconds *prometheus.HistogramVec // wavefront_admission_wait_seconds{wavefront}
 	// BlockedNodes is the current blocked-node count by BlockedReason,

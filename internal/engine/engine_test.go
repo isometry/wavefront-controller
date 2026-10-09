@@ -522,6 +522,20 @@ func TestEvaluate(t *testing.T) {
 			wantAdmissions: []engine.Admission{adm("a", "a1", "a2")},
 		},
 		{
+			// Shadow: the real workload floats ahead to the observed SHA while
+			// the virtual pin lags; applied == observed must not settle it.
+			name: "virtual pin behind observed, applied == observed, is pending not settled",
+			deps: chain("a", "b"),
+			inputs: []engine.NodeInput{
+				pinnedNode("a", atPin("a1"), notReady()),
+				pinnedNode("b", pendingFrom("b1", "b2"), appliedAt("b2")),
+			},
+			want: map[string]engine.NodeResult{
+				"a": {State: engine.StateConverging},
+				"b": {State: engine.StatePending, Blocked: blocked("a", engine.ReasonAncestorPending), PendingSince: t0},
+			},
+		},
+		{
 			name:   "a quiescent system is silent",
 			inputs: []engine.NodeInput{pinnedNode("a", atPin("a1"))},
 			want:   map[string]engine.NodeResult{"a": {State: engine.StateSettled}},
