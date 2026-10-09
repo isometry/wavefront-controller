@@ -30,7 +30,6 @@ import (
 
 	wavefrontv1alpha1 "github.com/isometry/wavefront-controller/api/v1alpha1"
 	"github.com/isometry/wavefront-controller/internal/pin"
-	"github.com/isometry/wavefront-controller/internal/selection"
 )
 
 // commitPath is the field-set path of the pin itself, and commitSet the set
@@ -70,9 +69,6 @@ type Release struct {
 	Wavefront *wavefrontv1alpha1.Wavefront
 	// Float removes the pin instead of transferring it.
 	Float bool
-	// Strategy resolves the tracking ref recorded as provenance; nil means
-	// the v1 default.
-	Strategy selection.Strategy
 	// Now stamps the admitted-at annotation; nil means the wall clock.
 	Now func() time.Time
 }
@@ -90,7 +86,7 @@ func (a *Release) Plan(ctx context.Context) (*Plan, error) {
 		return nil, err
 	}
 
-	current := pinOf(repo)
+	current := pin.Commit(repo)
 	if current == "" {
 		return nil, fmt.Errorf("%s has no spec.ref.commit: there is no pin to release", a.Source)
 	}
@@ -110,7 +106,7 @@ func (a *Release) Plan(ctx context.Context) (*Plan, error) {
 // deleting a field owned by someone else is the one thing server-side apply
 // cannot express.
 func (a *Release) floatPlan(repo *sourcev1.GitRepository, current string) (*Plan, error) {
-	trackingRef, err := trackingRefOf(a.Strategy, repo)
+	trackingRef, err := trackingRefOf(repo)
 	if err != nil {
 		return nil, err
 	}
@@ -158,7 +154,7 @@ func (a *Release) transferPlan(repo *sourcev1.GitRepository, current string) (*P
 			a.Source, pin.FieldManager, a.Source)
 	}
 
-	trackingRef, err := trackingRefOf(a.Strategy, repo)
+	trackingRef, err := trackingRefOf(repo)
 	if err != nil {
 		return nil, err
 	}

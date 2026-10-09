@@ -108,13 +108,7 @@ func referenceName(ref *wavefrontv1alpha1.NodeReference) string {
 	if ref == nil {
 		return absent
 	}
-	return nodeName(nodeRef(*ref))
-}
-
-// nodeRef converts an API NodeReference to the adapter reference the rest of
-// the snapshot is keyed by.
-func nodeRef(ref wavefrontv1alpha1.NodeReference) adapter.NodeRef {
-	return adapter.NodeRef{Kind: ref.Kind, Namespace: ref.Namespace, Name: ref.Name}
+	return nodeName(snapshot.NodeRefOf(*ref))
 }
 
 // shortSHA abbreviates a commit to its conventional short form, leaving

@@ -84,7 +84,7 @@ func Mermaid(w io.Writer, s *snapshot.Snapshot) error {
 		if node.Blocked == nil || node.Blocked.Ancestor == nil {
 			continue
 		}
-		blocker := ids[nodeRef(*node.Blocked.Ancestor)]
+		blocker := ids[snapshot.NodeRefOf(*node.Blocked.Ancestor)]
 		if blocker == "" {
 			continue
 		}

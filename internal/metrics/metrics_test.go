@@ -145,11 +145,9 @@ func TestNewCollectAndLint(t *testing.T) {
 	}
 }
 
-// TestNewNameCollisionDifferentLabelsReturnsError covers the review finding
-// (6): pre-registering a same-named collector whose label set differs from
-// AdmissionsTotal's own makes the registry return a plain (non-
-// AlreadyRegistered) error for that name — register must surface it rather
-// than silently handing back the fresh, unregistered collector.
+// TestNewNameCollisionDifferentLabelsReturnsError pre-registers a same-named
+// collector whose label set differs from AdmissionsTotal's own: New must
+// surface the registry's error, naming the metric.
 func TestNewNameCollisionDifferentLabelsReturnsError(t *testing.T) {
 	reg := prometheus.NewRegistry()
 
@@ -168,94 +166,21 @@ func TestNewNameCollisionDifferentLabelsReturnsError(t *testing.T) {
 	}
 }
 
-// collidingCollector is a minimal prometheus.Collector that describes itself
-// identically to AdmissionsTotal (same fully-qualified name, help text and
-// label names, so its Desc has the same id and dimHash) but is not a
-// *prometheus.CounterVec. Registering it first makes the registry return an
-// AlreadyRegisteredError for AdmissionsTotal whose ExistingCollector fails
-// the *prometheus.CounterVec type assertion inside register — the second
-// failure path register must surface rather than swallow. Constructing this
-// case turned out possible:
-// prometheus.Desc.id only depends on fqName and const label values (not the
-// collector's Go type or variable label names), so any Collector describing
-// itself with a matching Desc collides regardless of its concrete type.
-type collidingCollector struct {
-	desc *prometheus.Desc
-}
-
-func (c *collidingCollector) Describe(ch chan<- *prometheus.Desc) { ch <- c.desc }
-func (c *collidingCollector) Collect(chan<- prometheus.Metric)    {}
-
-// TestNewAlreadyRegisteredWrongTypeReturnsError covers the second swallow
-// path: an AlreadyRegisteredError whose ExistingCollector is not assertable
-// to the metric's own concrete type (a name collision with a differently
-// typed collector on the shared registry) must also surface as an error, not
-// silently hand back the fresh, unregistered collector.
-func TestNewAlreadyRegisteredWrongTypeReturnsError(t *testing.T) {
+// TestNewSecondNewOnSameRegistryReturnsError asserts that a second New on one
+// Registerer fails and names a metric, rather than sharing or duplicating the
+// first New's collectors.
+func TestNewSecondNewOnSameRegistryReturnsError(t *testing.T) {
 	reg := prometheus.NewRegistry()
 
-	fake := &collidingCollector{
-		desc: prometheus.NewDesc(
-			"wavefront_admissions_total",
-			"Total pin admissions, by result (admitted, initial, shadow, conflict) and owning Wavefront.",
-			[]string{metrics.LabelWavefront, "result"},
-			nil,
-		),
-	}
-	if err := reg.Register(fake); err != nil {
-		t.Fatalf("pre-registering the colliding collector: %v", err)
-	}
-
-	if _, err := metrics.New(reg); err == nil {
-		t.Fatal("New(reg) error = nil, want non-nil: an AlreadyRegisteredError whose ExistingCollector fails the *prometheus.CounterVec assertion must not be swallowed")
-	} else if !strings.Contains(err.Error(), "wavefront_admissions_total") {
-		t.Errorf("New(reg) error = %q, want it to name the colliding metric (wavefront_admissions_total)", err.Error())
-	}
-}
-
-// TestNewDoubleRegisterSameRegistryDoesNotPanic asserts that a second
-// controller wiring against the same Registerer (e.g.
-// the shared ctrlmetrics.Registry) must not panic, and must end up recording
-// against the very same series rather than a silently dropped duplicate.
-func TestNewDoubleRegisterSameRegistryDoesNotPanic(t *testing.T) {
-	reg := prometheus.NewRegistry()
-
-	first, err := metrics.New(reg)
-	if err != nil {
+	if _, err := metrics.New(reg); err != nil {
 		t.Fatalf("first New: %v", err)
 	}
-	var second *metrics.Instruments
-	func() {
-		defer func() {
-			if r := recover(); r != nil {
-				t.Fatalf("second New on the same registry panicked: %v", r)
-			}
-		}()
-		var err2 error
-		second, err2 = metrics.New(reg)
-		if err2 != nil {
-			t.Fatalf("second New: %v", err2)
-		}
-	}()
-
-	first.AdmissionsTotal.WithLabelValues("fleet", "admitted").Inc()
-	second.AdmissionsTotal.WithLabelValues("fleet", "admitted").Inc()
-
-	if got := testutil.ToFloat64(second.AdmissionsTotal.WithLabelValues("fleet", "admitted")); got != 2 {
-		t.Errorf("admissions after two increments via either handle = %v, want 2 (same underlying series)", got)
+	_, err := metrics.New(reg)
+	if err == nil {
+		t.Fatal("second New(reg) error = nil, want non-nil: the metric names are already registered")
 	}
-
-	families, err := reg.Gather()
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, family := range families {
-		if family.GetName() != "wavefront_admissions_total" {
-			continue
-		}
-		if got := len(family.GetMetric()); got != 1 {
-			t.Errorf("wavefront_admissions_total series after double New = %d, want 1 (no duplicate registration)", got)
-		}
+	if !strings.Contains(err.Error(), "wavefront_admissions_total") {
+		t.Errorf("second New(reg) error = %q, want it to name a colliding metric", err.Error())
 	}
 }
 
