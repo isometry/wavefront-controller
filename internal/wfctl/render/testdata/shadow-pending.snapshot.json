@@ -58,12 +58,6 @@
           }
         }
       ],
-      "shadow": [
-        {
-          "source": "sources/alpha",
-          "to": "aaaa222000000000000000000000000000000000"
-        }
-      ],
       "conditions": [
         {
           "type": "Ready",

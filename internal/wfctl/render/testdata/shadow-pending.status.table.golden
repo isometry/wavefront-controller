@@ -22,9 +22,5 @@ BLOCKED (1)
 NODE             REASON            ANCESTOR          SINCE
 flotillas/beta   AncestorPending   flotillas/alpha   8m
 
-SHADOW (1)
-SOURCE          WOULD-PIN
-sources/alpha   aaaa222
-
 DIAGNOSTICS (0)
   (none)

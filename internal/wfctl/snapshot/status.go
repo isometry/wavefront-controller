@@ -36,6 +36,7 @@ import (
 	"github.com/isometry/wavefront-controller/internal/adapter"
 	"github.com/isometry/wavefront-controller/internal/gitpoll"
 	"github.com/isometry/wavefront-controller/internal/graph"
+	"github.com/isometry/wavefront-controller/internal/inputs"
 	"github.com/isometry/wavefront-controller/internal/pin"
 )
 
@@ -225,6 +226,9 @@ func (s *StatusSource) sources(
 		default:
 			describeRepo(&view, repo)
 			view.Hold = repoHold(repo)
+			// In Shadow the pin evaluated is the virtual one, not the
+			// (released) spec.ref.commit; otherwise every source would warn.
+			view.Pin = inputs.EffectivePin(wf, repo)
 			// SourceView is the live view of the source, so it keeps the live
 			// pin; a node's Pin comes from the published members. When the two
 			// disagree the status is simply behind the cluster, and saying so

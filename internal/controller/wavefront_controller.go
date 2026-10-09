@@ -60,7 +60,7 @@ import (
 )
 
 // Event reasons recorded on provenance events (pin advances and releases,
-// holds, shadow admissions).
+// holds, virtual admissions).
 const (
 	reasonInitialPin          = "InitialPin"
 	reasonPinAdvanced         = "PinAdvanced"
@@ -115,13 +115,14 @@ const unknownManager = "unknown"
 // Every pass is a full recalculation: discovery, source resolution, graph
 // derivation and admissibility are all derived from live cluster state plus
 // the poller's observations, never from stored orchestration state. The only
-// state status carries forward is edge-trigger ledgers, each diffed against
-// the exact capped, sorted mirror it itself holds: the hold ledger
-// (status.Held, against the pass's derived holds) and the shadow-admission
-// ledger (status.Shadow, against this pass's admissions), never against the
-// unbounded live-derived set, so a restart replays at most StatusListCap
-// detections rather than an unbounded backlog. status.Pinned is the release
-// ledger: every source this Wavefront has a claim on, rewritten by settlePins.
+// state status carries forward is ledgers. The hold ledger (status.Held) is
+// edge-triggered against the pass's derived holds, diffed against the exact
+// capped, sorted mirror it itself holds rather than the unbounded live-derived
+// set, so a restart replays at most StatusListCap detections rather than an
+// unbounded backlog. status.Pinned is the release ledger: every source this
+// Wavefront has a claim on, rewritten by settlePins. status.VirtualPins is
+// Shadow's pin store and the one ledger evaluation reads back (see
+// inputs.EffectivePin), rewritten by advanceVirtual.
 type WavefrontReconciler struct {
 	client.Client
 	Scheme    *runtime.Scheme
@@ -418,14 +419,11 @@ func unionOf(sets map[string]pollSet) []gitpoll.Target {
 func (r *WavefrontReconciler) execute(ctx context.Context, p *pass) error {
 	admissions := slices.Concat(p.res.Eval.Initial, p.res.Eval.Admissions)
 
-	// Both status.Shadow writes below run whether or not admissions is empty,
-	// each in its own branch rather than behind a shared "nothing to admit"
-	// shortcut: Shadow's shadowAdmissions call recomputes (and, on an empty
-	// pass, shrinks) the ledger from this pass's admissions, exactly like
-	// every other full recomputation in this reconciler; Enforce's clear
-	// fires on the mode switch itself, admissions or not. skipAdmissions and
-	// Suspend, below, return before either branch, leaving the ledger exactly
-	// as they found it.
+	// Both status.VirtualPins writes below run whether or not admissions is
+	// empty: Shadow's advanceVirtual rebuilds (and prunes) the ledger over
+	// this pass's in-scope sources; Enforce's clear fires on the mode switch
+	// itself, admissions or not. skipAdmissions and Suspend, below, return
+	// before either branch, leaving the ledger exactly as they found it.
 	switch {
 	case p.res.SkipAdmissions():
 		return nil
@@ -435,15 +433,17 @@ func (r *WavefrontReconciler) execute(ctx context.Context, p *pass) error {
 		return nil
 	case p.wf.Spec.Mode != wavefrontv1alpha1.ModeEnforce:
 		// Shadow suppresses every pin write, initial pins included, and gives
-		// back every pin this Wavefront owns.
-		r.shadowAdmissions(p, admissions)
+		// back every pin this Wavefront owns: admissions advance virtual pins
+		// instead, which the next pass evaluates against.
+		r.advanceVirtual(p, admissions)
 		return r.settlePins(ctx, p, "mode is Shadow", nil, p.res.Wavefronts)
 	}
 
-	// Stale shadow entries must not survive a mode flip: a Wavefront that
-	// flips Shadow -> Enforce clears its ledger here, even on a pass with
-	// zero admissions.
-	p.wf.Status.Shadow = nil
+	// Virtual pins must not survive a mode flip: a Wavefront that flips
+	// Shadow -> Enforce clears its ledger here, even on a pass with zero
+	// admissions. Real initial pins then go to the current artifact, never
+	// to a lagging virtual pin, which would roll a live node back.
+	p.wf.Status.VirtualPins = nil
 
 	var errs []error
 	for _, admission := range admissions {
@@ -534,52 +534,63 @@ func (r *WavefrontReconciler) settlePins(ctx context.Context, p *pass, cause str
 	return errors.Join(errs...)
 }
 
-// shadowAdmissions implements the Shadow branch of execute: the engine
-// re-derives the identical would-be admission every reconcile regardless of
-// mode, so the once-only announcement has to be edge-triggered here, against
-// status.Shadow, exactly as holdEvents edge-triggers against status.Held.
-//
-// current is computed once — sorted and capped — and used both as the diff's
-// current side and as the value written to status.Shadow, so the ledger
-// written and the ledger diffed are the same list (mirrors heldSources). A
-// pair is diffed on VALUE (Source, To), not key presence: a new To for a
-// known Source is a new pair and refires. A pair that drops out of this
-// pass's admissions (no longer computed, e.g. the source became held) is
-// dropped from the ledger silently — Shadow mode has nothing analogous to
-// HoldReleased to announce.
-func (r *WavefrontReconciler) shadowAdmissions(p *pass, admissions []engine.Admission) {
-	bySource := make(map[string]engine.Admission, len(admissions))
-	current := make([]wavefrontv1alpha1.ShadowAdmission, 0, len(admissions))
+// advanceVirtual implements the Shadow branch of execute: it rebuilds
+// status.VirtualPins over this pass's in-scope sources, each taking, in order,
+// the To of this pass's admission (unless held, as advance skips it), its
+// effective pin (unless held; on the Enforce -> Shadow flip pass this seeds
+// the ledger from the owned pin settlePins is about to release, which would
+// otherwise re-pin ungated), or its previous entry. Out-of-scope sources are
+// pruned. Each virtual advance is announced exactly once, because the next
+// pass evaluates against the advanced pin and stops admitting it.
+func (r *WavefrontReconciler) advanceVirtual(p *pass, admissions []engine.Admission) {
+	previous := make(map[string]string, len(p.wf.Status.VirtualPins))
+	for _, vp := range p.wf.Status.VirtualPins {
+		previous[vp.Source] = vp.Commit
+	}
+	admitted := make(map[types.NamespacedName]engine.Admission, len(admissions))
 	for _, admission := range admissions {
-		src := admission.Source.String()
-		bySource[src] = admission
-		current = append(current, wavefrontv1alpha1.ShadowAdmission{Source: src, To: admission.To})
-	}
-	slices.SortFunc(current, func(a, b wavefrontv1alpha1.ShadowAdmission) int {
-		return cmp.Compare(a.Source, b.Source)
-	})
-	current = inputs.Capped(current)
-
-	currentMap := make(map[string]string, len(current))
-	for _, sa := range current {
-		currentMap[sa.Source] = sa.To
-	}
-	previousMap := make(map[string]string, len(p.wf.Status.Shadow))
-	for _, sa := range p.wf.Status.Shadow {
-		previousMap[sa.Source] = sa.To
+		admitted[admission.Source] = admission
 	}
 
-	diffLedger(previousMap, currentMap,
-		func(src string, to string) {
-			admission := bySource[src]
-			r.event(p.wf, sourceObject(p, admission.Source), corev1.EventTypeNormal, reasonShadowAdmission, actionShadowPin,
-				"would pin %s to %s (from %s, ref %s)",
-				admission.Source, to, previousPin(admission), admission.ObservedRef)
-			r.Metrics.Wavefront(p.wf.Name).CountAdmission(resultShadow)
-		},
-		func(string, string) {})
+	var ledger []wavefrontv1alpha1.VirtualPin
+	for _, src := range slices.SortedFunc(maps.Keys(p.res.NodeBySource), func(a, b types.NamespacedName) int {
+		return cmp.Compare(a.String(), b.String())
+	}) {
+		key := src.String()
+		_, held := p.res.Holds[src]
+		commit := previous[key]
+		if admission, ok := admitted[src]; ok && !held {
+			commit = admission.To
+			if commit != previous[key] {
+				r.shadowEvent(p, admission)
+			}
+		} else if repo, ok := p.res.Repos[src]; ok && !held {
+			if effective := inputs.EffectivePin(p.wf, repo); effective != "" {
+				commit = effective
+			}
+		}
+		if commit != "" {
+			ledger = append(ledger, wavefrontv1alpha1.VirtualPin{Source: key, Commit: commit})
+		}
+	}
+	p.wf.Status.VirtualPins = ledger
+}
 
-	p.wf.Status.Shadow = current
+// shadowEvent announces one virtual advance as pinEvent announces a real one,
+// on the Wavefront only: no GitRepository was touched.
+func (r *WavefrontReconciler) shadowEvent(p *pass, admission engine.Admission) {
+	message := fmt.Sprintf("would pin %s to %s (from %s, ref %s)",
+		admission.Source, admission.To, previousPin(admission), admission.ObservedRef)
+	if admission.Initial {
+		message = fmt.Sprintf("would initial-pin %s to %s (ref %s)",
+			admission.Source, admission.To, admission.ObservedRef)
+	}
+	r.event(p.wf, sourceObject(p, admission.Source), corev1.EventTypeNormal, reasonShadowAdmission, actionShadowPin, "%s", message)
+
+	r.Metrics.Wavefront(p.wf.Name).CountAdmission(resultShadow)
+	if since := admission.PendingSince; !since.IsZero() {
+		r.Metrics.Wavefront(p.wf.Name).ObserveAdmissionWait(r.Clock().Sub(since).Seconds())
+	}
 }
 
 // advance performs one pin write. A hold is never forced past: it is detected
@@ -660,7 +671,7 @@ func (r *WavefrontReconciler) pinEvent(p *pass, admission engine.Admission) {
 // presence) in sorted key order, so that a caller's onNew/onGone fire in a
 // deterministic sequence: onNew for every key added or changed, onGone for
 // every key removed or changed. A key whose value is unchanged fires
-// neither. Shared with the shadow-admission ledger.
+// neither.
 func diffLedger[V comparable](previous, current map[string]V, onNew, onGone func(key string, v V)) {
 	for _, key := range slices.Sorted(maps.Keys(current)) {
 		if was, ok := previous[key]; !ok || was != current[key] {

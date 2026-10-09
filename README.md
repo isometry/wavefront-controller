@@ -28,7 +28,7 @@ ancestor is *settled* (nothing pending and `Ready` at its own pin).
 The result is stateless, restart-safe, and auditable: the controller holds
 no git state (it only reads ref advertisements, `git ls-remote`-style, never
 clones or checks out), admissibility is a pure function of live pins,
-observed refs and readiness, and at quiescence the fleet's pin set — plus
+observed refs and readiness (in `mode: Shadow`, with the virtual pins in `status.virtualPins` standing in for the real ones), and at quiescence the fleet's pin set — plus
 its per-pin provenance annotations — *is* the release manifest. See
 [`DESIGN.md`](DESIGN.md) for the full design: [topology and
 constraints](DESIGN.md#2-context), the [admission state machine and
@@ -164,7 +164,7 @@ spec:
 |---|---|---|---|
 | `spec.nodes.kinds` | `[]string`, 1–1 items | *(required)* | Must be exactly `[Kustomization]` — CEL-validated (`self.all(k, k == 'Kustomization')`); `HelmRelease` is reserved for a future, non-breaking addition (v1 nodes: Kustomization only). |
 | `spec.nodes.selector` | `metav1.LabelSelector` | *(required)* | Selects graph-member `Kustomization`s across all namespaces; also the boundary for cross-`Wavefront` overlap detection. |
-| `spec.mode` | `Shadow` \| `Enforce` | `Shadow` | `Shadow`: full detection, graph derivation, admissibility evaluation, status/metrics, `ShadowAdmission` events — **no admissions**; flipping to Shadow relinquishes every pin the controller owns (sources float to their tracking refs; `suspend` holds them in place instead). `Enforce`: pins are actually advanced. A source de-scoped from the selector, or a deleted `Wavefront` (finalizer `wavefront.as-code.io/release-pins`), likewise has the controller's own pins relinquished; a hand-pin co-owned by another field manager survives. |
+| `spec.mode` | `Shadow` \| `Enforce` | `Shadow` | `Shadow`: full detection, graph derivation, admissibility evaluation, status/metrics, `ShadowAdmission` events — **no pin writes**. The would-be pins are kept as virtual pins in `status.virtualPins` and the engine gates on them exactly as it does on real pins, so a descendant behind an unhealthy or unsettled ancestor gets no "would pin" event; flipping to Shadow relinquishes every pin the controller owns (sources float to their tracking refs; `suspend` holds them in place instead). `Enforce`: pins are actually advanced. A source de-scoped from the selector, or a deleted `Wavefront` (finalizer `wavefront.as-code.io/release-pins`), likewise has the controller's own pins relinquished; a hand-pin co-owned by another field manager survives. |
 | `spec.suspend` | `bool` | `false` | Freezes all pin *writes* fleet-wide; detection and status keep running. The gentle brake, orthogonal to `mode` and to Flux's own `spec.suspend`. |
 | `spec.poll.interval` | `metav1.Duration` | `90s` | Interval between ref-advertisement polling sweeps. Each sweep is anchored to the *end* of the previous one, not a fixed clock tick, so the **effective poll period observed by the fleet is `interval + sweep duration`**, not `interval` alone — budget for that when setting a pin-staleness alarm threshold. |
 | `spec.poll.perHostConcurrency` | `int`, min 1 | `4` | Bounds concurrent ref listings per git host. |
@@ -195,6 +195,9 @@ status:
       pendingSince: "2026-08-27T09:14:03Z"
       ready: true
       blocked: { reason: AncestorUnhealthy, ancestor: { kind: Kustomization, namespace: waves, name: wave-2-gate } }
+  virtualPins:                            # Shadow only: would-be pins (uncapped); cleared in Enforce
+    - source: flotillas/team-x-repo
+      commit: "ab12…"
   pinned:                                 # release ledger: sources this Wavefront has a claim on (uncapped)
     entries:
       - id: flotillas_team-x-repo_source.toolkit.fluxcd.io_GitRepository
@@ -215,6 +218,15 @@ is what [`wfctl`](#wfctl) reads by default, and it is **write-only** output:
 the reconciler never reads it back, so admission never depends on it — see
 [why rolling admission is a pure function of live
 inputs](DESIGN.md#d9--rolling-admission-not-cycle-coherent-admission-sets-reversed-from-v31-of-this-document).
+`status.virtualPins` is the one exception: in `mode: Shadow` the controller
+writes no pins, so the engine's pin input is read back from this list (one
+`{source, commit}` entry per source, ~100 B each, uncapped) in place of the
+`GitRepository`'s `spec.ref.commit`. It is written only in Shadow and cleared
+in Enforce. If it is lost, the fleet simply re-initial-pins virtually, which
+is harmless because Shadow writes nothing. Each virtual advance emits one
+`ShadowAdmission` event, counts once in `wavefront_admissions_total{result="shadow"}`
+and records an `admission_wait` sample; these are at-least-once (a stale cache
+read or a failed status patch can repeat one advance).
 `status.pinned` is the pin-release ledger (same shape as Flux's
 `status.inventory`): every source the `Wavefront` has a claim on, whose pin the
 controller relinquishes once nothing claims it any more.
@@ -232,7 +244,7 @@ API), attached to the `Wavefront` object:
 | `InitialPin` | Normal | `Pin` | First pin of a newly discovered/matched source |
 | `PinAdvanced` | Normal | `Pin` | A subsequent pin advance |
 | `PinReleased` | Normal | `Unpin` | The controller relinquished its pin: the Wavefront flipped to Shadow, the source was de-scoped, or the Wavefront was deleted |
-| `ShadowAdmission` | Normal | `ShadowPin` | Would-be admission while `mode: Shadow` (no write performed) |
+| `ShadowAdmission` | Normal | `ShadowPin` | A virtual pin advanced while `mode: Shadow` (recorded in `status.virtualPins`; no pin written). Emitted once per advance |
 | `HoldDetected` | Warning | `Hold` | `spec.ref.commit` is owned by a field manager other than the controller |
 | `HoldReleased` | Normal | `Release` | A previously-held source's foreign ownership was removed; controller resumes |
 | `PinFailed` | Warning | `Pin` | A pin write attempt failed (e.g. apply/conflict error) |
@@ -279,13 +291,17 @@ phases rather than flipping the whole fleet at once:
 
 1. **Phase 0 — Shadow.** Deploy with `mode: Shadow` against the intended
    selector; detection, graph derivation, and `ShadowAdmission` events run
-   with no admissions. Validates credential reuse, poll load, participation
-   labelling, and graph shape, and produces real admission-wait data against
-   the starvation caveat below.
+   with no pin writes, gated on `status.virtualPins` so the would-be order
+   follows `dependsOn`. Validates credential reuse, poll load, participation
+   labelling, and graph shape, and produces admission-wait data against
+   the starvation caveat below. In Shadow that data is a lower bound: the
+   real fleet floats ahead of the virtual pins, so settling is usually
+   quicker than under Enforce.
 2. **Phase 1 — Pilot.** Label a small subset spanning at least one
    dependency chain (include one infrastructure flotilla) and flip
    `mode: Enforce`. Enabling management of an existing source starts with
-   an initial pin to its current revision — a no-op write, making
+   an initial pin to the source's current artifact (not to its virtual pin,
+   which may lag) — a no-op write, making
    per-flotilla enablement incremental and risk-free. Exercise blocked-subtree
    recovery, controller-kill mid-rollout (stateless resume), hand-pin/suspend
    coexistence, and break-glass.
@@ -432,7 +448,7 @@ Read commands honour `--derive`, `--poll` and `--from` and take
 
 | Command | Shows |
 |---|---|
-| `status` | Wavefront name, mode, suspend, generation, `lastEvaluated`; phase, node counts, `GraphValid`; the blocked/held/shadow lists and diagnostics. Exits `2` when the fleet is `Blocked`. |
+| `status` | Wavefront name, mode, suspend, generation, `lastEvaluated`; phase, node counts, `GraphValid`; the blocked/held lists and diagnostics. Exits `2` when the fleet is `Blocked`. |
 | `nodes` | Every evaluated node with role, state, held flag, blocking attribution, source, pin, observed SHA and lag; `-o wide` adds wave, readiness and `dependsOn`. |
 | `sources` | Every managed `GitRepository` with pin, observed SHA, pending flag, hold, field-manager owners, artifact, admitted-at and referencing nodes; `-o wide` adds previous pin, observed ref, fetch health and URL. |
 | `source ns/name` | One source in full: pin, provenance annotations, owners, conditions, referencing nodes. |
