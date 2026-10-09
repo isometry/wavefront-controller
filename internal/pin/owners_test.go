@@ -20,10 +20,12 @@ import (
 	"reflect"
 	"testing"
 
+	fluxmeta "github.com/fluxcd/pkg/apis/meta"
 	sourcev1 "github.com/fluxcd/source-controller/api/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/structured-merge-diff/v6/fieldpath"
 
+	wavefrontv1alpha1 "github.com/isometry/wavefront-controller/api/v1alpha1"
 	"github.com/isometry/wavefront-controller/internal/pin"
 )
 
@@ -192,5 +194,58 @@ func TestOwners_nilRepo(t *testing.T) {
 	manager, held := pin.Hold(nil)
 	if manager != "" || held {
 		t.Errorf("Hold(nil) = (%q, %v), want (\"\", false)", manager, held)
+	}
+}
+
+func TestCommit(t *testing.T) {
+	repo := &sourcev1.GitRepository{}
+	if got := pin.Commit(repo); got != "" {
+		t.Errorf("Commit(no reference) = %q, want empty", got)
+	}
+	repo.Spec.Reference = &sourcev1.GitRepositoryRef{Commit: shaA}
+	if got := pin.Commit(repo); got != shaA {
+		t.Errorf("Commit() = %q, want %q", got, shaA)
+	}
+}
+
+func TestArtifactSHA(t *testing.T) {
+	repo := &sourcev1.GitRepository{}
+	if got := pin.ArtifactSHA(repo); got != "" {
+		t.Errorf("ArtifactSHA(no artifact) = %q, want empty", got)
+	}
+	repo.Status.Artifact = &fluxmeta.Artifact{Revision: "main@sha1:" + shaA}
+	if got := pin.ArtifactSHA(repo); got != shaA {
+		t.Errorf("ArtifactSHA() = %q, want %q", got, shaA)
+	}
+}
+
+func TestHoldOf(t *testing.T) {
+	handPin := []metav1.ManagedFieldsEntry{{
+		Manager: kubectlPatchManager, Operation: metav1.ManagedFieldsOperationUpdate, FieldsV1: commitFieldsV1(t),
+	}}
+	tests := []struct {
+		name        string
+		fields      []metav1.ManagedFieldsEntry
+		suspend     bool
+		wantKind    string
+		wantManager string
+		wantHeld    bool
+	}{
+		{name: "free"},
+		{name: "suspended", suspend: true, wantKind: wavefrontv1alpha1.HoldReasonSuspend, wantHeld: true},
+		{name: "hand-pinned", fields: handPin, wantKind: wavefrontv1alpha1.HoldReasonHandPin, wantManager: kubectlPatchManager, wantHeld: true},
+		{name: "hand-pin beats suspend", fields: handPin, suspend: true, wantKind: wavefrontv1alpha1.HoldReasonHandPin, wantManager: kubectlPatchManager, wantHeld: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			repo := &sourcev1.GitRepository{}
+			repo.SetManagedFields(tt.fields)
+			repo.Spec.Suspend = tt.suspend
+			kind, manager, held := pin.HoldOf(repo)
+			if kind != tt.wantKind || manager != tt.wantManager || held != tt.wantHeld {
+				t.Errorf("HoldOf() = (%q, %q, %v), want (%q, %q, %v)",
+					kind, manager, held, tt.wantKind, tt.wantManager, tt.wantHeld)
+			}
+		})
 	}
 }

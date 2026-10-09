@@ -29,7 +29,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/isometry/wavefront-controller/internal/gitpoll"
-	"github.com/isometry/wavefront-controller/internal/selection"
 )
 
 // DefaultPollTimeout bounds one ref listing (the --poll-timeout default).
@@ -56,11 +55,6 @@ type PollOptions struct {
 	// Lister lists advertised refs; nil means the production go-git lister,
 	// which fetches no objects and touches no disk.
 	Lister gitpoll.Lister
-	// Strategy selects the candidate SHA from an advertisement; nil means the
-	// v1 default, TrackRef. It must be the same strategy the evaluation uses,
-	// or the candidate and the tracking ref would come from different
-	// policies.
-	Strategy selection.Strategy
 }
 
 // Observe lists every target's advertised refs once and returns the
@@ -98,10 +92,6 @@ func Observe(
 	if lister == nil {
 		lister = gitpoll.NewGoGitLister(timeout)
 	}
-	strategy := opts.Strategy
-	if strategy == nil {
-		strategy = selection.TrackRef()
-	}
 
 	// One Secret memo for the whole sweep: a fleet routinely shares one
 	// deploy-key Secret across every source, and reading it once per target
@@ -133,7 +123,7 @@ func Observe(
 						return
 					}
 
-					sha, err := observe(ctx, target, creds, lister, strategy)
+					sha, err := observe(ctx, target, creds, lister)
 					mu.Lock()
 					defer mu.Unlock()
 					if err != nil {
@@ -175,7 +165,6 @@ func observe(
 	target gitpoll.Target,
 	creds *secretCache,
 	lister gitpoll.Lister,
-	strategy selection.Strategy,
 ) (string, error) {
 	var data map[string][]byte
 	if target.SecretRef != nil {

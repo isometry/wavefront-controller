@@ -350,7 +350,6 @@ func Build(nodes map[adapter.NodeRef][]adapter.NodeRef) *Graph
 
 type Graph struct { /* opaque */ }
 
-func (g *Graph) Nodes() iter.Seq[adapter.NodeRef]
 func (g *Graph) DependsOn(ref adapter.NodeRef) []adapter.NodeRef
 // TransitiveAncestors returns every ancestor reachable via dependsOn (memoized).
 func (g *Graph) TransitiveAncestors(ref adapter.NodeRef) []adapter.NodeRef
@@ -584,7 +583,6 @@ type Poller struct { /* opaque */ }
 func NewPoller(secrets client.Reader, lister Lister, notify func(), strategy selection.Strategy, reg prometheus.Registerer) *Poller
 func (p *Poller) Configure(interval time.Duration, perHostConcurrency int)
 func (p *Poller) SetTargets(targets []Target)  // replaces the poll set (reconciler calls this)
-func (p *Poller) Observation(src types.NamespacedName) (Observation, bool)
 func (p *Poller) Start(ctx context.Context) error // blocks until ctx done
 ```
 
@@ -684,7 +682,7 @@ func (r *WavefrontReconciler) SetupWithManager(mgr ctrl.Manager, events <-chan e
 1. Fetch the `Wavefront` (cluster-scoped). Not found → done (no finalizer: deleting a Wavefront releases management, pins stay in place — DESIGN D8's "released from management" semantics; document in runbook).
 2. **Selector overlap** (DESIGN §4.1): list all `Wavefront`s; after discovery (step 3) test every selected node's labels against each *other* Wavefront's selector. Any match → `GraphValid: False` reason `SelectorOverlap` (message naming the other Wavefront), skip all admissions, still publish status.
 3. **Discover nodes**: `sel, _ := metav1.LabelSelectorAsSelector(&wf.Spec.Nodes.Selector)`; `Adapter.List(ctx, r.Client, sel)` → selected set. Transitive closure over `DependsOn` targets not in the set via `Adapter.Get` (breadth-first until no new refs; missing targets recorded — they become permanently-unready gates so descendants block, matching Flux's own behaviour on a missing dependency).
-4. **Resolve sources & roles**: for each node with `SourceRef != nil`, `Get` the `GitRepository`. Role `Pinned` iff the node is in the *selected* set AND the GitRepository carries `pin.ManagedLabel == "true"`; else `Gate`. Build `engine.SourceState`: `Pin` from `spec.ref.commit`; `Held/HeldBy` from `pin.Hold`; `Suspended` from `spec.suspend`; `ArtifactSHA` via `git.ExtractHashFromRevision(repo.Status.Artifact.Revision).String()` when artifact non-nil; `FetchFailing` = `conditions.IsTrue(repo, sourcev1.FetchFailedCondition)`; observation from `Poller.Observation`. `TrackingRef` via `Strategy.TrackingRef(repo.Spec.Reference)` — `ErrUnsupportedRef` (semver) demotes the node to `Gate` with a `UnsupportedRefStyle` warning event (catalog CI should have rejected it, D10).
+4. **Resolve sources & roles**: for each node with `SourceRef != nil`, `Get` the `GitRepository`. Role `Pinned` iff the node is in the *selected* set AND the GitRepository carries `pin.ManagedLabel == "true"`; else `Gate`. Build `engine.SourceState`: `Pin` from `spec.ref.commit`; `Held/HeldBy` from `pin.Hold`; `Suspended` from `spec.suspend`; `ArtifactSHA` via `git.ExtractHashFromRevision(repo.Status.Artifact.Revision).String()` when artifact non-nil; `FetchFailing` = `conditions.IsTrue(repo, sourcev1.FetchFailedCondition)`; observation from `Poller.Observations`. `TrackingRef` via `Strategy.TrackingRef(repo.Spec.Reference)` — `ErrUnsupportedRef` (semver) demotes the node to `Gate` with a `UnsupportedRefStyle` warning event (catalog CI should have rejected it, D10).
 5. **Update poll set**: `Poller.Configure(wf.Spec.Poll.Interval.Duration, wf.Spec.Poll.PerHostConcurrency)`; `Poller.SetTargets` with every managed source (URL, `spec.secretRef` → namespaced secret ref, tracking ref).
 6. **Graph + engine**: `g := graph.Build(edges)`; cycles → `GraphValid: False` reason `CyclesDetected` (message lists one cycle); `ev := engine.Evaluate(g, inputs)`.
 7. **Execute** (order: initial pins, then admissions):

@@ -74,7 +74,7 @@ func DOT(w io.Writer, s *snapshot.Snapshot) error {
 		if node.Blocked == nil || node.Blocked.Ancestor == nil {
 			continue
 		}
-		blocker := nodeRef(*node.Blocked.Ancestor)
+		blocker := snapshot.NodeRefOf(*node.Blocked.Ancestor)
 		out.printf("  %s -> %s [style=%s, color=%s, constraint=false, label=%s];\n",
 			dotQuote(blocker.String()), dotQuote(node.Ref.String()),
 			dotQuote("dashed"), dotQuote(dotUnhealthy), dotQuote(node.Blocked.Reason))

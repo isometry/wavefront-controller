@@ -134,7 +134,7 @@ func nextHop(s *snapshot.Snapshot, node *snapshot.NodeView) (*snapshot.NodeView,
 	if blocked.Ancestor == nil {
 		return nil, ""
 	}
-	ref := nodeRef(*blocked.Ancestor)
+	ref := snapshot.NodeRefOf(*blocked.Ancestor)
 	next := nodeView(s, ref)
 	if next == nil {
 		return nil, fmt.Sprintf("%s is not in this snapshot (missing dependency)", nodeName(ref))
