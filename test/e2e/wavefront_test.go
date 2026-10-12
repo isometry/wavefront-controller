@@ -277,7 +277,10 @@ var _ = Describe("Wavefront fleet", Ordered, func() {
 		Expect(teamAdmitted).To(BeTemporally(">=", infraAdmitted.Add(minSequencingGap)),
 			"team-a was admitted only %s after infra; infra's payload cannot converge that fast",
 			teamAdmitted.Sub(infraAdmitted))
-		Expect(readyStatus(Default, gateNode)).To(Equal("True"))
+		// Flux reports Unknown for the moment a Ready Kustomization re-reconciles.
+		Eventually(func(g Gomega) {
+			g.Expect(readyStatus(g, gateNode)).To(Equal("True"))
+		}, waitShort, pollFast).Should(Succeed())
 
 		By("checking team-a's provenance records the outgoing pin")
 		repo := getRepo(Default, teamNode)
@@ -326,7 +329,12 @@ var _ = Describe("Wavefront fleet", Ordered, func() {
 		// matter of Flux's reconcile timing.
 		Expect(entry.Ancestor).NotTo(BeNil())
 		Expect(entry.Ancestor.Name).To(BeElementOf(infraNode, gateNode))
-		Expect(readyStatus(Default, infraNode)).To(Equal("False"))
+		// A failing Kustomization alternates between False and Unknown
+		// ("Reconciliation in progress") on its retryInterval, so a single read
+		// can land on Unknown even though it was False a moment ago.
+		Eventually(func(g Gomega) {
+			g.Expect(readyStatus(g, infraNode)).To(Equal("False"))
+		}, waitShort, pollFast).Should(Succeed())
 
 		Consistently(func(g Gomega) {
 			g.Expect(pinOf(g, teamNode)).To(Equal(teamBefore))
