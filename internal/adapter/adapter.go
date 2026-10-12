@@ -22,6 +22,7 @@ limitations under the License.
 package adapter
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 
@@ -40,6 +41,13 @@ type NodeRef struct {
 // String renders the reference as "Kind/ns/name".
 func (r NodeRef) String() string {
 	return fmt.Sprintf("%s/%s/%s", r.Kind, r.Namespace, r.Name)
+}
+
+// Compare orders refs by String(), the one sort key for status.members and the
+// rendered output. It is deliberately not field-by-field: namespaces "a-x" and
+// "a" order differently under the two.
+func (r NodeRef) Compare(o NodeRef) int {
+	return cmp.Compare(r.String(), o.String())
 }
 
 // Readiness is the uniform health signal.

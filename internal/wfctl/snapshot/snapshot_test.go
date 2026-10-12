@@ -35,7 +35,6 @@ import (
 	wavefrontv1alpha1 "github.com/isometry/wavefront-controller/api/v1alpha1"
 	"github.com/isometry/wavefront-controller/internal/adapter"
 	"github.com/isometry/wavefront-controller/internal/pin"
-	"github.com/isometry/wavefront-controller/internal/selection"
 )
 
 // Shared fixture literals, named so the same string in two files means the
@@ -514,7 +513,7 @@ func TestDescribeRepoScrubsCredentialsFromConditions(t *testing.T) {
 	}
 
 	var view SourceView
-	describeRepo(&view, repo, selection.TrackRef())
+	describeRepo(&view, repo)
 
 	if len(view.Conditions) != 3 {
 		t.Fatalf("describeRepo() kept %d conditions, want 3", len(view.Conditions))

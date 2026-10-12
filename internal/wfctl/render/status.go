@@ -207,7 +207,7 @@ func blockedSection(w io.Writer, title string, nodes []wavefrontv1alpha1.Blocked
 		node := &nodes[i]
 		since := node.Since.Time
 		table.Row(
-			nodeName(nodeRef(node.Node)),
+			nodeName(snapshot.NodeRefOf(node.Node)),
 			o.Palette.Warn(sanitize(node.Reason)),
 			referenceName(node.Ancestor),
 			age(now, &since),
@@ -232,7 +232,7 @@ func heldSection(w io.Writer, title string, nodes []wavefrontv1alpha1.HeldNode, 
 	for i := range nodes {
 		node := &nodes[i]
 		table.Row(
-			nodeName(nodeRef(node.Node)),
+			nodeName(snapshot.NodeRefOf(node.Node)),
 			orAbsent(node.Source),
 			o.Palette.Held(orAbsent(node.Reason)),
 			orAbsent(node.Manager),

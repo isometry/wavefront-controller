@@ -35,7 +35,6 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/fluxcd/pkg/git"
 	"github.com/fluxcd/pkg/runtime/conditions"
 	sourcev1 "github.com/fluxcd/source-controller/api/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -114,7 +113,7 @@ type Result struct {
 	Inputs map[adapter.NodeRef]engine.NodeInput
 	Repos  map[types.NamespacedName]*sourcev1.GitRepository
 	// NodeBySource lists every selected, pinned node referencing a source,
-	// each slice in compareRefs order: a shared source's events and status
+	// each slice in NodeRef.Compare order: a shared source's events and status
 	// attribution need every referencing node, not just whichever last
 	// overwrote a single value.
 	NodeBySource map[types.NamespacedName][]adapter.NodeRef
@@ -312,7 +311,7 @@ func (b *builder) detectOverlap(ctx context.Context) error {
 	b.res.Wavefronts = all
 
 	// Sorted node refs keep the reported overlap stable across passes.
-	refs := slices.SortedFunc(maps.Keys(b.res.Selected), compareRefs)
+	refs := slices.SortedFunc(maps.Keys(b.res.Selected), adapter.NodeRef.Compare)
 
 	for i := range all.Items {
 		other := &all.Items[i]
@@ -380,7 +379,7 @@ func (b *builder) resolve(ctx context.Context) error {
 	res.Targets = make([]gitpoll.Target, 0, len(res.Nodes))
 	b.resolvedSources = map[types.NamespacedName]*resolvedSource{}
 
-	for _, ref := range slices.SortedFunc(maps.Keys(res.Nodes), compareRefs) {
+	for _, ref := range slices.SortedFunc(maps.Keys(res.Nodes), adapter.NodeRef.Compare) {
 		node := res.Nodes[ref]
 		input := engine.NodeInput{
 			Ref:        ref,
@@ -405,7 +404,7 @@ func (b *builder) resolve(ctx context.Context) error {
 
 			if rs.state != nil {
 				input.Role, input.Source = engine.RolePinned, rs.state
-				// Nodes are walked in compareRefs order above, so each
+				// Nodes are walked in NodeRef.Compare order above, so each
 				// source's slice accumulates already sorted.
 				res.NodeBySource[*node.SourceRef] = append(res.NodeBySource[*node.SourceRef], ref)
 				// A source can be both hand-pinned and suspended at once;
@@ -495,11 +494,11 @@ func (b *builder) resolveSourceOnce(ctx context.Context, src types.NamespacedNam
 	state := &engine.SourceState{
 		Source:       src,
 		TrackingRef:  trackingRef,
-		Pin:          currentPin(repo),
+		Pin:          pin.Commit(repo),
 		Held:         held,
 		HeldBy:       manager,
 		Suspended:    repo.Spec.Suspend,
-		ArtifactSHA:  artifactSHA(repo),
+		ArtifactSHA:  pin.ArtifactSHA(repo),
 		FetchFailing: conditions.IsTrue(repo, sourcev1.FetchFailedCondition),
 	}
 	// Params.Observations is the caller's snapshot, taken before anything
@@ -570,7 +569,7 @@ func HeldSources(res *Result) []wavefrontv1alpha1.HeldNode {
 	held := make([]wavefrontv1alpha1.HeldNode, 0, len(res.Holds))
 	for src, h := range res.Holds {
 		// A held source shared by more than one node is attributed to the
-		// first referencing node in compareRefs order — deterministic, not
+		// first referencing node in NodeRef.Compare order — deterministic, not
 		// an arbitrary map read.
 		var node wavefrontv1alpha1.NodeReference
 		if refs := res.NodeBySource[src]; len(refs) > 0 {
@@ -610,10 +609,6 @@ func nodeKey(ref wavefrontv1alpha1.NodeReference) string {
 	return fmt.Sprintf("%s/%s/%s", ref.Kind, ref.Namespace, ref.Name)
 }
 
-func compareRefs(a, b adapter.NodeRef) int {
-	return cmp.Compare(a.String(), b.String())
-}
-
 func compareSources(a, b types.NamespacedName) int {
 	return cmp.Compare(a.String(), b.String())
 }
@@ -624,21 +619,4 @@ func refStrings(refs []adapter.NodeRef) []string {
 		out = append(out, ref.String())
 	}
 	return out
-}
-
-// currentPin reads spec.ref.commit, "" when unpinned.
-func currentPin(repo *sourcev1.GitRepository) string {
-	if repo.Spec.Reference == nil {
-		return ""
-	}
-	return repo.Spec.Reference.Commit
-}
-
-// artifactSHA extracts the commit of the last successful reconciliation, which
-// is what an initial pin bootstraps from.
-func artifactSHA(repo *sourcev1.GitRepository) string {
-	if repo.Status.Artifact == nil {
-		return ""
-	}
-	return git.ExtractHashFromRevision(repo.Status.Artifact.Revision).String()
 }

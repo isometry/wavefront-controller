@@ -124,7 +124,7 @@ func Summarise(res *Result, now time.Time) Summary {
 // re-reading the cluster. Beyond MembersCap the tail is dropped
 // and counted: the counts, not the list, stay authoritative.
 func members(res *Result) ([]wavefrontv1alpha1.Member, int) {
-	refs := slices.SortedFunc(maps.Keys(res.Eval.Nodes), compareRefs)
+	refs := slices.SortedFunc(maps.Keys(res.Eval.Nodes), adapter.NodeRef.Compare)
 
 	list := make([]wavefrontv1alpha1.Member, 0, len(refs))
 	for _, ref := range refs {

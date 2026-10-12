@@ -73,7 +73,7 @@ func (a *Strip) Plan(ctx context.Context) (*Plan, error) {
 
 	for i := range list.Items {
 		repo := &list.Items[i]
-		current := pinOf(repo)
+		current := pin.Commit(repo)
 		if current == "" {
 			continue
 		}

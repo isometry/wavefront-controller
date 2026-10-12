@@ -413,3 +413,21 @@ func TestKustomizationAdapter_Get_NotFound(t *testing.T) {
 		t.Errorf("Get() node = %+v, want zero value", node)
 	}
 }
+
+// TestNodeRefCompare pins the String()-based order status.members is written
+// in. Field by field, namespace "a" would sort before "a-x"; as strings,
+// "Kustomization/a-x/n" sorts before "Kustomization/a/n" because '-' < '/'.
+func TestNodeRefCompare(t *testing.T) {
+	ax := adapter.NodeRef{Kind: "Kustomization", Namespace: "a-x", Name: "n"}
+	a := adapter.NodeRef{Kind: "Kustomization", Namespace: "a", Name: "n"}
+
+	if got := ax.Compare(a); got >= 0 {
+		t.Errorf("Compare(a-x, a) = %d, want < 0 (String() order)", got)
+	}
+	if got := a.Compare(ax); got <= 0 {
+		t.Errorf("Compare(a, a-x) = %d, want > 0", got)
+	}
+	if got := a.Compare(a); got != 0 {
+		t.Errorf("Compare(a, a) = %d, want 0", got)
+	}
+}

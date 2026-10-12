@@ -28,6 +28,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	wavefrontv1alpha1 "github.com/isometry/wavefront-controller/api/v1alpha1"
+	"github.com/isometry/wavefront-controller/internal/wfctl/snapshot"
 )
 
 // Audit reasons, one per write command. They share the vocabulary of
@@ -47,9 +48,6 @@ const (
 	// auditController is the reportingController of every wfctl event, so a
 	// reader can tell an operator's write from the controller's own.
 	auditController = "wfctl"
-	// auditNamespace is where events about a cluster-scoped object land: the
-	// same place the controller's own Wavefront events do.
-	auditNamespace = "default"
 	// noteLimit is the apiserver's own cap on an event note.
 	noteLimit = 1024
 )
@@ -106,7 +104,7 @@ func Audit(
 		// The recorder's own naming scheme: unique per object per instant,
 		// which is all the apiserver requires of an event name.
 		Name:                fmt.Sprintf("%s.%x", wf.Name, at.UnixNano()),
-		Namespace:           auditNamespace,
+		Namespace:           snapshot.EventNamespace,
 		EventTime:           metav1.MicroTime{Time: at},
 		ReportingController: auditController,
 		ReportingInstance:   auditController,

@@ -68,16 +68,11 @@ func newGraphModel(s *snapshot.Snapshot) *graphModel {
 	for ref := range model.waves {
 		model.order = append(model.order, ref)
 	}
-	slices.SortFunc(model.order, compareRefs)
+	slices.SortFunc(model.order, adapter.NodeRef.Compare)
 	for ref := range model.children {
-		slices.SortFunc(model.children[ref], compareRefs)
+		slices.SortFunc(model.children[ref], adapter.NodeRef.Compare)
 	}
 	return model
-}
-
-// compareRefs orders references the way the snapshot itself is sorted.
-func compareRefs(a, b adapter.NodeRef) int {
-	return strings.Compare(a.String(), b.String())
 }
 
 // missing reports a reference that is a dependsOn target without a node.

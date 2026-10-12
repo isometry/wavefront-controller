@@ -25,7 +25,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/fluxcd/pkg/git"
 	"github.com/fluxcd/pkg/runtime/conditions"
 	sourcev1 "github.com/fluxcd/source-controller/api/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -38,7 +37,6 @@ import (
 	"github.com/isometry/wavefront-controller/internal/gitpoll"
 	"github.com/isometry/wavefront-controller/internal/graph"
 	"github.com/isometry/wavefront-controller/internal/pin"
-	"github.com/isometry/wavefront-controller/internal/selection"
 )
 
 // staleGrace is the slack added to the poll interval before status counts as
@@ -131,7 +129,7 @@ func statusNodes(wf *wavefrontv1alpha1.Wavefront) []NodeView {
 	for i := range wf.Status.Members {
 		member := &wf.Status.Members[i]
 		node := NodeView{
-			Ref:          nodeRef(member.Node),
+			Ref:          NodeRefOf(member.Node),
 			Role:         member.Role,
 			State:        member.State,
 			Held:         member.Held,
@@ -144,7 +142,7 @@ func statusNodes(wf *wavefrontv1alpha1.Wavefront) []NodeView {
 		if len(member.DependsOn) > 0 {
 			node.DependsOn = make([]adapter.NodeRef, 0, len(member.DependsOn))
 			for _, dep := range member.DependsOn {
-				node.DependsOn = append(node.DependsOn, nodeRef(dep))
+				node.DependsOn = append(node.DependsOn, NodeRefOf(dep))
 			}
 		}
 		if member.Source != "" {
@@ -201,7 +199,6 @@ func (s *StatusSource) sources(
 	}
 
 	holds := heldLedger(wf)
-	strategy := selection.TrackRef()
 
 	var diags []string
 	views := make([]SourceView, 0, len(byName))
@@ -226,7 +223,7 @@ func (s *StatusSource) sources(
 		case err != nil:
 			return nil, nil, fmt.Errorf("reading source %s: %w", name, err)
 		default:
-			describeRepo(&view, repo, strategy)
+			describeRepo(&view, repo)
 			view.Hold = repoHold(repo)
 			// SourceView is the live view of the source, so it keeps the live
 			// pin; a node's Pin comes from the published members. When the two
@@ -273,15 +270,15 @@ func heldLedger(wf *wavefrontv1alpha1.Wavefront) map[string]*HoldView {
 // describeRepo fills in everything only the GitRepository itself carries.
 // It is shared with DeriveSource so that a source renders identically under
 // either origin.
-func describeRepo(view *SourceView, repo *sourcev1.GitRepository, strategy selection.Strategy) {
+func describeRepo(view *SourceView, repo *sourcev1.GitRepository) {
 	view.URL = stripUserinfo(repo.Spec.URL)
 	view.Suspended = repo.Spec.Suspend
 	view.CommitOwners = pin.Owners(repo)
 	view.Provenance = provenance(repo)
-	view.ArtifactSHA = artifactSHA(repo)
+	view.ArtifactSHA = pin.ArtifactSHA(repo)
 	view.FetchFailing = conditions.IsTrue(repo, sourcev1.FetchFailedCondition)
 	view.Conditions = scrubConditions(repo.Status.Conditions, repo.Spec.URL)
-	view.Pin = currentPin(repo)
+	view.Pin = pin.Commit(repo)
 
 	if repo.Spec.SecretRef != nil {
 		// The name only: a Snapshot never carries a Secret's contents.
@@ -333,17 +330,13 @@ func scrubURLs(text, repoURL string) string {
 	return credentialedURL.ReplaceAllString(text, "$1")
 }
 
-// repoHold reports how a source is held, with the same precedence
-// inputs.resolve applies: a hand-pin outranks a suspend because it names an
-// actor and a suspend does not.
+// repoHold is pin.HoldOf as a HoldView, nil when the source is not held.
 func repoHold(repo *sourcev1.GitRepository) *HoldView {
-	if manager, held := pin.Hold(repo); held {
-		return &HoldView{Kind: wavefrontv1alpha1.HoldReasonHandPin, Manager: manager}
+	kind, manager, held := pin.HoldOf(repo)
+	if !held {
+		return nil
 	}
-	if repo.Spec.Suspend {
-		return &HoldView{Kind: wavefrontv1alpha1.HoldReasonSuspend}
-	}
-	return nil
+	return &HoldView{Kind: kind, Manager: manager}
 }
 
 // provenance extracts the three pin annotations — the durable ledger, since
@@ -375,22 +368,6 @@ func shortSHA(sha string) string {
 	default:
 		return sha[:short]
 	}
-}
-
-// currentPin reads spec.ref.commit, "" when unpinned.
-func currentPin(repo *sourcev1.GitRepository) string {
-	if repo.Spec.Reference == nil {
-		return ""
-	}
-	return repo.Spec.Reference.Commit
-}
-
-// artifactSHA extracts the commit of the last successful reconciliation.
-func artifactSHA(repo *sourcev1.GitRepository) string {
-	if repo.Status.Artifact == nil {
-		return ""
-	}
-	return git.ExtractHashFromRevision(repo.Status.Artifact.Revision).String()
 }
 
 // staleDiagnostics warns when the published picture may no longer describe the
@@ -429,8 +406,8 @@ func pollInterval(wf *wavefrontv1alpha1.Wavefront) time.Duration {
 	return wf.Spec.Poll.Interval.Duration
 }
 
-// nodeRef converts a status NodeReference to the adapter's ref.
-func nodeRef(ref wavefrontv1alpha1.NodeReference) adapter.NodeRef {
+// NodeRefOf converts a status NodeReference to the adapter's ref.
+func NodeRefOf(ref wavefrontv1alpha1.NodeReference) adapter.NodeRef {
 	return adapter.NodeRef{Kind: ref.Kind, Namespace: ref.Namespace, Name: ref.Name}
 }
 

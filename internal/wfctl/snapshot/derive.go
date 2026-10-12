@@ -35,6 +35,11 @@ import (
 	"github.com/isometry/wavefront-controller/internal/selection"
 )
 
+// strategy is the one selection policy every snapshot is built under (v1:
+// TrackRef). Evaluation, source description and Observe all read it, so the
+// tracking ref and the candidate cannot come from different policies.
+var strategy = selection.TrackRef()
+
 // DeriveSource re-derives the picture live, through the very pipeline the
 // reconciler uses (decision "Seam"): inputs.Build for discovery, resolution,
 // graph and evaluation, inputs.Summarise for the numbers.
@@ -75,8 +80,6 @@ func (d *DeriveSource) Capture(ctx context.Context) (*Snapshot, error) {
 	}
 
 	now := nowFunc(d.Now)()
-	strategy := selection.TrackRef()
-
 	build := func(observations map[types.NamespacedName]gitpoll.Observation) (*inputs.Result, error) {
 		return inputs.Build(ctx, d.Reader, inputs.Params{
 			Wavefront:    wf,
@@ -111,14 +114,14 @@ func (d *DeriveSource) Capture(ctx context.Context) (*Snapshot, error) {
 		Graph: GraphView{
 			Cycles:  res.Cycles,
 			Unknown: res.Graph.Unknown(),
-			Missing: slices.SortedFunc(maps.Keys(res.Missing), compareNodeRefs),
+			Missing: slices.SortedFunc(maps.Keys(res.Missing), adapter.NodeRef.Compare),
 		},
 		Derived: derivedStatus(res, now),
 	}
 
 	snap.Nodes = deriveNodes(res)
 	applyWaves(snap.Nodes)
-	snap.Sources = deriveSources(res, strategy)
+	snap.Sources = deriveSources(res)
 	snap.Diagnostics = append(diags, structuralDiagnostics(res)...)
 
 	return snap, nil
@@ -158,7 +161,7 @@ func (d *DeriveSource) observe(
 // only a live read carries (see NodeView), so StatusSource and DeriveSource
 // agree node for node — the parity the envtest suite asserts.
 func deriveNodes(res *inputs.Result) []NodeView {
-	refs := slices.SortedFunc(maps.Keys(res.Eval.Nodes), compareNodeRefs)
+	refs := slices.SortedFunc(maps.Keys(res.Eval.Nodes), adapter.NodeRef.Compare)
 
 	nodes := make([]NodeView, 0, len(refs))
 	for _, ref := range refs {
@@ -212,7 +215,7 @@ func blockedRef(blocked *engine.Blocked) *wavefrontv1alpha1.BlockedRef {
 // deriveSources renders one SourceView per managed GitRepository backing a
 // pinned node — exactly the set status.members names a source for, so the two
 // origins list the same sources.
-func deriveSources(res *inputs.Result, strategy selection.Strategy) []SourceView {
+func deriveSources(res *inputs.Result) []SourceView {
 	views := make([]SourceView, 0, len(res.NodeBySource))
 	for src, refs := range res.NodeBySource {
 		view := SourceView{
@@ -221,7 +224,7 @@ func deriveSources(res *inputs.Result, strategy selection.Strategy) []SourceView
 		}
 
 		if repo, ok := res.Repos[src]; ok {
-			describeRepo(&view, repo, strategy)
+			describeRepo(&view, repo)
 		} else {
 			// Unreachable: a source only reaches NodeBySource after a
 			// successful read, which records it in Repos. Reported rather
@@ -336,10 +339,4 @@ func structuralDiagnostics(res *inputs.Result) []string {
 			src))
 	}
 	return diags
-}
-
-// compareNodeRefs is the one sort key for node refs, matching the
-// "Kind/namespace/name" ordering status.members is written in.
-func compareNodeRefs(a, b adapter.NodeRef) int {
-	return cmp.Compare(a.String(), b.String())
 }

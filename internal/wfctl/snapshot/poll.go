@@ -19,25 +19,17 @@ package snapshot
 import (
 	"context"
 	"fmt"
-	"net/url"
 	"slices"
-	"sync"
 	"time"
 
-	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/isometry/wavefront-controller/internal/gitpoll"
-	"github.com/isometry/wavefront-controller/internal/selection"
 )
 
 // DefaultPollTimeout bounds one ref listing (the --poll-timeout default).
 const DefaultPollTimeout = 30 * time.Second
-
-// unknownHost groups targets whose URL yields no host, so they are still
-// concurrency-bounded rather than fanned out without limit.
-const unknownHost = "unknown"
 
 // PollOptions turns on live ref-advertisement listing for DeriveSource.
 //
@@ -56,11 +48,6 @@ type PollOptions struct {
 	// Lister lists advertised refs; nil means the production go-git lister,
 	// which fetches no objects and touches no disk.
 	Lister gitpoll.Lister
-	// Strategy selects the candidate SHA from an advertisement; nil means the
-	// v1 default, TrackRef. It must be the same strategy the evaluation uses,
-	// or the candidate and the tracking ref would come from different
-	// policies.
-	Strategy selection.Strategy
 }
 
 // Observe lists every target's advertised refs once and returns the
@@ -86,77 +73,38 @@ func Observe(
 		return nil, nil
 	}
 
-	timeout := opts.Timeout
-	if timeout <= 0 {
-		timeout = DefaultPollTimeout
-	}
-	perHost := opts.PerHostConcurrency
-	if perHost <= 0 {
-		perHost = gitpoll.DefaultPerHostConcurrency
-	}
 	lister := opts.Lister
 	if lister == nil {
+		timeout := opts.Timeout
+		if timeout <= 0 {
+			timeout = DefaultPollTimeout
+		}
 		lister = gitpoll.NewGoGitLister(timeout)
 	}
-	strategy := opts.Strategy
-	if strategy == nil {
-		strategy = selection.TrackRef()
+
+	// No credential-failure counter: a CLI run records no metrics, and each
+	// failure surfaces as a diagnostic instead.
+	results := gitpoll.Sweep(ctx, r, lister, strategy, targets, opts.PerHostConcurrency, nil)
+
+	observations := map[types.NamespacedName]gitpoll.Observation{}
+	var diags []string
+	for _, res := range results {
+		if res.Err != nil {
+			diags = append(diags, fmt.Sprintf(
+				"polling %s failed: %v; it is reported unobserved", res.Target.Source, res.Err))
+			continue
+		}
+		observations[res.Target.Source] = gitpoll.Observation{
+			SHA:           res.SHA,
+			ObservedAt:    now,
+			FirstObserved: now,
+			// Stamped with the plumbing the SHA was observed against:
+			// inputs.Build rejects an observation whose URL or tracking ref
+			// no longer matches the source.
+			URL:         res.Target.URL,
+			TrackingRef: res.Target.TrackingRef,
+		}
 	}
-
-	// One Secret memo for the whole sweep: a fleet routinely shares one
-	// deploy-key Secret across every source, and reading it once per target
-	// would turn a single expired key into forty identical diagnostics.
-	creds := &secretCache{reader: r, entries: map[types.NamespacedName]*secretEntry{}}
-
-	byHost := map[string][]gitpoll.Target{}
-	for _, target := range targets {
-		byHost[hostOf(target.URL)] = append(byHost[hostOf(target.URL)], target)
-	}
-
-	var (
-		mu           sync.Mutex
-		observations = map[types.NamespacedName]gitpoll.Observation{}
-		diags        []string
-	)
-
-	var hosts sync.WaitGroup
-	for _, hostTargets := range byHost {
-		hosts.Go(func() {
-			semaphore := make(chan struct{}, perHost)
-			var wg sync.WaitGroup
-			for _, target := range hostTargets {
-				wg.Go(func() {
-					select {
-					case semaphore <- struct{}{}:
-						defer func() { <-semaphore }()
-					case <-ctx.Done():
-						return
-					}
-
-					sha, err := observe(ctx, target, creds, lister, strategy)
-					mu.Lock()
-					defer mu.Unlock()
-					if err != nil {
-						diags = append(diags, fmt.Sprintf(
-							"polling %s failed: %v; it is reported unobserved", target.Source, err))
-						return
-					}
-					observations[target.Source] = gitpoll.Observation{
-						SHA:           sha,
-						ObservedAt:    now,
-						FirstObserved: now,
-						// Stamped with the plumbing the SHA was observed
-						// against: inputs.Build rejects an observation whose
-						// URL or tracking ref no longer matches the source.
-						URL:         target.URL,
-						TrackingRef: target.TrackingRef,
-					}
-				})
-			}
-			wg.Wait()
-		})
-	}
-	hosts.Wait()
 
 	// Sorted so a snapshot of the same cluster reads the same twice over,
 	// whatever order the listings happened to finish in.
@@ -165,90 +113,4 @@ func Observe(
 		observations = nil
 	}
 	return observations, diags
-}
-
-// observe performs one target's listing and selects its candidate SHA. A
-// tracking ref the remote does not advertise is not an error to shout about
-// twice: the source is simply unobserved, reported as such.
-func observe(
-	ctx context.Context,
-	target gitpoll.Target,
-	creds *secretCache,
-	lister gitpoll.Lister,
-	strategy selection.Strategy,
-) (string, error) {
-	var data map[string][]byte
-	if target.SecretRef != nil {
-		var err error
-		if data, err = creds.get(ctx, *target.SecretRef); err != nil {
-			return "", err
-		}
-	}
-
-	auth, err := gitpoll.AuthFromSecret(target.URL, data)
-	if err != nil {
-		// The URL is deliberately absent from the message: it may carry
-		// embedded credentials.
-		return "", fmt.Errorf("building credentials: %w", err)
-	}
-
-	advertised, err := lister.List(ctx, target.URL, auth)
-	if err != nil {
-		return "", fmt.Errorf("listing refs: %w", err)
-	}
-
-	sha, ok := strategy.Candidate(advertised, target.TrackingRef)
-	if !ok {
-		return "", fmt.Errorf("tracking ref %s is not advertised", target.TrackingRef)
-	}
-	return sha, nil
-}
-
-// secretCache reads each credential Secret at most once per sweep. Its
-// contents never leave this package: only the transport auth built from them
-// does, and neither ever reaches a Snapshot.
-type secretCache struct {
-	reader client.Reader
-
-	mu      sync.Mutex
-	entries map[types.NamespacedName]*secretEntry
-}
-
-type secretEntry struct {
-	once sync.Once
-	data map[string][]byte
-	err  error
-}
-
-func (c *secretCache) get(ctx context.Context, ref types.NamespacedName) (map[string][]byte, error) {
-	c.mu.Lock()
-	entry, ok := c.entries[ref]
-	if !ok {
-		entry = &secretEntry{}
-		c.entries[ref] = entry
-	}
-	c.mu.Unlock()
-
-	entry.once.Do(func() {
-		var secret corev1.Secret
-		if err := c.reader.Get(ctx, ref, &secret); err != nil {
-			// Named, not dumped: the operator needs to know which Secret to
-			// get access to, and nothing more.
-			entry.err = fmt.Errorf("reading credential Secret %s: %w", ref, err)
-			return
-		}
-		entry.data = secret.Data
-	})
-	return entry.data, entry.err
-}
-
-// hostOf extracts a URL's host for concurrency batching. It is a grouping key
-// only, so an unparseable URL falls into one shared bucket rather than
-// failing the sweep.
-func hostOf(raw string) string {
-	parsed, err := url.Parse(raw)
-	if err != nil || parsed.Host == "" {
-		return unknownHost
-	}
-	return parsed.Host
 }

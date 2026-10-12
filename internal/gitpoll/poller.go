@@ -19,15 +19,12 @@ package gitpoll
 import (
 	"context"
 	"errors"
-	"fmt"
 	"maps"
-	"net/url"
 	"slices"
 	"sync"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
-	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
@@ -41,9 +38,6 @@ const (
 	// DefaultPerHostConcurrency matches the CRD default for
 	// spec.poll.perHostConcurrency.
 	DefaultPerHostConcurrency = 4
-
-	// unknownHost labels failures for targets whose URL yields no host.
-	unknownHost = "unknown"
 )
 
 // Target is one source to poll.
@@ -66,58 +60,6 @@ type Observation struct {
 	// no stale candidate survives a plumbing change.
 	URL         string
 	TrackingRef string
-}
-
-// credentialError marks a failure to read a target's credential Secret —
-// an apiserver problem, not a git-host one: poll must not attribute it to
-// wavefront_ref_list_failures_total{host}.
-type credentialError struct{ err error }
-
-func (e *credentialError) Error() string { return e.err.Error() }
-func (e *credentialError) Unwrap() error { return e.err }
-
-// sweepSecrets memoizes credential Secret reads for one sweep: a fleet
-// routinely shares one deploy-key Secret across hundreds of targets. The
-// memo dies with the sweep, so credentials are still resolved afresh every
-// sweep — once per distinct SecretRef instead of once per target.
-type sweepSecrets struct {
-	reader   client.Reader
-	failures prometheus.Counter
-
-	mu      sync.Mutex
-	entries map[types.NamespacedName]*secretEntry
-}
-
-type secretEntry struct {
-	once sync.Once
-	data map[string][]byte
-	err  error
-}
-
-func (s *sweepSecrets) get(ctx context.Context, ref types.NamespacedName) (map[string][]byte, error) {
-	s.mu.Lock()
-	e, ok := s.entries[ref]
-	if !ok {
-		e = &secretEntry{}
-		s.entries[ref] = e
-	}
-	s.mu.Unlock()
-
-	e.once.Do(func() {
-		var secret corev1.Secret
-		if err := s.reader.Get(ctx, ref, &secret); err != nil {
-			e.err = &credentialError{err: fmt.Errorf("getting secret %s: %w", ref, err)}
-			// Counted here, not in poll: once per distinct ref per sweep,
-			// and never for a read that only failed because the sweep is
-			// shutting down.
-			if ctx.Err() == nil && s.failures != nil {
-				s.failures.Inc()
-			}
-			return
-		}
-		e.data = secret.Data
-	})
-	return e.data, e.err
 }
 
 // Poller periodically sweeps all targets, batched per git host with bounded
@@ -190,14 +132,6 @@ func withRef(rec record) Observation {
 	obs := rec.obs
 	obs.URL, obs.TrackingRef = rec.ref.url, rec.ref.trackingRef
 	return obs
-}
-
-// result is one completed listing, held until the whole sweep publishes.
-type result struct {
-	target Target
-	sha    string
-	at     time.Time
-	err    error
 }
 
 var _ manager.Runnable = (*Poller)(nil)
@@ -309,14 +243,6 @@ func (p *Poller) unobservedLocked() bool {
 	return false
 }
 
-// Observation returns the latest observation for a source, if any.
-func (p *Poller) Observation(src types.NamespacedName) (Observation, bool) {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-	rec, ok := p.observations[src]
-	return withRef(rec), ok
-}
-
 // Observations returns a coherent point-in-time snapshot of every current
 // observation: an independent copy of the whole store, taken under a single
 // read lock.
@@ -328,7 +254,7 @@ func (p *Poller) Observation(src types.NamespacedName) (Observation, bool) {
 // admission rule a descendant is admitted when its ancestors are *settled*,
 // and an ancestor whose observation lagged a sweep behind would look settled
 // when it is not, mis-sequencing co-arriving changes. Reading
-// source by source with Observation cannot provide that guarantee.
+// source by source cannot provide that guarantee.
 func (p *Poller) Observations() map[types.NamespacedName]Observation {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
@@ -398,31 +324,15 @@ func (p *Poller) sweep(ctx context.Context) {
 	perHost := p.perHostConcurrency
 	p.mu.RUnlock()
 
-	byHost := make(map[string][]Target)
-	for _, t := range targets {
-		host := hostOf(t.URL)
-		byHost[host] = append(byHost[host], t)
+	results := Sweep(ctx, p.secrets, p.lister, p.strategy, targets, perHost, p.credentialFailures)
+	for _, r := range results {
+		if r.Err == nil {
+			continue
+		}
+		if _, ok := errors.AsType[*credentialError](r.Err); !ok {
+			p.countFailure(hostOf(r.Target.URL))
+		}
 	}
-
-	results := make(chan result, len(targets))
-
-	// One memo for the whole sweep: a fleet routinely shares one deploy-key
-	// Secret across hundreds of targets, and it dies with this sweep so
-	// credentials are still resolved afresh every sweep (see sweepSecrets).
-	creds := &sweepSecrets{
-		reader:   p.secrets,
-		failures: p.credentialFailures,
-		entries:  map[types.NamespacedName]*secretEntry{},
-	}
-
-	var hosts sync.WaitGroup
-	for host, hostTargets := range byHost {
-		hosts.Go(func() {
-			p.sweepHost(ctx, host, hostTargets, perHost, creds, results)
-		})
-	}
-	hosts.Wait()
-	close(results)
 
 	p.publish(results)
 
@@ -431,86 +341,36 @@ func (p *Poller) sweep(ctx context.Context) {
 	}
 }
 
-// sweepHost polls one host's targets, at most perHost at a time.
-func (p *Poller) sweepHost(ctx context.Context, host string, targets []Target, perHost int, creds *sweepSecrets, results chan<- result) {
-	semaphore := make(chan struct{}, perHost)
-
-	var wg sync.WaitGroup
-	for _, t := range targets {
-		wg.Go(func() {
-			select {
-			case semaphore <- struct{}{}:
-				defer func() { <-semaphore }()
-			case <-ctx.Done():
-				return
-			}
-
-			p.poll(ctx, host, t, creds, results)
-		})
-	}
-	wg.Wait()
-}
-
-// poll performs one target's listing and queues the outcome for publication.
-//
-// Shutdown is judged by ctx.Err(), never by the error chain: go-git
-// transports surface cancellation as EOF/closed-connection errors that never
-// wrap context.Canceled, and a healthy sweep's error chain may still contain
-// one that is not ours (e.g. an HTTP/2 stream reset). ctx.Err() is the only
-// authority. A cancelled context is the manager shutting the poller down, not
-// a detection failure: it must neither blip wavefront_ref_list_failures_total
-// (a safety alarm operators rate-alert on) nor stamp a shutdown artefact
-// onto the observation. Such a listing is discarded outright, exactly as a
-// superseded target's is in publish — it answers no question anyone is still
-// asking, and the last good observation stands untouched. This does not
-// spuriously swallow a genuine listing timeout: the lister's own per-listing
-// WithTimeout (lister.go:55-59) is a child context, so its expiry leaves the
-// sweep ctx healthy and the failure is correctly still counted.
-func (p *Poller) poll(ctx context.Context, host string, t Target, creds *sweepSecrets, results chan<- result) {
-	sha, err := p.observe(ctx, t, creds)
-	if ctx.Err() != nil {
-		// The manager is shutting the poller down: whatever observe returned
-		// answers no question anyone is still asking.
-		return
-	}
-	if err != nil {
-		if _, ok := errors.AsType[*credentialError](err); !ok {
-			p.countFailure(host)
-		}
-	}
-	results <- result{target: t, sha: sha, at: time.Now(), err: err}
-}
-
 // publish folds a whole sweep's results into the store in one locked
 // mutation, so the store only ever steps from one sweep to the next.
 //
 // Staleness is judged here rather than at listing time: a SetTargets that
 // repointed a source while its listing was in flight must still discard the
 // result, and by publication time the live plumbing is as current as it gets.
-func (p *Poller) publish(results <-chan result) {
+func (p *Poller) publish(results []Result) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	for res := range results {
-		if !p.current(res.target) {
+	for _, res := range results {
+		if !p.current(res.Target) {
 			continue
 		}
 
-		rec := p.observations[res.target.Source]
-		rec.ref = targetRefOf(res.target)
+		rec := p.observations[res.Target.Source]
+		rec.ref = targetRefOf(res.Target)
 
-		if res.err != nil {
+		if res.Err != nil {
 			// Never clear the last good SHA: a frozen-at-known-good
 			// observation is the fail-closed behaviour.
-			rec.obs.ObservedAt, rec.obs.Err = res.at, res.err
+			rec.obs.ObservedAt, rec.obs.Err = res.At, res.Err
 		} else {
-			if rec.obs.SHA != res.sha {
-				rec.obs.FirstObserved = res.at
+			if rec.obs.SHA != res.SHA {
+				rec.obs.FirstObserved = res.At
 			}
-			rec.obs.SHA, rec.obs.ObservedAt, rec.obs.Err = res.sha, res.at, nil
+			rec.obs.SHA, rec.obs.ObservedAt, rec.obs.Err = res.SHA, res.At, nil
 		}
 
-		p.observations[res.target.Source] = rec
+		p.observations[res.Target.Source] = rec
 	}
 }
 
@@ -523,61 +383,9 @@ func (p *Poller) current(t Target) bool {
 	return ok && live == targetRefOf(t)
 }
 
-// observe resolves credentials afresh, lists the advertisement and selects the
-// candidate SHA for the target's tracking ref.
-func (p *Poller) observe(ctx context.Context, t Target, creds *sweepSecrets) (string, error) {
-	data, err := p.secretData(ctx, t, creds)
-	if err != nil {
-		return "", err
-	}
-
-	auth, err := AuthFromSecret(t.URL, data)
-	if err != nil {
-		return "", err
-	}
-
-	advertised, err := p.lister.List(ctx, t.URL, auth)
-	if err != nil {
-		return "", err
-	}
-
-	sha, ok := p.strategy.Candidate(advertised, t.TrackingRef)
-	if !ok {
-		return "", fmt.Errorf("tracking ref %q is not advertised", t.TrackingRef)
-	}
-	return sha, nil
-}
-
-// secretData reads the target's credentials via creds, which memoizes the
-// read for the whole sweep — freshly on every sweep because credentials
-// rotate, but at most once per distinct SecretRef within one.
-func (p *Poller) secretData(ctx context.Context, t Target, creds *sweepSecrets) (map[string][]byte, error) {
-	if t.SecretRef == nil {
-		return nil, nil
-	}
-	if p.secrets == nil {
-		return nil, fmt.Errorf("secret %s is referenced but no secret reader is configured", t.SecretRef)
-	}
-
-	return creds.get(ctx, *t.SecretRef)
-}
-
 func (p *Poller) countFailure(host string) {
 	if p.failures == nil {
 		return
 	}
-	if host == "" {
-		host = unknownHost
-	}
 	p.failures.WithLabelValues(host).Inc()
-}
-
-// hostOf groups targets by git host. An unparseable URL groups under the empty
-// host and fails at auth conversion, which reports the parse error properly.
-func hostOf(repoURL string) string {
-	u, err := url.Parse(repoURL)
-	if err != nil {
-		return ""
-	}
-	return u.Host
 }

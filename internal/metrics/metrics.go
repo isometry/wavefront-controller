@@ -87,73 +87,56 @@ type Instruments struct {
 // New registers the launch metric set on reg and returns the handles the
 // reconciler and poller record against.
 //
-// Calling New more than once on the same reg (e.g. a second controller
-// wiring against the shared ctrlmetrics.Registry) does not panic: each
-// collector already registered is reused rather than re-registered, so every
-// caller ends up recording against the same underlying series. main wires
-// this exactly once regardless.
-//
-// New fails if reg already holds a same-named collector that register
-// cannot reuse: either a genuinely incompatible descriptor (different
-// labels or help text — not an AlreadyRegisteredError at all) or a name
-// collision with a collector of a different Go type (an AlreadyRegisteredError
-// whose ExistingCollector fails the type assertion). Both are name
-// collisions on the shared registry that must reach the caller rather than
-// silently vanish, so every collector is registered before New returns —
-// errors.Join reports every collision in one call instead of stopping at the
-// first.
+// It fails if any collector cannot be registered, including a second New on
+// the same reg: a name already registered there is a collision that must reach
+// the caller, not be silently shared. Every collector is attempted before New
+// returns, so errors.Join reports every collision in one call. main wires this
+// exactly once.
 func New(reg prometheus.Registerer) (*Instruments, error) {
-	admissionsTotal, admissionsTotalErr := register(reg, prometheus.NewCounterVec(prometheus.CounterOpts{
-		Name: "wavefront_admissions_total",
-		Help: "Total pin admissions, by result (admitted, initial, shadow, conflict) and owning Wavefront.",
-	}, []string{LabelWavefront, "result"}))
-	pinLagSeconds, pinLagSecondsErr := register(reg, prometheus.NewGaugeVec(prometheus.GaugeOpts{
-		Name: "wavefront_node_pin_lag_seconds",
-		Help: "Age in seconds of a node's currently unadmitted observed revision, by owning Wavefront.",
-	}, []string{LabelWavefront, "kind", "namespace", "name"}))
-	admissionWaitSeconds, admissionWaitSecondsErr := register(reg, prometheus.NewHistogramVec(prometheus.HistogramOpts{
-		Name:    "wavefront_admission_wait_seconds",
-		Help:    "Seconds from first observation of a revision to its admission.",
-		Buckets: admissionWaitBuckets,
-	}, []string{LabelWavefront}))
-	blockedNodes, blockedNodesErr := register(reg, prometheus.NewGaugeVec(prometheus.GaugeOpts{
-		Name: "wavefront_blocked_nodes",
-		Help: "Number of nodes currently blocked, by owning Wavefront and reason; sum() over the wavefront label for a fleet total.",
-	}, []string{LabelWavefront, "reason"}))
-	refListFailures, refListFailuresErr := register(reg, prometheus.NewCounterVec(prometheus.CounterOpts{
-		Name: "wavefront_ref_list_failures_total",
-		Help: "Total ref-advertisement listing failures, by git host.",
-	}, []string{"host"}))
-	pinnedFetchFailures, pinnedFetchFailuresErr := register(reg, prometheus.NewGaugeVec(prometheus.GaugeOpts{
-		Name: "wavefront_pinned_fetch_failures",
-		Help: "Number of pinned sources currently reporting a fetch failure, by owning Wavefront; sum() over the wavefront label for a fleet total.",
-	}, []string{LabelWavefront}))
-	credentialReadFailures, credentialReadFailuresErr := register(reg, prometheus.NewCounter(prometheus.CounterOpts{
-		Name: "wavefront_credential_read_failures_total",
-		Help: "Total failures reading git credential Secrets during ref-advertisement sweeps.",
-	}))
+	i := &Instruments{
+		AdmissionsTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "wavefront_admissions_total",
+			Help: "Total pin admissions, by result (admitted, initial, shadow, conflict) and owning Wavefront.",
+		}, []string{LabelWavefront, "result"}),
+		PinLagSeconds: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "wavefront_node_pin_lag_seconds",
+			Help: "Age in seconds of a node's currently unadmitted observed revision, by owning Wavefront.",
+		}, []string{LabelWavefront, "kind", "namespace", "name"}),
+		AdmissionWaitSeconds: prometheus.NewHistogramVec(prometheus.HistogramOpts{
+			Name:    "wavefront_admission_wait_seconds",
+			Help:    "Seconds from first observation of a revision to its admission.",
+			Buckets: admissionWaitBuckets,
+		}, []string{LabelWavefront}),
+		BlockedNodes: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "wavefront_blocked_nodes",
+			Help: "Number of nodes currently blocked, by owning Wavefront and reason; sum() over the wavefront label for a fleet total.",
+		}, []string{LabelWavefront, "reason"}),
+		RefListFailures: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "wavefront_ref_list_failures_total",
+			Help: "Total ref-advertisement listing failures, by git host.",
+		}, []string{"host"}),
+		PinnedFetchFailures: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "wavefront_pinned_fetch_failures",
+			Help: "Number of pinned sources currently reporting a fetch failure, by owning Wavefront; sum() over the wavefront label for a fleet total.",
+		}, []string{LabelWavefront}),
+		CredentialReadFailures: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "wavefront_credential_read_failures_total",
+			Help: "Total failures reading git credential Secrets during ref-advertisement sweeps.",
+		}),
+	}
 
 	if err := errors.Join(
-		admissionsTotalErr,
-		pinLagSecondsErr,
-		admissionWaitSecondsErr,
-		blockedNodesErr,
-		refListFailuresErr,
-		pinnedFetchFailuresErr,
-		credentialReadFailuresErr,
+		register(reg, "wavefront_admissions_total", i.AdmissionsTotal),
+		register(reg, "wavefront_node_pin_lag_seconds", i.PinLagSeconds),
+		register(reg, "wavefront_admission_wait_seconds", i.AdmissionWaitSeconds),
+		register(reg, "wavefront_blocked_nodes", i.BlockedNodes),
+		register(reg, "wavefront_ref_list_failures_total", i.RefListFailures),
+		register(reg, "wavefront_pinned_fetch_failures", i.PinnedFetchFailures),
+		register(reg, "wavefront_credential_read_failures_total", i.CredentialReadFailures),
 	); err != nil {
 		return nil, err
 	}
-
-	return &Instruments{
-		AdmissionsTotal:        admissionsTotal,
-		PinLagSeconds:          pinLagSeconds,
-		AdmissionWaitSeconds:   admissionWaitSeconds,
-		BlockedNodes:           blockedNodes,
-		RefListFailures:        refListFailures,
-		PinnedFetchFailures:    pinnedFetchFailures,
-		CredentialReadFailures: credentialReadFailures,
-	}, nil
+	return i, nil
 }
 
 // Nop returns Instruments backed by a fresh, isolated registry: tests and
@@ -162,10 +145,9 @@ func New(reg prometheus.Registerer) (*Instruments, error) {
 func Nop() *Instruments {
 	instr, err := New(prometheus.NewRegistry())
 	if err != nil {
-		// A brand-new, empty prometheus.NewRegistry() cannot already hold a
-		// same-named collector, so register can never hit either swallow
-		// path here: this is unreachable, and panicking makes that loud
-		// rather than handing back a broken *Instruments.
+		// A brand-new, empty registry cannot already hold a same-named
+		// collector, so this is unreachable; panicking makes that loud rather
+		// than handing back a broken *Instruments.
 		panic(fmt.Sprintf("metrics.Nop: unreachable registration failure on a fresh registry: %v", err))
 	}
 	return instr
@@ -237,51 +219,11 @@ func (s WavefrontScope) ObserveAdmissionWait(seconds float64) {
 	s.i.AdmissionWaitSeconds.WithLabelValues(s.name).Observe(seconds)
 }
 
-// register registers c on reg, tolerating a collector already registered
-// under the same name (typically a second New on one Registerer) by reusing
-// the existing collector instead of panicking or silently dropping c. Any
-// other failure — a non-AlreadyRegistered error, or an AlreadyRegisteredError
-// whose ExistingCollector is not c's own concrete type (a name collision with
-// a differently typed collector on the shared registry) — is returned rather
-// than swallowed, naming c so the caller knows which metric collided.
-func register[C prometheus.Collector](reg prometheus.Registerer, c C) (C, error) {
-	err := reg.Register(c)
-	if err == nil {
-		return c, nil
+// register registers c on reg, naming the metric in the error so a collision
+// on the shared registry is attributable.
+func register(reg prometheus.Registerer, name string, c prometheus.Collector) error {
+	if err := reg.Register(c); err != nil {
+		return fmt.Errorf("registering %s: %w", name, err)
 	}
-
-	if already, ok := errors.AsType[prometheus.AlreadyRegisteredError](err); ok {
-		if existing, ok := already.ExistingCollector.(C); ok {
-			return existing, nil
-		}
-		var zero C
-		return zero, fmt.Errorf("%s: name collision with a different collector type already registered", describe(c))
-	}
-
-	var zero C
-	return zero, fmt.Errorf("registering %s: %w", describe(c), err)
-}
-
-// describe returns a human-readable identity for c — its first descriptor,
-// which carries the fully-qualified metric name — for register's error
-// messages. c is one of this package's own collectors, each of which
-// Describes itself with exactly one Desc, so draining the channel after the
-// first value only guards against that assumption changing later.
-func describe(c prometheus.Collector) string {
-	ch := make(chan *prometheus.Desc, 1)
-	go func() {
-		c.Describe(ch)
-		close(ch)
-	}()
-
-	var first *prometheus.Desc
-	for d := range ch {
-		if first == nil {
-			first = d
-		}
-	}
-	if first == nil {
-		return "<collector with no descriptor>"
-	}
-	return first.String()
+	return nil
 }

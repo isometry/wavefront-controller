@@ -209,7 +209,7 @@ func TestBuildMemoizesASharedSource(t *testing.T) {
 	}
 
 	if got, want := res.NodeBySource[src], []adapter.NodeRef{nodeA, nodeB}; !slices.Equal(got, want) {
-		t.Errorf("NodeBySource[%s] = %v, want both referencing nodes in compareRefs order %v", src, got, want)
+		t.Errorf("NodeBySource[%s] = %v, want both referencing nodes in NodeRef.Compare order %v", src, got, want)
 	}
 }
 

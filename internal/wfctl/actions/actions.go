@@ -45,7 +45,6 @@ import (
 	"time"
 
 	sourcev1 "github.com/fluxcd/source-controller/api/v1"
-	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -194,14 +193,6 @@ func getSource(ctx context.Context, c client.Client, key types.NamespacedName) (
 	return repo, nil
 }
 
-// pinOf reports a source's current spec.ref.commit, "" when it has none.
-func pinOf(repo *sourcev1.GitRepository) string {
-	if repo.Spec.Reference == nil {
-		return ""
-	}
-	return repo.Spec.Reference.Commit
-}
-
 // annotationOf reads one annotation, "" when absent.
 func annotationOf(repo *sourcev1.GitRepository, key string) string {
 	return repo.GetAnnotations()[key]
@@ -236,13 +227,14 @@ func describeOwners(owners []pin.Owner) string {
 // holdOf reports the source-scoped hold the controller would see: a foreign
 // owner of spec.ref.commit, or the source's own suspension.
 func holdOf(repo *sourcev1.GitRepository) (string, bool) {
-	if manager, held := pin.Hold(repo); held {
+	switch kind, manager, held := pin.HoldOf(repo); {
+	case !held:
+		return "", false
+	case kind == wavefrontv1alpha1.HoldReasonHandPin:
 		return fmt.Sprintf("spec.ref.commit is held by field manager %q", manager), true
-	}
-	if repo.Spec.Suspend {
+	default:
 		return "the source is suspended (spec.suspend: true)", true
 	}
-	return "", false
 }
 
 // Advertisement is the ref-listing seam shared by `pin --poll` (which verifies
@@ -255,37 +247,26 @@ type Advertisement struct {
 	// Lister lists advertised refs; nil means the production go-git lister,
 	// which fetches no objects and touches no disk.
 	Lister gitpoll.Lister
-	// Strategy maps the source's ref spec to a tracking ref and picks the
-	// candidate; nil means the v1 default, TrackRef. It must be the strategy
-	// the controller uses, or wfctl would verify against a different policy.
-	Strategy selection.Strategy
 	// Timeout bounds the listing; <= 0 means snapshot.DefaultPollTimeout.
 	Timeout time.Duration
 }
 
 // trackingRef maps a source's ref spec to the advertised ref name to observe.
 func (a Advertisement) trackingRef(repo *sourcev1.GitRepository) (string, error) {
-	return trackingRefOf(a.Strategy, repo)
+	return trackingRefOf(repo)
 }
 
 // candidate picks the SHA the tracking ref advertises, under the same strategy
 // the controller would apply.
 func (a Advertisement) candidate(advertised map[string]string, trackingRef string) (string, bool) {
-	strategy := a.Strategy
-	if strategy == nil {
-		strategy = selection.TrackRef()
-	}
-	return strategy.Candidate(advertised, trackingRef)
+	return selection.TrackRef().Candidate(advertised, trackingRef)
 }
 
-// trackingRefOf resolves the ref a source tracks under the given strategy; nil
-// means the v1 default, TrackRef. Every action that records provenance needs
-// it, whether or not it lists anything.
-func trackingRefOf(strategy selection.Strategy, repo *sourcev1.GitRepository) (string, error) {
-	if strategy == nil {
-		strategy = selection.TrackRef()
-	}
-	ref, err := strategy.TrackingRef(repo.Spec.Reference)
+// trackingRefOf resolves the ref a source tracks under the v1 strategy,
+// TrackRef. Every action that records provenance needs it, whether or not it
+// lists anything.
+func trackingRefOf(repo *sourcev1.GitRepository) (string, error) {
+	ref, err := selection.TrackRef().TrackingRef(repo.Spec.Reference)
 	if err != nil {
 		return "", fmt.Errorf("resolving the tracking ref of %s/%s: %w", repo.Namespace, repo.Name, err)
 	}
@@ -299,21 +280,6 @@ func (a Advertisement) list(
 	c client.Client,
 	repo *sourcev1.GitRepository,
 ) (map[string]string, error) {
-	var data map[string][]byte
-	if repo.Spec.SecretRef != nil {
-		key := types.NamespacedName{Namespace: repo.Namespace, Name: repo.Spec.SecretRef.Name}
-		secret := &corev1.Secret{}
-		if err := c.Get(ctx, key, secret); err != nil {
-			return nil, fmt.Errorf("reading credential Secret %s: %w", key, err)
-		}
-		data = secret.Data
-	}
-
-	auth, err := gitpoll.AuthFromSecret(repo.Spec.URL, data)
-	if err != nil {
-		return nil, fmt.Errorf("building credentials for %s/%s: %w", repo.Namespace, repo.Name, err)
-	}
-
 	lister := a.Lister
 	if lister == nil {
 		timeout := a.Timeout
@@ -323,7 +289,15 @@ func (a Advertisement) list(
 		lister = gitpoll.NewGoGitLister(timeout)
 	}
 
-	advertised, err := lister.List(ctx, repo.Spec.URL, auth)
+	target := gitpoll.Target{
+		Source: types.NamespacedName{Namespace: repo.Namespace, Name: repo.Name},
+		URL:    repo.Spec.URL,
+	}
+	if repo.Spec.SecretRef != nil {
+		target.SecretRef = &types.NamespacedName{Namespace: repo.Namespace, Name: repo.Spec.SecretRef.Name}
+	}
+
+	advertised, err := gitpoll.List(ctx, c, lister, target)
 	if err != nil {
 		return nil, fmt.Errorf("listing the refs of %s/%s: %w", repo.Namespace, repo.Name, err)
 	}

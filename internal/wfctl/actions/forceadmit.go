@@ -96,7 +96,7 @@ func (a *ForceAdmit) Plan(ctx context.Context) (*Plan, error) {
 		return nil, err
 	}
 
-	current := pinOf(repo)
+	current := pin.Commit(repo)
 	at := a.now()
 
 	if current == sha {

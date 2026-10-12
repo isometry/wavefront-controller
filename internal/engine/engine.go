@@ -191,7 +191,7 @@ func gateSharedSources(ev *Evaluation, inputs map[adapter.NodeRef]NodeInput) {
 		if len(refs) < 2 {
 			continue // referenced by exactly one node: untouched
 		}
-		slices.SortFunc(refs, byNodeRef)
+		slices.SortFunc(refs, adapter.NodeRef.Compare)
 
 		var blocker adapter.NodeRef
 		allAdmissible := true
@@ -260,11 +260,6 @@ func dedupeBySource(admissions []Admission) []Admission {
 		kept = append(kept, a)
 	}
 	return kept
-}
-
-// byNodeRef orders NodeRefs the same way byNode orders their Admissions.
-func byNodeRef(a, b adapter.NodeRef) int {
-	return cmp.Compare(a.String(), b.String())
 }
 
 // evaluateNode assigns one node's state and, when it is admissible,
@@ -477,5 +472,5 @@ func ancestorReason(in NodeInput, known bool) BlockedReason {
 }
 
 func byNode(a, b Admission) int {
-	return cmp.Compare(a.Node.String(), b.Node.String())
+	return a.Node.Compare(b.Node)
 }

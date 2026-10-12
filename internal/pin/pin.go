@@ -34,6 +34,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/fluxcd/pkg/git"
 	sourcev1 "github.com/fluxcd/source-controller/api/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -129,6 +130,36 @@ func Hold(repo *sourcev1.GitRepository) (manager string, held bool) {
 	}
 
 	return "", false
+}
+
+// HoldOf reports how a source is held: a hand-pin outranks a suspend because
+// it names an actor and a suspend does not. kind is one of the
+// wavefrontv1alpha1.HoldReason* constants; manager is set only for a hand-pin.
+func HoldOf(repo *sourcev1.GitRepository) (kind, manager string, held bool) {
+	if manager, held := Hold(repo); held {
+		return wavefrontv1alpha1.HoldReasonHandPin, manager, true
+	}
+	if repo.Spec.Suspend {
+		return wavefrontv1alpha1.HoldReasonSuspend, "", true
+	}
+	return "", "", false
+}
+
+// Commit reads spec.ref.commit, "" when unpinned.
+func Commit(repo *sourcev1.GitRepository) string {
+	if repo.Spec.Reference == nil {
+		return ""
+	}
+	return repo.Spec.Reference.Commit
+}
+
+// ArtifactSHA extracts the commit of the last successful reconciliation, which
+// is what an initial pin bootstraps from.
+func ArtifactSHA(repo *sourcev1.GitRepository) string {
+	if repo.Status.Artifact == nil {
+		return ""
+	}
+	return git.ExtractHashFromRevision(repo.Status.Artifact.Revision).String()
 }
 
 // Owned reports whether FieldManager owns spec.ref.commit.

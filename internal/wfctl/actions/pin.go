@@ -80,7 +80,7 @@ func (a *Pin) Plan(ctx context.Context) (*Plan, error) {
 		return nil, err
 	}
 
-	current := pinOf(repo)
+	current := pin.Commit(repo)
 	displacedField := annotationField(pin.AnnotDisplacedPin)
 
 	if len(foreign) > 0 {
