@@ -31,7 +31,7 @@ The controller exposes three levers, from gentlest to most drastic:
 
 | Lever | Effect | Touches Flux resources? |
 |---|---|---|
-| `spec.mode: Shadow` | Full detection, graph derivation, admissibility evaluation, status and metrics, `ShadowAdmission` events — **no admissions**. Flipping *to* Shadow relinquishes every pin the controller owns, so the fleet floats to its tracking refs. | **Yes** — strips the controller's own pins |
+| `spec.mode: Shadow` | Full detection, graph derivation, admissibility evaluation, status and metrics, `ShadowAdmission` events — **no pin writes**. The would-be pins are kept in `status.virtualPins` and gate exactly like real ones. Flipping *to* Shadow relinquishes every pin the controller owns (seeding the virtual pins from them first), so the fleet floats to its tracking refs. | **Yes** — strips the controller's own pins |
 | `spec.suspend: true` | Freezes all pin *writes* fleet-wide; detection and status keep running. The gentle brake — flip back to `false` to resume. | No |
 | Break-glass pin-strip (below) | Removes every controller-managed `spec.ref.commit`, restoring plain floating-ref Flux behaviour. | **Yes** — mutates `GitRepository` objects |
 
@@ -60,7 +60,7 @@ its state, pin, observed SHA and blocking attribution — bounded only by
 needs nothing but read access to `wavefronts`:
 
 ```sh
-wfctl status                # phase, counts, GraphValid, blocked/held/shadow, diagnostics
+wfctl status                # phase, counts, GraphValid, blocked/held, diagnostics
 wfctl nodes                 # every node: state, held, blocking attribution, pin, observed, lag
 wfctl nodes -o wide         # + wave, readiness, dependsOn
 wfctl sources               # every managed GitRepository: pin, hold, owners, artifact
@@ -259,13 +259,22 @@ Effects:
      `False`, this Wavefront's per-Wavefront gauges are suppressed (retired,
      not zeroed) so a fleet-wide `sum()` never double-counts against the
      Wavefront it overlaps with — see [Safety alarms](#safety-alarms).
-   - `ShadowAdmission` events look sane for a representative sample of
-     flotillas (correct candidate SHAs, expected sequencing given
-     `dependsOn`).
-   - `wavefront_admission_wait_seconds` distribution looks reasonable (no
-     surprise starvation behind a hot, never-quiescing upstream — the
-     [settled-ancestors starvation
+   - `status.virtualPins` (and `members[].pin`, shown by `wfctl nodes` and
+     `wfctl sources`) advance in `dependsOn` order: a descendant's virtual pin
+     moves only after its ancestors have settled, and a descendant behind an
+     unhealthy ancestor shows `AncestorUnhealthy` with no `ShadowAdmission`
+     event. `ShadowAdmission` events (one per virtual advance, on the
+     Wavefront, `related` = the `GitRepository`) name correct candidate SHAs
+     for a representative sample of flotillas. Events, counts and wait samples
+     are at-least-once, so an occasional repeat is not a fault.
+   - `wavefront_admission_wait_seconds` is now recorded in Shadow, and its
+     distribution looks reasonable (no surprise starvation behind a hot,
+     never-quiescing upstream — the [settled-ancestors starvation
      caveat](../DESIGN.md#d13--settled-ancestors-admissibility-new-in-v40)).
+     Treat it as a lower bound: the real fleet floats ahead of the virtual
+     pins, and the histogram has no mode label, so Shadow and Enforce samples
+     mix across the flip. A source shared with an `Enforce` Wavefront can drift
+     from its virtual pin (the node shows `Converging`).
    - `wavefront_ref_list_failures_total` is flat/zero per git host you care
      about (a private-CA host, or one needing provider-specific auth, will
      show failures here even though source-controller clones it fine — see
@@ -286,15 +295,18 @@ Effects:
 
    This is a visible, auditable, one-field change — no other spec field
    needs to move (see the [`Wavefront` CR](../DESIGN.md#41-the-wavefront-cr)).
-   On the first reconcile after the flip, freshly discovered/unpinned
-   sources get an **initial pin to their currently observed SHA** — a
+   On the first reconcile after the flip the virtual-pin ledger is cleared
+   (`status.virtualPins` empties) and the unpinned sources get an **initial
+   pin to their current artifact** — not to their virtual pins, which may lag
+   and would roll those nodes back to an older commit. That is a
    no-op-effect write, not a deployment change (per [initial pin on
    discovery](../DESIGN.md#35-pin-ownership-provenance-and-coexistence) and
    the [rollout plan's migration
    note](../DESIGN.md#9-rollout-plan)) — so flipping is risk-free even
    against already-running flotillas.
 4. Watch `PinAdvanced`/`InitialPin` events and `status.phase` return to
-   `Quiescent`. Flipping back to `Shadow` is **not** a safe rollback: the
+   `Quiescent`; the real pins freeze at the artifacts the sources are running,
+   not at wherever the virtual pins had got to. Flipping back to `Shadow` is **not** a safe rollback: the
    controller relinquishes every pin it owns (`PinReleased` events) and the
    whole fleet floats to its tracking refs. To hold pins where they are, set
    `spec.suspend: true` instead — it is the brake. Use `Shadow` (or the
@@ -379,7 +391,7 @@ Reasons emitted, all attached to the `Wavefront` object:
 | `InitialPin` | Normal | `Pin` | First pin of a newly discovered/matched source |
 | `PinAdvanced` | Normal | `Pin` | A subsequent pin advance |
 | `PinReleased` | Normal | `Unpin` | The controller relinquished its pin: the Wavefront flipped to Shadow, the source was de-scoped, or the Wavefront was deleted |
-| `ShadowAdmission` | Normal | `ShadowPin` | Would-be admission while `mode: Shadow` (no write performed) |
+| `ShadowAdmission` | Normal | `ShadowPin` | A virtual pin advanced while `mode: Shadow` (recorded in `status.virtualPins`; no pin written). Emitted once per advance, at-least-once |
 | `HoldDetected` | Warning | `Hold` | `spec.ref.commit` is owned by a field manager other than the controller |
 | `HoldReleased` | Normal | `Release` | A previously-held source's foreign ownership was removed; controller resumes |
 | `PinFailed` | Warning | `Pin` | A pin write attempt failed (e.g. apply/conflict error) |
@@ -464,7 +476,9 @@ before ramping past a pilot, per [the rollout plan's Phase
   dashboard: `wavefront_admissions_total{wavefront,result}`,
   `wavefront_admission_wait_seconds{wavefront}` (the [starvation
   signal](../DESIGN.md#d13--settled-ancestors-admissibility-new-in-v40)),
-  and `wavefront_blocked_nodes{wavefront,reason}`.
+  and `wavefront_blocked_nodes{wavefront,reason}`. In Shadow, `result="shadow"`
+  counts once per virtual advance and `admission_wait` is a lower bound (see the
+  [flip procedure](#shadow--enforce-flip-procedure)).
 - **Deadman / gauge-absence.** Per-Wavefront gauges
   (`wavefront_node_pin_lag_seconds`, `wavefront_blocked_nodes`,
   `wavefront_pinned_fetch_failures`) are published only by a valid, resolved

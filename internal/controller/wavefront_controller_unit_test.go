@@ -31,7 +31,9 @@ import (
 	"time"
 
 	sourcev1 "github.com/fluxcd/source-controller/api/v1"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
+	dto "github.com/prometheus/client_model/go"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -47,6 +49,7 @@ import (
 	"github.com/isometry/wavefront-controller/internal/adapter"
 	"github.com/isometry/wavefront-controller/internal/engine"
 	"github.com/isometry/wavefront-controller/internal/gitpoll"
+	"github.com/isometry/wavefront-controller/internal/graph"
 	"github.com/isometry/wavefront-controller/internal/inputs"
 	"github.com/isometry/wavefront-controller/internal/metrics"
 	"github.com/isometry/wavefront-controller/internal/pin"
@@ -869,210 +872,240 @@ func TestHoldEventsReleasePromotes21st(t *testing.T) {
 	}
 }
 
-// --- the shadow-admission ledger --------------------------------------------
+// --- the Shadow virtual-pin ledger ------------------------------------------
 
-// admissionFor builds a minimal would-be admission for the shadowAdmissions
-// tests below; ObservedRef is fixed so the rendered event text is stable.
+// admissionFor builds a minimal admission; ObservedRef is fixed so the
+// rendered event text is stable.
 func admissionFor(src types.NamespacedName, to string) engine.Admission {
 	return engine.Admission{Source: src, To: to, ObservedRef: mainRef}
 }
 
-// manyAdmissions builds n distinct would-be admissions, keyed on the same
-// deterministic source names as manyHolds, for the capped-mirror test below.
-func manyAdmissions(n int) []engine.Admission {
-	admissions := make([]engine.Admission, 0, n)
-	for i := range n {
-		admissions = append(admissions, admissionFor(manyHoldSource(i), shaA))
+// virtualPins is a status.virtualPins ledger of source -> commit pairs, given
+// in source order.
+func virtualPins(pairs ...string) []wavefrontv1alpha1.VirtualPin {
+	var out []wavefrontv1alpha1.VirtualPin
+	for i := 0; i < len(pairs); i += 2 {
+		out = append(out, wavefrontv1alpha1.VirtualPin{Source: pairs[i], Commit: pairs[i+1]})
 	}
-	return admissions
+	return out
 }
 
-// TestShadowAdmissionsNoRefireOnIdenticalPass guards against the engine
-// re-deriving the identical would-be admission every reconcile and
-// re-announcing it: the edge-trigger has to live in the controller, against
-// a status ledger, not in the engine.
-func TestShadowAdmissionsNoRefireOnIdenticalPass(t *testing.T) {
-	recorder := events.NewFakeRecorder(8)
-	instr := metrics.Nop()
-	r := &WavefrontReconciler{Recorder: recorder, Clock: time.Now, Metrics: instr}
-
-	wf := &wavefrontv1alpha1.Wavefront{Name: fleetName}
-	admissions := []engine.Admission{admissionFor(teamAKey(), shaA)}
-
-	first := &pass{wf: wf, res: &inputs.Result{}}
-	r.shadowAdmissions(first, admissions)
-
-	recorded := drain(recorder.Events)
-	if len(recorded) != 1 || !strings.Contains(recorded[0], reasonShadowAdmission) || !strings.Contains(recorded[0], shaA) {
-		t.Fatalf("pass 1 events = %v, want exactly one %s carrying %s", recorded, reasonShadowAdmission, shaA)
+// waitSamples counts the admission-wait observations recorded for fleetName.
+func waitSamples(t *testing.T, instr *metrics.Instruments) uint64 {
+	t.Helper()
+	m := &dto.Metric{}
+	if err := instr.AdmissionWaitSeconds.WithLabelValues(fleetName).(prometheus.Metric).Write(m); err != nil {
+		t.Fatalf("reading admission wait: %v", err)
 	}
-	if got := testutil.ToFloat64(instr.AdmissionsTotal.WithLabelValues(fleetName, resultShadow)); got != 1 {
-		t.Fatalf("AdmissionsTotal{shadow} after pass 1 = %v, want 1", got)
-	}
-
-	// Pass 2: the identical admission, re-derived exactly as the engine
-	// always has, must not re-announce.
-	second := &pass{wf: wf, res: &inputs.Result{}}
-	r.shadowAdmissions(second, admissions)
-
-	if recorded := drain(recorder.Events); len(recorded) != 0 {
-		t.Errorf("pass 2 (identical admission) events = %v, want none: same (Source, To) pair", recorded)
-	}
-	if got := testutil.ToFloat64(instr.AdmissionsTotal.WithLabelValues(fleetName, resultShadow)); got != 1 {
-		t.Errorf("AdmissionsTotal{shadow} after pass 2 = %v, want still 1 (no refire)", got)
-	}
+	return m.GetHistogram().GetSampleCount()
 }
 
-// TestShadowAdmissionsNewToRefires: a new To for a known Source is a new
-// (Source, To) pair by VALUE, not merely a known key, and must refire.
-func TestShadowAdmissionsNewToRefires(t *testing.T) {
+// shadowPass is a resolved Shadow pass over the given in-scope sources.
+func shadowPass(wf *wavefrontv1alpha1.Wavefront, srcs ...types.NamespacedName) *pass {
+	res := &inputs.Result{
+		Resolved: true, GraphChecked: true,
+		NodeBySource: map[types.NamespacedName][]adapter.NodeRef{},
+		Repos:        map[types.NamespacedName]*sourcev1.GitRepository{},
+		Holds:        map[types.NamespacedName]inputs.Hold{},
+	}
+	for _, src := range srcs {
+		res.NodeBySource[src] = []adapter.NodeRef{{Kind: kindKustomization, Namespace: src.Namespace, Name: src.Name}}
+		res.Repos[src] = &sourcev1.GitRepository{Namespace: src.Namespace, Name: src.Name}
+	}
+	return &pass{wf: wf, res: res}
+}
+
+// TestAdvanceVirtualRecordsEachAdvanceOnce: a virtual advance writes the
+// ledger and fires one event, one count and one wait sample; the identical
+// admission on the next pass fires nothing, because the ledger already holds
+// its To.
+func TestAdvanceVirtualRecordsEachAdvanceOnce(t *testing.T) {
 	recorder := events.NewFakeRecorder(8)
 	instr := metrics.Nop()
-	r := &WavefrontReconciler{Recorder: recorder, Clock: time.Now, Metrics: instr}
+	now := time.Unix(5000, 0)
+	r := &WavefrontReconciler{Recorder: recorder, Clock: func() time.Time { return now }, Metrics: instr}
 
-	wf := &wavefrontv1alpha1.Wavefront{Name: fleetName}
+	wf := &wavefrontv1alpha1.Wavefront{
+		Name:   fleetName,
+		Status: wavefrontv1alpha1.WavefrontStatus{VirtualPins: virtualPins(teamASource, shaA)},
+	}
+	alpha := sourceKey(alphaSource)
+	advanced := admissionFor(teamAKey(), shaB)
+	advanced.From, advanced.PendingSince = shaA, now.Add(-30*time.Second)
+	initial := admissionFor(alpha, shaA)
+	initial.Initial = true
+	admissions := []engine.Admission{initial, advanced}
 
-	first := &pass{wf: wf, res: &inputs.Result{}}
-	r.shadowAdmissions(first, []engine.Admission{admissionFor(teamAKey(), shaA)})
-	drain(recorder.Events)
+	r.advanceVirtual(shadowPass(wf, teamAKey(), alpha), admissions)
 
-	second := &pass{wf: wf, res: &inputs.Result{}}
-	r.shadowAdmissions(second, []engine.Admission{admissionFor(teamAKey(), shaB)})
-
+	if want := virtualPins(alpha.String(), shaA, teamASource, shaB); !slices.Equal(wf.Status.VirtualPins, want) {
+		t.Fatalf("virtualPins = %+v, want %+v", wf.Status.VirtualPins, want)
+	}
 	recorded := drain(recorder.Events)
-	if len(recorded) != 1 || !strings.Contains(recorded[0], shaB) {
-		t.Fatalf("events on a new To = %v, want exactly one ShadowAdmission carrying %s", recorded, shaB)
+	if len(recorded) != 2 ||
+		!strings.Contains(recorded[0], "would initial-pin "+alpha.String()+" to "+shaA) ||
+		!strings.Contains(recorded[1], reasonShadowAdmission) ||
+		!strings.Contains(recorded[1], fmt.Sprintf("would pin %s to %s (from %s", teamASource, shaB, shaA)) {
+		t.Fatalf("pass 1 events = %v, want one initial and one advance %s", recorded, reasonShadowAdmission)
 	}
 	if got := testutil.ToFloat64(instr.AdmissionsTotal.WithLabelValues(fleetName, resultShadow)); got != 2 {
-		t.Errorf("AdmissionsTotal{shadow} = %v, want 2: one per distinct (Source, To) pair", got)
+		t.Fatalf("AdmissionsTotal{shadow} = %v, want 2", got)
 	}
-	if len(wf.Status.Shadow) != 1 || wf.Status.Shadow[0].To != shaB {
-		t.Errorf("status.shadow = %+v, want one entry with To=%s", wf.Status.Shadow, shaB)
+	if got := waitSamples(t, instr); got != 1 {
+		t.Fatalf("admission wait samples = %d, want 1: only the advance carried PendingSince", got)
+	}
+
+	r.advanceVirtual(shadowPass(wf, teamAKey(), alpha), admissions)
+
+	if recorded := drain(recorder.Events); len(recorded) != 0 {
+		t.Errorf("pass 2 events = %v, want none", recorded)
+	}
+	if got := testutil.ToFloat64(instr.AdmissionsTotal.WithLabelValues(fleetName, resultShadow)); got != 2 {
+		t.Errorf("AdmissionsTotal{shadow} after pass 2 = %v, want still 2", got)
+	}
+	if got := waitSamples(t, instr); got != 1 {
+		t.Errorf("admission wait samples after pass 2 = %d, want still 1", got)
 	}
 }
 
-// TestExecuteEnforceClearsStaleShadowLedger: flipping to Enforce must clear a
-// stale status.Shadow ledger even on a pass with zero admissions — a
-// len(admissions)==0 shortcut must not bypass the clear.
-func TestExecuteEnforceClearsStaleShadowLedger(t *testing.T) {
+// TestAdvanceVirtualPrunesAndKeepsHeld: a de-scoped source leaves the ledger;
+// a held source keeps its entry and is not advanced; a source with nothing
+// virtual or real is not recorded.
+func TestAdvanceVirtualPrunesAndKeepsHeld(t *testing.T) {
 	recorder := events.NewFakeRecorder(8)
 	r := &WavefrontReconciler{Recorder: recorder, Clock: time.Now, Metrics: metrics.Nop()}
 
+	alpha, beta := sourceKey(alphaSource), sourceKey(betaSource)
 	wf := &wavefrontv1alpha1.Wavefront{
-		Name: fleetName,
-		Spec: wavefrontv1alpha1.WavefrontSpec{Mode: wavefrontv1alpha1.ModeEnforce},
-		Status: wavefrontv1alpha1.WavefrontStatus{
-			Shadow: []wavefrontv1alpha1.ShadowAdmission{{Source: teamASource, To: shaA}},
-		},
+		Name:   fleetName,
+		Status: wavefrontv1alpha1.WavefrontStatus{VirtualPins: virtualPins(beta.String(), shaA, teamASource, shaA)},
 	}
-	p := &pass{wf: wf, res: &inputs.Result{}} // no admissions this pass (the zero Evaluation)
+	p := shadowPass(wf, alpha, beta) // team-a de-scoped; alpha never pinned
+	p.res.Holds[beta] = inputs.Hold{Kind: inputs.HoldSuspend}
 
-	if err := r.execute(context.Background(), p); err != nil {
-		t.Fatalf("execute: %v", err)
-	}
-	if wf.Status.Shadow != nil {
-		t.Errorf("status.shadow = %v, want nil after flipping to Enforce, even with zero admissions this pass", wf.Status.Shadow)
-	}
-}
+	r.advanceVirtual(p, []engine.Admission{admissionFor(beta, shaB)})
 
-// TestExecuteSkipAdmissionsLeavesShadowLedgerUntouched and
-// TestExecuteSuspendLeavesShadowLedgerUntouched cover the skipAdmissions and
-// Suspend early returns: they must leave the ledger exactly as they found
-// it, so a resumed Wavefront does not refire on unchanged would-be
-// admissions.
-func TestExecuteSkipAdmissionsLeavesShadowLedgerUntouched(t *testing.T) {
-	recorder := events.NewFakeRecorder(8)
-	r := &WavefrontReconciler{Recorder: recorder, Clock: time.Now, Metrics: metrics.Nop()}
-
-	wf := &wavefrontv1alpha1.Wavefront{
-		Name: fleetName,
-		Spec: wavefrontv1alpha1.WavefrontSpec{Mode: wavefrontv1alpha1.ModeShadow},
-		Status: wavefrontv1alpha1.WavefrontStatus{
-			Shadow: []wavefrontv1alpha1.ShadowAdmission{{Source: teamASource, To: shaA}},
-		},
-	}
-	p := &pass{wf: wf, res: &inputs.Result{
-		// A selector overlap is what suppresses admissions.
-		Overlap: otherWavefront,
-		Eval:    engine.Evaluation{Initial: []engine.Admission{admissionFor(teamAKey(), shaB)}},
-	}}
-
-	if err := r.execute(context.Background(), p); err != nil {
-		t.Fatalf("execute: %v", err)
-	}
-	if len(wf.Status.Shadow) != 1 || wf.Status.Shadow[0].To != shaA {
-		t.Errorf("status.shadow = %+v, want unchanged: selector overlap suppresses admissions entirely", wf.Status.Shadow)
+	if want := virtualPins(beta.String(), shaA); !slices.Equal(wf.Status.VirtualPins, want) {
+		t.Errorf("virtualPins = %+v, want %+v", wf.Status.VirtualPins, want)
 	}
 	if recorded := drain(recorder.Events); len(recorded) != 0 {
-		t.Errorf("events = %v, want none", recorded)
+		t.Errorf("events = %v, want none: a held source does not advance", recorded)
 	}
 }
 
-func TestExecuteSuspendLeavesShadowLedgerUntouched(t *testing.T) {
+// TestAdvanceVirtualSkipsADescendantOfAnUnhealthyAncestor is the reason the
+// ledger exists: with the virtual pin standing in for the released real one,
+// a descendant behind an unhealthy ancestor is gated rather than initial-pinned.
+func TestAdvanceVirtualSkipsADescendantOfAnUnhealthyAncestor(t *testing.T) {
 	recorder := events.NewFakeRecorder(8)
 	r := &WavefrontReconciler{Recorder: recorder, Clock: time.Now, Metrics: metrics.Nop()}
 
+	alpha := sourceKey(alphaSource)
+	ancestor := adapter.NodeRef{Kind: kindKustomization, Namespace: fluxNamespace, Name: alphaSource}
 	wf := &wavefrontv1alpha1.Wavefront{
-		Name: fleetName,
-		Spec: wavefrontv1alpha1.WavefrontSpec{Mode: wavefrontv1alpha1.ModeShadow, Suspend: true},
-		Status: wavefrontv1alpha1.WavefrontStatus{
-			Shadow: []wavefrontv1alpha1.ShadowAdmission{{Source: teamASource, To: shaA}},
-		},
+		Name:   fleetName,
+		Status: wavefrontv1alpha1.WavefrontStatus{VirtualPins: virtualPins(alpha.String(), shaA, teamASource, shaA)},
 	}
-	p := &pass{wf: wf, res: &inputs.Result{
-		Eval: engine.Evaluation{Initial: []engine.Admission{admissionFor(teamAKey(), shaB)}},
-	}}
-
-	if err := r.execute(context.Background(), p); err != nil {
-		t.Fatalf("execute: %v", err)
+	g := graph.Build(map[adapter.NodeRef][]adapter.NodeRef{ancestor: nil, teamARef(): {ancestor}})
+	state := func(src types.NamespacedName) *engine.SourceState {
+		// The pin the engine sees is the virtual one; both sources advertise shaB.
+		return &engine.SourceState{Source: src, TrackingRef: mainRef, Pin: shaA, ObservedSHA: shaB, FirstObserved: time.Now()}
 	}
-	if len(wf.Status.Shadow) != 1 || wf.Status.Shadow[0].To != shaA {
-		t.Errorf("status.shadow = %+v, want unchanged: Suspend freezes all writes", wf.Status.Shadow)
-	}
-	if recorded := drain(recorder.Events); len(recorded) != 0 {
-		t.Errorf("events = %v, want none", recorded)
-	}
-}
+	ev := engine.Evaluate(g, map[adapter.NodeRef]engine.NodeInput{
+		ancestor:   {Ref: ancestor, Role: engine.RolePinned, Failing: true, AppliedSHA: shaA, Source: state(alpha)},
+		teamARef(): {Ref: teamARef(), Role: engine.RolePinned, Ready: true, AppliedSHA: shaB, Source: state(teamAKey())},
+	})
 
-// TestShadowAdmissionsCapMirrorsStatus mirrors TestHoldEventsCapMirrorsStatus,
-// reusing the same capped-mirror pattern for shadow admissions: with more
-// would-be admissions than StatusListCap, shadowAdmissions must announce
-// exactly the capped set and never refire for the truncated tail on a later,
-// unchanged pass.
-func TestShadowAdmissionsCapMirrorsStatus(t *testing.T) {
-	recorder := events.NewFakeRecorder(64)
-	instr := metrics.Nop()
-	r := &WavefrontReconciler{Recorder: recorder, Clock: time.Now, Metrics: instr}
+	r.advanceVirtual(shadowPass(wf, alpha, teamAKey()), slices.Concat(ev.Initial, ev.Admissions))
 
-	wf := &wavefrontv1alpha1.Wavefront{Name: fleetName}
-	admissions := manyAdmissions(25)
-
-	first := &pass{wf: wf, res: &inputs.Result{}}
-	r.shadowAdmissions(first, admissions)
-
+	// The ancestor's own fix is admissible; the descendant is not.
 	recorded := drain(recorder.Events)
-	if len(recorded) != wavefrontv1alpha1.StatusListCap {
-		t.Fatalf("pass 1 ShadowAdmission events = %d, want exactly %d (the capped set)",
-			len(recorded), wavefrontv1alpha1.StatusListCap)
+	if len(recorded) != 1 || !strings.Contains(recorded[0], alpha.String()) {
+		t.Fatalf("events = %v, want one %s for the ancestor only", recorded, reasonShadowAdmission)
 	}
-	if len(wf.Status.Shadow) != wavefrontv1alpha1.StatusListCap {
-		t.Fatalf("status.shadow = %d entries, want %d", len(wf.Status.Shadow), wavefrontv1alpha1.StatusListCap)
+	if want := virtualPins(alpha.String(), shaB, teamASource, shaA); !slices.Equal(wf.Status.VirtualPins, want) {
+		t.Errorf("virtualPins = %+v, want the descendant left at %s", wf.Status.VirtualPins, shaA)
 	}
-	if got := testutil.ToFloat64(instr.AdmissionsTotal.WithLabelValues(fleetName, resultShadow)); got != float64(wavefrontv1alpha1.StatusListCap) {
-		t.Fatalf("AdmissionsTotal{shadow} after pass 1 = %v, want %d", got, wavefrontv1alpha1.StatusListCap)
-	}
+}
 
-	// Pass 2: the identical 25 admissions. The bug under test: diffing
-	// against an uncapped current set would re-report the truncated tail as
-	// newly would-be on every reconcile, forever.
-	second := &pass{wf: wf, res: &inputs.Result{}}
-	r.shadowAdmissions(second, admissions)
+// TestExecuteShadowFlipSeedsVirtualPinsFromOwnedPin: on the Enforce -> Shadow
+// flip pass the ledger is empty, so it seeds from the pin settlePins is about
+// to release; otherwise the next pass would see the source unpinned and
+// initial-pin it ungated.
+func TestExecuteShadowFlipSeedsVirtualPinsFromOwnedPin(t *testing.T) {
+	repo := repoOwnedBy(alphaSource, pin.FieldManager)
+	repo.Spec.Reference = &sourcev1.GitRepositoryRef{Name: mainRef, Commit: shaA}
+	r, applied, recorder := releaseReconciler(t, nil, repo)
 
-	if recorded := drain(recorder.Events); len(recorded) != 0 {
-		t.Errorf("pass 2 (unchanged 25 admissions) events = %v, want none: no refire for capped-out sources", recorded)
+	wf := &wavefrontv1alpha1.Wavefront{
+		Name:   fleetName,
+		Spec:   wavefrontv1alpha1.WavefrontSpec{Mode: wavefrontv1alpha1.ModeShadow},
+		Status: wavefrontv1alpha1.WavefrontStatus{Pinned: ledger(alphaSource)},
 	}
-	if got := testutil.ToFloat64(instr.AdmissionsTotal.WithLabelValues(fleetName, resultShadow)); got != float64(wavefrontv1alpha1.StatusListCap) {
-		t.Errorf("AdmissionsTotal{shadow} after pass 2 = %v, want still %d (no refire)", got, wavefrontv1alpha1.StatusListCap)
+	p := shadowPass(wf, sourceKey(alphaSource))
+	p.res.Repos[sourceKey(alphaSource)] = repo
+	if err := r.execute(context.Background(), p); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if want := virtualPins(sourceKey(alphaSource).String(), shaA); !slices.Equal(wf.Status.VirtualPins, want) {
+		t.Errorf("virtualPins = %+v, want %+v", wf.Status.VirtualPins, want)
+	}
+	if !slices.Equal(*applied, []string{alphaSource}) {
+		t.Errorf("released = %v, want the owned pin still released", *applied)
+	}
+	for _, e := range drain(recorder.Events) {
+		if strings.Contains(e, reasonShadowAdmission) {
+			t.Errorf("event %q, want no %s: seeding is not an advance", e, reasonShadowAdmission)
+		}
+	}
+}
+
+// TestExecuteEnforceClearsVirtualPins: flipping to Enforce clears the ledger
+// even on a pass with zero admissions.
+func TestExecuteEnforceClearsVirtualPins(t *testing.T) {
+	r := &WavefrontReconciler{Recorder: events.NewFakeRecorder(8), Clock: time.Now, Metrics: metrics.Nop()}
+
+	wf := &wavefrontv1alpha1.Wavefront{
+		Name:   fleetName,
+		Spec:   wavefrontv1alpha1.WavefrontSpec{Mode: wavefrontv1alpha1.ModeEnforce},
+		Status: wavefrontv1alpha1.WavefrontStatus{VirtualPins: virtualPins(teamASource, shaA)},
+	}
+	if err := r.execute(context.Background(), &pass{wf: wf, res: &inputs.Result{}}); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if wf.Status.VirtualPins != nil {
+		t.Errorf("virtualPins = %v, want nil after flipping to Enforce", wf.Status.VirtualPins)
+	}
+}
+
+// TestExecuteSkipAdmissionsAndSuspendLeaveVirtualPinsUntouched: a suppressed
+// pass proves nothing and Suspend freezes all writes, so neither touches the
+// ledger or announces anything.
+func TestExecuteSkipAdmissionsAndSuspendLeaveVirtualPinsUntouched(t *testing.T) {
+	for _, overlap := range []string{"", otherWavefront} {
+		suspend := overlap == ""
+		t.Run(fmt.Sprintf("suspend=%t", suspend), func(t *testing.T) {
+			recorder := events.NewFakeRecorder(8)
+			r := &WavefrontReconciler{Recorder: recorder, Clock: time.Now, Metrics: metrics.Nop()}
+			wf := &wavefrontv1alpha1.Wavefront{
+				Name:   fleetName,
+				Spec:   wavefrontv1alpha1.WavefrontSpec{Mode: wavefrontv1alpha1.ModeShadow, Suspend: suspend},
+				Status: wavefrontv1alpha1.WavefrontStatus{VirtualPins: virtualPins(teamASource, shaA)},
+			}
+			p := shadowPass(wf, teamAKey())
+			p.res.Overlap = overlap
+			p.res.Eval = engine.Evaluation{Admissions: []engine.Admission{admissionFor(teamAKey(), shaB)}}
+
+			if err := r.execute(context.Background(), p); err != nil {
+				t.Fatalf("execute: %v", err)
+			}
+			if want := virtualPins(teamASource, shaA); !slices.Equal(wf.Status.VirtualPins, want) {
+				t.Errorf("virtualPins = %+v, want unchanged", wf.Status.VirtualPins)
+			}
+			if recorded := drain(recorder.Events); len(recorded) != 0 {
+				t.Errorf("events = %v, want none", recorded)
+			}
+		})
 	}
 }
 
