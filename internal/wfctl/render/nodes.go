@@ -17,6 +17,7 @@ limitations under the License.
 package render
 
 import (
+	"fmt"
 	"io"
 	"strconv"
 
@@ -86,12 +87,21 @@ func Nodes(w io.Writer, s *snapshot.Snapshot, o Options) error {
 		return err
 	}
 
+	out := newSink(w)
 	if footnote {
-		out := newSink(w)
 		out.line(o.Palette.Dim(unknownFootnote(s)))
-		return out.err
 	}
-	return nil
+	// Admissible is the engine's verdict and ignores the fleet-wide brakes, so
+	// say here that those nodes will not actually advance.
+	if message, suppressed := admissionsSuppressed(s); suppressed {
+		out.line(o.Palette.Dim(fmt.Sprintf(
+			"note: admissions are suppressed (%s); Admissible nodes will not advance. See `wfctl explain <node>`.", message)))
+	}
+	if s.Wavefront.Spec.Suspend {
+		out.line(o.Palette.Dim(
+			"note: pin writes are frozen (spec.suspend); Admissible nodes will not advance. See `wfctl explain <node>`."))
+	}
+	return out.err
 }
 
 // derefSource yields a node's source name, or "" for a gate.

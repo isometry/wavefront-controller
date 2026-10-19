@@ -31,11 +31,6 @@ import (
 	"github.com/isometry/wavefront-controller/internal/wfctl/snapshot"
 )
 
-// gitOpsAppliers are the field managers whose ownership of a Wavefront spec
-// field means the cluster is not where that field is decided. Changing such a
-// field by hand works for exactly as long as it takes Flux to reconcile.
-var gitOpsAppliers = []string{"kustomize-controller", "helm-controller"}
-
 // WavefrontChange flips one of the two fleet-level brakes: spec.suspend (the
 // gentle one) or spec.mode (Shadow ⇄ Enforce). See docs/runbook.md, "Modes and
 // brakes".
@@ -87,7 +82,7 @@ func (a *WavefrontChange) Plan(_ context.Context) (*Plan, error) {
 			"the controller relinquishes every pin it owns; sources float to their tracking refs "+
 				"(use `suspend` to freeze in place)")
 	}
-	if owner := snapshot.SpecOwners(wf)[field]; slices.Contains(gitOpsAppliers, owner) {
+	if owner := snapshot.SpecOwners(wf)[field]; slices.Contains(snapshot.GitOpsAppliers, owner) {
 		plan.Warnings = append(plan.Warnings, fmt.Sprintf(
 			"%s is GitOps-owned (field manager %q); Flux will revert this — change it in git", field, owner))
 	}

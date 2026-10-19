@@ -19,7 +19,10 @@ package render
 import (
 	"fmt"
 	"io"
+	"slices"
 	"strings"
+
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
 
 	wavefrontv1alpha1 "github.com/isometry/wavefront-controller/api/v1alpha1"
 	"github.com/isometry/wavefront-controller/internal/adapter"
@@ -162,7 +165,36 @@ func rootCauseDetail(s *snapshot.Snapshot, node *snapshot.NodeView) []string {
 	if s.Origin == snapshot.OriginDerive && node.ReadyMessage != "" {
 		details = append(details, "ready: "+sanitize(node.ReadyMessage))
 	}
+	// Fleet-wide brakes hold for every root cause: a fix to an Unhealthy node
+	// still will not be admitted while either is on.
+	if s.Wavefront.Spec.Suspend {
+		detail := fmt.Sprintf("wavefront: %s is suspended", s.Wavefront.Name)
+		if owner := s.Wavefront.SpecOwners[snapshot.FieldSuspend]; owner != "" {
+			detail += fmt.Sprintf(" (spec.suspend owned by %s)", sanitize(owner))
+		}
+		details = append(details, detail)
+	}
+	if message, suppressed := admissionsSuppressed(s); suppressed {
+		details = append(details, "wavefront: admissions suppressed: "+message)
+	}
 	return details
+}
+
+// admissionsSuppressed reports whether the GraphValid verdict (the derived one
+// under the derive origin, the published condition otherwise) is an overlap,
+// which makes the controller skip every admission, and its message.
+func admissionsSuppressed(s *snapshot.Snapshot) (message string, ok bool) {
+	reason, message := s.Derived.GraphReason, s.Derived.GraphMessage
+	if s.Origin != snapshot.OriginDerive {
+		cond := apimeta.FindStatusCondition(s.Wavefront.Status.Conditions, wavefrontv1alpha1.ConditionGraphValid)
+		if cond == nil {
+			return "", false
+		}
+		reason, message = cond.Reason, cond.Message
+	}
+	ok = reason == wavefrontv1alpha1.GraphValidReasonSelectorOverlap ||
+		reason == wavefrontv1alpha1.GraphValidReasonSourceOverlap
+	return sanitize(message), ok
 }
 
 // fixPath names what to do about the root cause, in the rolling-admission
@@ -172,7 +204,9 @@ func rootCauseDetail(s *snapshot.Snapshot, node *snapshot.NodeView) []string {
 // admits nothing regardless of health, a hold is never advanced regardless
 // of what the ref advertises, an unhealthy node's fix is its own next
 // admission, and an unobserved ref cannot be admitted because nothing has
-// been proposed for it yet.
+// been proposed for it yet. An Admissible node is then only as good as the
+// fleet-wide brakes, which the controller checks in this order: overlap,
+// suspend, Shadow.
 func fixPath(s *snapshot.Snapshot, node *snapshot.NodeView) string {
 	held := node.Held
 	var hold *snapshot.HoldView
@@ -181,6 +215,10 @@ func fixPath(s *snapshot.Snapshot, node *snapshot.NodeView) string {
 			hold = source.Hold
 		}
 	}
+
+	admissible := engine.State(node.State) == engine.StateAdmissible
+	overlap, overlapped := admissionsSuppressed(s)
+	wf := s.Wavefront
 
 	switch {
 	case node.Blocked != nil && engine.BlockedReason(node.Blocked.Reason) == engine.ReasonGraphCycle:
@@ -210,6 +248,28 @@ func fixPath(s *snapshot.Snapshot, node *snapshot.NodeView) string {
 
 	case engine.State(node.State) == engine.StateSettled:
 		return fmt.Sprintf("nothing to do: %s is Settled.", nodeName(node.Ref))
+
+	case admissible && overlapped:
+		return fmt.Sprintf(
+			"resolve the overlap: %s. Admissions are suppressed fleet-wide until it clears; %s is then admitted on the next pass.",
+			overlap, nodeName(node.Ref))
+
+	case admissible && wf.Spec.Suspend:
+		lift := "Run `wfctl resume`; the controller"
+		if owner := wf.SpecOwners[snapshot.FieldSuspend]; slices.Contains(snapshot.GitOpsAppliers, owner) {
+			lift = fmt.Sprintf("spec.suspend is owned by %s, so `wfctl resume` would be reverted: set it to false in git. The controller", owner)
+		}
+		return fmt.Sprintf(
+			"resume the Wavefront: spec.suspend on %s freezes every pin write, so %s is Admissible but never admitted. "+
+				"%s then admits normally from the current pin.",
+			wf.Name, nodeName(node.Ref), lift)
+
+	case admissible && wf.Spec.Mode != wavefrontv1alpha1.ModeEnforce:
+		return fmt.Sprintf(
+			"nothing to write: mode is Shadow, so the controller advances %s's virtual pin (status.virtualPins) "+
+				"on its next pass and writes no real pin. Flip to Enforce (docs/runbook.md, "+
+				"\"Shadow → Enforce flip procedure\") to admit for real.",
+			nodeName(node.Ref))
 
 	default:
 		return fmt.Sprintf(
