@@ -126,9 +126,20 @@ var _ = Describe("Snapshot provider parity", Ordered, func() {
 		Expect(statusSnap.Observed).To(BeTrue())
 		Expect(deriveSnap.Observed).To(BeFalse())
 
+		// The published members were built with no observations, so the engine
+		// called these Ready, applied-at-pin nodes Converging. A blind derive
+		// reports the same nodes as Unknown instead (nothing was observed to
+		// prove them quiescent); that is the one deliberate divergence, mapped
+		// back here so everything else still agrees node for node.
+		blind := withoutDeriveOnly(deriveSnap.Nodes)
+		for i := range blind {
+			Expect(blind[i].State).To(Equal(snapshot.StateUnknown))
+			blind[i].State = string(engine.StateConverging)
+		}
+
 		// ReadyMessage and AppliedSHA are the fields only a live read carries;
 		// everything else must agree node for node.
-		Expect(statusSnap.Nodes).To(Equal(withoutDeriveOnly(deriveSnap.Nodes)))
+		Expect(statusSnap.Nodes).To(Equal(blind))
 	})
 
 	It("layers both origins into the same waves", func() {

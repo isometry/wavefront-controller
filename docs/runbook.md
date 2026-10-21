@@ -100,7 +100,10 @@ looking authoritative. Two checks distinguish "quiet" from "dead":
 the same picture live through the controller's own pipeline, so it answers
 while the controller is down — and, while it is up, cross-checks it:
 `wfctl status --derive` prints the reported and derived pictures side by side
-and marks every disagreement. `--derive` needs cluster-wide `get` **and**
+and marks every disagreement. Without `--poll` nothing is observed, so a node
+that is Ready and applied at its pin shows state `Unknown` (the engine cannot
+prove it quiescent) rather than `Converging`; re-run with `--derive --poll` for
+the real verdict. `--derive` needs cluster-wide `get` **and**
 `list` on `Kustomization`s and `GitRepository`s — it lists the selected nodes
 but reads individual objects too (closure gates pulled in through `dependsOn`
 from outside the selector, and every source it resolves), and `list` does not

@@ -120,6 +120,9 @@ func (d *DeriveSource) Capture(ctx context.Context) (*Snapshot, error) {
 	}
 
 	snap.Nodes = deriveNodes(res)
+	if !snap.Observed {
+		markUnobserved(snap.Nodes)
+	}
 	applyWaves(snap.Nodes)
 	snap.Sources = deriveSources(res)
 	snap.Diagnostics = append(diags, structuralDiagnostics(res)...)
@@ -193,6 +196,23 @@ func deriveNodes(res *inputs.Result) []NodeView {
 		nodes = append(nodes, node)
 	}
 	return nodes
+}
+
+// markUnobserved turns the engine's "Converging" into StateUnknown where the
+// only unmet condition of its isSettled is the missing observation: a pinned
+// node that is Ready and applied at its pin. The engine reads an unobserved
+// ref as "cannot prove quiescence"; a blind capture must not present that as a
+// fact about the node. Anything else Converging (not Ready, applied != pin) is
+// true regardless of observation and stays. Held and suspended nodes never get
+// here: their isSettled tolerates an unobserved ref, so they are Settled.
+func markUnobserved(nodes []NodeView) {
+	for i := range nodes {
+		n := &nodes[i]
+		if n.State == string(engine.StateConverging) && n.Role == string(engine.RolePinned) &&
+			n.Ready && !n.Failing && n.Pin != "" && n.AppliedSHA == n.Pin {
+			n.State = StateUnknown
+		}
+	}
 }
 
 // blockedRef converts the engine's attribution to the schema's form — the
