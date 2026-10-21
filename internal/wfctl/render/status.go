@@ -83,7 +83,11 @@ func statusHeader(w io.Writer, s *snapshot.Snapshot, now time.Time) error {
 	table := newPlainTable(w)
 	table.Row("NAME:", wf.Name)
 	table.Row("MODE:", orAbsent(string(wf.Spec.Mode)))
-	table.Row("SUSPEND:", yesNo(wf.Spec.Suspend))
+	suspend := yesNo(wf.Spec.Suspend)
+	if wf.Spec.Suspend {
+		suspend += " (pin writes frozen; Admissible nodes will not advance)"
+	}
+	table.Row("SUSPEND:", suspend)
 	table.Row("GENERATION:", strconv.FormatInt(wf.Generation, 10))
 	table.Row("ORIGIN:", originCell(s))
 	table.Row("CAPTURED:", stampCell(now, &s.CapturedAt))

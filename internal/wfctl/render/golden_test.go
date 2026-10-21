@@ -81,7 +81,7 @@ var fixtures = []struct {
 		explain: []string{"flotillas/grandchild", "flotillas/held"},
 		sources: []string{"sources/held"},
 	},
-	{name: "shadow-pending"},
+	{name: "shadow-pending", explain: []string{"flotillas/beta"}},
 	{name: "cycle", explain: []string{"flotillas/a"}},
 	{name: "unobserved-derive", explain: []string{"flotillas/app"}},
 	{name: "stale-status", sources: []string{"sources/two"}},

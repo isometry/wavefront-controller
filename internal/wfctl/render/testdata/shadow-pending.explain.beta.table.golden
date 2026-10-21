@@ -1,0 +1,6 @@
+flotillas/beta is Pending: AncestorPending → ancestor flotillas/alpha
+  flotillas/alpha is Admissible
+
+root cause: flotillas/alpha is Admissible
+  source: sources/alpha
+fix: nothing to write: mode is Shadow, so the controller advances flotillas/alpha's virtual pin (status.virtualPins) on its next pass and writes no real pin. Flip to Enforce (docs/runbook.md, "Shadow → Enforce flip procedure") to admit for real.

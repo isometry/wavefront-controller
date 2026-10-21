@@ -90,6 +90,11 @@ const (
 	FieldSuspend = "spec.suspend"
 )
 
+// GitOpsAppliers are the field managers whose ownership of a Wavefront spec
+// field means the cluster is not where that field is decided. Changing such a
+// field by hand works for exactly as long as it takes Flux to reconcile.
+var GitOpsAppliers = []string{"kustomize-controller", "helm-controller"}
+
 // specOwnerFields names the SpecOwners keys, alongside the path each is read
 // from.
 var specOwnerFields = []struct {
