@@ -48,6 +48,7 @@ import (
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/cli-runtime/pkg/genericclioptions"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	wavefrontv1alpha1 "github.com/isometry/wavefront-controller/api/v1alpha1"
@@ -360,15 +361,28 @@ func (o *Options) reader() (client.Reader, error) {
 	if o.NewReader != nil {
 		return o.NewReader()
 	}
-	config, err := o.ConfigFlags.ToRESTConfig()
+	config, err := o.restConfig()
 	if err != nil {
-		return nil, fmt.Errorf("loading kubeconfig: %w", err)
+		return nil, err
 	}
 	reader, err := client.New(config, client.Options{Scheme: scheme})
 	if err != nil {
 		return nil, fmt.Errorf("connecting to the cluster: %w", err)
 	}
-	return reader, nil
+	return newListReader(reader), nil
+}
+
+// restConfig loads the kubeconfig with client-go's default QPS 5 / burst 10
+// raised to the flux CLI's 50 / 300: wfctl is a short-lived interactive
+// client, and the default throttles any command that makes more than a
+// handful of requests.
+func (o *Options) restConfig() (*rest.Config, error) {
+	config, err := o.ConfigFlags.ToRESTConfig()
+	if err != nil {
+		return nil, fmt.Errorf("loading kubeconfig: %w", err)
+	}
+	config.QPS, config.Burst = 50, 300
+	return config, nil
 }
 
 // source picks the provider this invocation reads through, and reports
