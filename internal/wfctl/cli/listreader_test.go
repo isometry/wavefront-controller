@@ -25,7 +25,6 @@ import (
 	sourcev1 "github.com/fluxcd/source-controller/api/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -56,11 +55,11 @@ func countingReader(t *testing.T, listErr error, objs ...client.Object) (r *list
 }
 
 func gitRepo(name string) *sourcev1.GitRepository {
-	return &sourcev1.GitRepository{ObjectMeta: metav1.ObjectMeta{Namespace: "flux-system", Name: name}}
+	return &sourcev1.GitRepository{Namespace: nsFlux, Name: name}
 }
 
 func TestListReaderGetsShareOneList(t *testing.T) {
-	var objs []client.Object
+	objs := make([]client.Object, 0, 50)
 	for i := range 50 {
 		objs = append(objs, gitRepo(fmt.Sprintf("repo-%d", i)))
 	}
@@ -68,7 +67,7 @@ func TestListReaderGetsShareOneList(t *testing.T) {
 
 	for i := range 50 {
 		var got sourcev1.GitRepository
-		key := client.ObjectKey{Namespace: "flux-system", Name: fmt.Sprintf("repo-%d", i)}
+		key := client.ObjectKey{Namespace: nsFlux, Name: fmt.Sprintf("repo-%d", i)}
 		if err := r.Get(t.Context(), key, &got); err != nil {
 			t.Fatalf("Get %s: %v", key, err)
 		}
@@ -84,7 +83,7 @@ func TestListReaderGetsShareOneList(t *testing.T) {
 func TestListReaderMissingIsNotFound(t *testing.T) {
 	r, _, _ := countingReader(t, nil, gitRepo("present"))
 
-	err := r.Get(t.Context(), client.ObjectKey{Namespace: "flux-system", Name: "absent"}, &sourcev1.GitRepository{})
+	err := r.Get(t.Context(), client.ObjectKey{Namespace: nsFlux, Name: "absent"}, &sourcev1.GitRepository{})
 	if !apierrors.IsNotFound(err) {
 		t.Fatalf("want NotFound, got %v", err)
 	}
@@ -102,7 +101,7 @@ func TestListReaderMemoisesListError(t *testing.T) {
 	r, lists, _ := countingReader(t, forbidden)
 
 	for i := range 5 {
-		key := client.ObjectKey{Namespace: "flux-system", Name: fmt.Sprintf("repo-%d", i)}
+		key := client.ObjectKey{Namespace: nsFlux, Name: fmt.Sprintf("repo-%d", i)}
 		if err := r.Get(t.Context(), key, &sourcev1.GitRepository{}); !apierrors.IsForbidden(err) {
 			t.Fatalf("Get %s: want Forbidden, got %v", key, err)
 		}
@@ -114,11 +113,11 @@ func TestListReaderMemoisesListError(t *testing.T) {
 
 func TestListReaderPassesOtherTypesThrough(t *testing.T) {
 	r, lists, gets := countingReader(t, nil,
-		&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: "flux-system", Name: "s"}},
-		&wavefrontv1alpha1.Wavefront{ObjectMeta: metav1.ObjectMeta{Name: "w"}},
+		&corev1.Secret{Namespace: nsFlux, Name: "s"},
+		&wavefrontv1alpha1.Wavefront{Name: "w"},
 	)
 
-	if err := r.Get(t.Context(), client.ObjectKey{Namespace: "flux-system", Name: "s"}, &corev1.Secret{}); err != nil {
+	if err := r.Get(t.Context(), client.ObjectKey{Namespace: nsFlux, Name: "s"}, &corev1.Secret{}); err != nil {
 		t.Fatal(err)
 	}
 	if err := r.Get(t.Context(), client.ObjectKey{Name: "w"}, &wavefrontv1alpha1.Wavefront{}); err != nil {
@@ -131,13 +130,13 @@ func TestListReaderPassesOtherTypesThrough(t *testing.T) {
 
 func TestListReaderReturnsCopies(t *testing.T) {
 	r, _, _ := countingReader(t, nil, gitRepo("repo"))
-	key := client.ObjectKey{Namespace: "flux-system", Name: "repo"}
+	key := client.ObjectKey{Namespace: nsFlux, Name: "repo"}
 
 	var first, second sourcev1.GitRepository
 	if err := r.Get(t.Context(), key, &first); err != nil {
 		t.Fatal(err)
 	}
-	first.Labels = map[string]string{"mutated": "yes"}
+	first.Labels = map[string]string{"mutated": valYes}
 	first.Spec.URL = "mutated"
 	if err := r.Get(t.Context(), key, &second); err != nil {
 		t.Fatal(err)

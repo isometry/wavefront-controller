@@ -103,7 +103,7 @@ func (r *listReader) listed(ctx context.Context, namespace string, kind reflect.
 	}
 	res := &listResult{}
 	r.memo[k] = res
-	if res.err = r.Reader.List(ctx, list, client.InNamespace(namespace)); res.err != nil {
+	if res.err = r.List(ctx, list, client.InNamespace(namespace)); res.err != nil {
 		return res
 	}
 	items, err := apimeta.ExtractList(list)

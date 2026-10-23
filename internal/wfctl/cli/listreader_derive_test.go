@@ -43,44 +43,41 @@ type requestCounts struct{ gets, lists map[string]int }
 func deriveFleet(t *testing.T, n int) (client.Reader, *requestCounts) {
 	t.Helper()
 	const selectorKey = "fleet"
-	objs := []client.Object{&wavefrontv1alpha1.Wavefront{
-		ObjectMeta: metav1.ObjectMeta{Name: "w"},
+	objs := make([]client.Object, 0, 1+n/10+2*n)
+	objs = append(objs, &wavefrontv1alpha1.Wavefront{
+		Name: "w",
 		Spec: wavefrontv1alpha1.WavefrontSpec{
 			Nodes: wavefrontv1alpha1.NodesSpec{
 				Kinds:    []string{kustomizev1.KustomizationKind},
-				Selector: metav1.LabelSelector{MatchLabels: map[string]string{selectorKey: "yes"}},
+				Selector: metav1.LabelSelector{MatchLabels: map[string]string{selectorKey: valYes}},
 			},
 			Mode: wavefrontv1alpha1.ModeShadow,
 		},
-	}}
+	})
 	for i := range n / 10 {
 		objs = append(objs, &kustomizev1.Kustomization{
-			ObjectMeta: metav1.ObjectMeta{Namespace: "infra", Name: fmt.Sprintf("infra-%d", i)},
+			Namespace: nsInfra, Name: fmt.Sprintf("infra-%d", i),
 		})
 	}
 	for i := range n {
 		name := fmt.Sprintf("app-%d", i)
 		objs = append(objs,
 			&sourcev1.GitRepository{
-				ObjectMeta: metav1.ObjectMeta{
-					Namespace: "flux-system", Name: name,
-					Labels: map[string]string{pin.ManagedLabel: "true"},
-				},
+				Namespace: nsFlux, Name: name,
+				Labels: map[string]string{pin.ManagedLabel: valTrue},
 				Spec: sourcev1.GitRepositorySpec{
 					URL:       "https://git.example.com/" + name + ".git",
 					Reference: &sourcev1.GitRepositoryRef{Branch: "main"},
 				},
 			},
 			&kustomizev1.Kustomization{
-				ObjectMeta: metav1.ObjectMeta{
-					Namespace: "flux-system", Name: name,
-					Labels: map[string]string{selectorKey: "yes"},
-				},
+				Namespace: nsFlux, Name: name,
+				Labels: map[string]string{selectorKey: valYes},
 				Spec: kustomizev1.KustomizationSpec{
 					SourceRef: kustomizev1.CrossNamespaceSourceReference{
-						Kind: sourcev1.GitRepositoryKind, Name: name, Namespace: "flux-system",
+						Kind: sourcev1.GitRepositoryKind, Name: name, Namespace: nsFlux,
 					},
-					DependsOn: []kustomizev1.DependencyReference{{Namespace: "infra", Name: fmt.Sprintf("infra-%d", i%(n/10))}},
+					DependsOn: []kustomizev1.DependencyReference{{Namespace: nsInfra, Name: fmt.Sprintf("infra-%d", i%(n/10))}},
 				},
 			})
 	}

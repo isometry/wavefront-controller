@@ -29,6 +29,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	wavefrontv1alpha1 "github.com/isometry/wavefront-controller/api/v1alpha1"
+	"github.com/isometry/wavefront-controller/internal/engine"
 	"github.com/isometry/wavefront-controller/internal/gitpoll"
 	"github.com/isometry/wavefront-controller/internal/pin"
 )
@@ -36,6 +37,13 @@ import (
 const (
 	pinA = "aaaa111000000000000000000000000000000000"
 	pinB = "bbbb111000000000000000000000000000000000"
+
+	nodeStale   = "stale"
+	nodeUnready = "unready"
+
+	// The engine states these tests assert, as the strings a NodeView carries.
+	stateSettled    = string(engine.StateSettled)
+	stateConverging = string(engine.StateConverging)
 )
 
 // unknownFleet holds three pinned nodes, each on its own source and none
@@ -54,8 +62,9 @@ func unknownFleet(t *testing.T) *DeriveSource {
 	}
 
 	const selectorKey = "fleet"
-	objs := []runtime.Object{&wavefrontv1alpha1.Wavefront{
-		ObjectMeta: metav1.ObjectMeta{Name: wfName},
+	objs := make([]runtime.Object, 0, 7) // the Wavefront plus a source and a Kustomization per node
+	objs = append(objs, &wavefrontv1alpha1.Wavefront{
+		Name: wfName,
 		Spec: wavefrontv1alpha1.WavefrontSpec{
 			Nodes: wavefrontv1alpha1.NodesSpec{
 				Kinds:    []string{kustomizev1.KustomizationKind},
@@ -63,17 +72,17 @@ func unknownFleet(t *testing.T) *DeriveSource {
 			},
 			Mode: wavefrontv1alpha1.ModeEnforce,
 		},
-	}}
+	})
 	for _, n := range []struct {
 		name, applied string
 		ready         bool
 	}{
 		{"ok", pinA, true},
-		{"stale", pinB, true},
-		{"unready", pinA, false},
+		{nodeStale, pinB, true},
+		{nodeUnready, pinA, false},
 	} {
 		ks := &kustomizev1.Kustomization{
-			ObjectMeta: metav1.ObjectMeta{Namespace: nsFlux, Name: n.name, Labels: map[string]string{selectorKey: "yes"}},
+			Namespace: nsFlux, Name: n.name, Labels: map[string]string{selectorKey: "yes"},
 			Spec: kustomizev1.KustomizationSpec{
 				SourceRef: kustomizev1.CrossNamespaceSourceReference{
 					Kind: sourcev1.GitRepositoryKind, Name: n.name, Namespace: nsFlux,
@@ -86,9 +95,7 @@ func unknownFleet(t *testing.T) *DeriveSource {
 		}
 		objs = append(objs,
 			&sourcev1.GitRepository{
-				ObjectMeta: metav1.ObjectMeta{
-					Namespace: nsFlux, Name: n.name, Labels: map[string]string{pin.ManagedLabel: "true"},
-				},
+				Namespace: nsFlux, Name: n.name, Labels: map[string]string{pin.ManagedLabel: "true"},
 				Spec: sourcev1.GitRepositorySpec{
 					URL:       testRepoURL,
 					Reference: &sourcev1.GitRepositoryRef{Branch: "main", Commit: pinA},
@@ -119,7 +126,7 @@ func TestBlindDeriveReportsUnknown(t *testing.T) {
 	if observed {
 		t.Fatal("a blind derive must report Observed=false")
 	}
-	want := map[string]string{"ok": StateUnknown, "stale": "Converging", "unready": "Converging"}
+	want := map[string]string{"ok": StateUnknown, nodeStale: stateConverging, nodeUnready: stateConverging}
 	for name, state := range want {
 		if got[name] != state {
 			t.Errorf("%s: want %s, got %s (all: %v)", name, state, got[name], got)
@@ -132,7 +139,7 @@ func TestObservedDeriveKeepsEngineVerdict(t *testing.T) {
 	d := unknownFleet(t)
 	now := time.Now()
 	d.Observations = map[types.NamespacedName]gitpoll.Observation{}
-	for _, name := range []string{"ok", "stale", "unready"} {
+	for _, name := range []string{"ok", nodeStale, nodeUnready} {
 		d.Observations[types.NamespacedName{Namespace: nsFlux, Name: name}] = gitpoll.Observation{
 			SHA: pinA, ObservedAt: now, FirstObserved: now, URL: testRepoURL, TrackingRef: refMain,
 		}
@@ -142,7 +149,7 @@ func TestObservedDeriveKeepsEngineVerdict(t *testing.T) {
 	if !observed {
 		t.Fatal("an injected observation set must report Observed=true")
 	}
-	want := map[string]string{"ok": "Settled", "stale": "Converging", "unready": "Converging"}
+	want := map[string]string{"ok": stateSettled, nodeStale: stateConverging, nodeUnready: stateConverging}
 	for name, state := range want {
 		if got[name] != state {
 			t.Errorf("%s: want %s, got %s (all: %v)", name, state, got[name], got)
