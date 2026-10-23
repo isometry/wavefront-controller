@@ -382,7 +382,7 @@ cluster holds more than one. Exit codes: `0` success, `1` error, `2`
 | Mode | Reads | Use it when |
 |---|---|---|
 | *(default)* | `status.members` — the per-node picture the controller published | Always, unless the controller is down or suspect |
-| `--derive` | Re-derives live through the controller's own pipeline (`internal/inputs` → `internal/engine`) | The controller is down, or you want the reported and derived pictures compared (`wfctl status --derive` prints them side by side and marks disagreement) |
+| `--derive` | Re-derives live through the controller's own pipeline (`internal/inputs` → `internal/engine`) | The controller is down, or you want the reported and derived pictures compared (`wfctl status --derive` prints them side by side and marks disagreement). With no observations a Ready node applied at its pin shows `Unknown`, not `Converging` |
 | `--derive --poll` | …plus a ref-advertisement sweep, so observed SHAs are real | You need observed SHAs and pin lag, not `?` |
 | `--from FILE` | Replays a snapshot captured by `wfctl snapshot` — no cluster at all | Triage from a ticket attachment |
 

@@ -132,7 +132,17 @@ type WavefrontView struct {
 	SpecOwners map[string]string `json:"specOwners,omitempty"`
 }
 
+// StateUnknown is the one NodeView.State the engine never produces: a derive
+// snapshot with no observation set (Observed == false) reports it for a pinned
+// node that is Ready and applied at its pin, which the engine can only call
+// Converging because nothing was observed to prove it quiescent. It is a
+// claim about this capture, not about the node.
+const StateUnknown = "Unknown"
+
 // NodeView is one evaluated node's derived state.
+//
+// State is the engine's verdict (Settled, Pending, Admissible, Converging,
+// Unhealthy) or StateUnknown.
 //
 // ReadyMessage, AppliedSHA and Failing are derive-only: status.members
 // carries neither the Ready condition's message nor its explicit-False

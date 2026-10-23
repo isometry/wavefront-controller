@@ -242,6 +242,11 @@ func fixPath(s *snapshot.Snapshot, node *snapshot.NodeView) string {
 				"so its descendants unblock as it converges.",
 			nodeName(node.Ref))
 
+	case node.State == snapshot.StateUnknown:
+		return fmt.Sprintf(
+			"re-run with `--derive --poll`: this run observed no refs, so it cannot tell whether %s has settled.",
+			nodeName(node.Ref))
+
 	case observationUnknown(s, node):
 		return "wait for the controller's next sweep to observe the ref (spec.poll.interval), " +
 			"or re-run with `--derive --poll` to list refs now."

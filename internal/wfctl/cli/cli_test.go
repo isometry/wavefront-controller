@@ -51,6 +51,14 @@ const (
 	nodeLeaf = "flotillas/leaf"
 )
 
+// Literals shared across this package's tests (goconst counts them package-wide).
+const (
+	nsFlux  = "flux-system"
+	nsInfra = "infra"
+	valYes  = "yes"
+	valTrue = "true"
+)
+
 // Error fragments each validation failure must name.
 const (
 	errCombined = "cannot be combined"
@@ -573,7 +581,7 @@ func TestPersistentFlagsAreDeclared(t *testing.T) {
 	root := NewRootCommand(binaryName)
 	for _, name := range []string{
 		"kubeconfig", "context", "namespace",
-		"wavefront", "output", "no-color", "yes",
+		"wavefront", "output", "no-color", valYes,
 		"derive", "poll", "poll-timeout", "per-host-concurrency", "from",
 	} {
 		if root.PersistentFlags().Lookup(name) == nil {

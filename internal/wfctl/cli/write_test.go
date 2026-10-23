@@ -71,8 +71,8 @@ func writeCluster() client.WithWatch {
 			},
 			&sourcev1.GitRepository{
 				Namespace: "default",
-				Name:      "infra",
-				Labels:    map[string]string{pin.ManagedLabel: "true"},
+				Name:      nsInfra,
+				Labels:    map[string]string{pin.ManagedLabel: valTrue},
 				Spec: sourcev1.GitRepositorySpec{
 					Reference: &sourcev1.GitRepositoryRef{Name: "refs/heads/main", Commit: shortSHA},
 				},
@@ -163,7 +163,7 @@ func TestWriteAppliesWithYes(t *testing.T) {
 
 	// The plan is printed even when consent is not asked for: --yes waives the
 	// question, not the explanation.
-	for _, want := range []string{"spec.suspend", "false", "true", "FIELD"} {
+	for _, want := range []string{"spec.suspend", "false", valTrue, "FIELD"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("the plan was not printed (%q missing):\n%s", want, out)
 		}

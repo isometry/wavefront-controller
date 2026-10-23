@@ -431,9 +431,9 @@ func (o *Options) writer() (client.Client, error) {
 	if o.NewClient != nil {
 		return o.NewClient()
 	}
-	config, err := o.ConfigFlags.ToRESTConfig()
+	config, err := o.restConfig()
 	if err != nil {
-		return nil, fmt.Errorf("loading kubeconfig: %w", err)
+		return nil, err
 	}
 	c, err := client.New(config, client.Options{Scheme: scheme})
 	if err != nil {

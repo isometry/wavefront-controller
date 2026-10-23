@@ -1,11 +1,11 @@
 graph LR
-  n0["flotillas/app — Converging"]
+  n0["flotillas/app — Unknown"]
   n1["flotillas/edge — Unhealthy"]
-  n2["flotillas/infra — Converging"]
+  n2["flotillas/infra — Unknown"]
   n3{{"waves/absent-gate — MissingGate"}}
   n2 --> n0
   n3 --> n0
-  style n0 stroke:#1f6feb,stroke-width:1px
+  style n0 stroke:#8b949e,stroke-width:1px
   style n1 stroke:#d1242f,stroke-width:1px
-  style n2 stroke:#1f6feb,stroke-width:1px
+  style n2 stroke:#8b949e,stroke-width:1px
   style n3 stroke:#8b949e,stroke-width:1px,stroke-dasharray:2 3

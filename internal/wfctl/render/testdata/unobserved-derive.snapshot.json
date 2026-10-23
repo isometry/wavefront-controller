@@ -72,7 +72,7 @@
         "name": "app"
       },
       "role": "Pinned",
-      "state": "Converging",
+      "state": "Unknown",
       "ready": true,
       "wave": 1,
       "source": "sources/app",
@@ -115,7 +115,7 @@
         "name": "infra"
       },
       "role": "Pinned",
-      "state": "Converging",
+      "state": "Unknown",
       "ready": true,
       "wave": 0,
       "source": "sources/infra",

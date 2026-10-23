@@ -331,7 +331,7 @@ func fixture() *Snapshot {
 		Nodes: []NodeView{{
 			Ref:         ref("web"),
 			Role:        "Pinned",
-			State:       "Settled",
+			State:       stateSettled,
 			Ready:       true,
 			DependsOn:   []adapter.NodeRef{ref("base")},
 			Source:      &source,
@@ -578,7 +578,7 @@ func statusReader(t *testing.T, memberPin, livePin string) client.Reader {
 			Members: []wavefrontv1alpha1.Member{{
 				Node:   wavefrontv1alpha1.NodeReference{Kind: kustomizev1.KustomizationKind, Namespace: nsApps, Name: nodeWeb},
 				Role:   "Pinned",
-				State:  "Settled",
+				State:  stateSettled,
 				Ready:  true,
 				Source: nsFlux + "/" + nsApps,
 				Pin:    memberPin,
